@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("dd of=/dev/nvme0n1 if=/dev/zero")

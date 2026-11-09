@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("SELECT 1 -- INTO OUTFILE '/tmp/pwn'\nSELECT 2")

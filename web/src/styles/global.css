@@ -1,0 +1,837 @@
+/* 颜色令牌全部来自 styles/tokens.css（契约 8.3.1：CSS 色值单一来源）。
+   本文件只允许出现 var(--color-*) 引用，不得写任何色值字面量。 */
+@import './tokens.css';
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  /* 契约 8.3.2：--color-bg-base 是页面底色（body / Layout.Content）。 */
+  background: var(--color-bg-base);
+  color: var(--color-text);
+  font-family: 'Inter', 'Noto Sans CJK SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+a {
+  color: var(--color-link);
+}
+
+a:hover {
+  color: var(--color-link-hover);
+}
+
+a:active {
+  color: var(--color-link-active);
+}
+
+/* 选中态：底色 + 正文色，两主题都走变量（契约 8.3.1 第 1 条）。 */
+::selection {
+  background: var(--color-bg-selected);
+  color: var(--color-text);
+}
+
+/* 滚动条颜色随主题，避免深色滚动条配浅色页面（8.3.11 第 6 条）。 */
+* {
+  scrollbar-color: var(--color-border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+/* 焦点可见性（契约 8.3.11 第 3 条）：必须有「不只靠颜色」的可见指示，
+   禁止用 outline: none + 仅改背景代替。 */
+:where(a, button, [role='button'], input, textarea, select, .chat-conv-item):focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* 代码块：背景走 --color-bg-code（浅色浅灰 / 深色深底），圆角 8px */
+.opsmind-codeblock {
+  background: var(--color-bg-code);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow: auto;
+  margin: 0;
+}
+
+.opsmind-codeblock code {
+  background: transparent;
+  color: var(--color-text);
+}
+
+/* 流式光标（FE1 使用） */
+.opsmind-stream-cursor::after {
+  content: '▍';
+  color: var(--color-primary);
+  animation: opsmind-blink 1s step-end infinite;
+}
+
+@keyframes opsmind-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 长文本列表减少渲染开销（CONTRACT.md 8.6.6） */
+.opsmind-content-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
+
+/* ========== 应用壳层 ========== */
+.app-brand {
+  padding: 18px 16px 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-header {
+  height: 48px;
+  line-height: 48px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* 七期走查：窄屏（360/375/390）曾因品牌文字 + 三态切换器挤爆顶栏——
+     品牌名竖排成单字、header scrollHeight 216 vs clientHeight 47。移动端
+     已不再渲染品牌文字、切换器改图标态；这里再钉住「单行 + 子项可收缩」，
+     任何新增控件都不会把顶栏撑成多行。 */
+  flex-wrap: nowrap;
+  min-width: 0;
+  background: var(--color-bg-shell);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+/* 子项默认可收缩（flex 子项 min-width 缺省 auto 会让文字拒绝让位）。 */
+.app-header > * {
+  min-width: 0;
+}
+
+.app-content {
+  padding: 24px;
+  overflow: auto;
+  min-height: 0;
+}
+
+.app-content--chat {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-center {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+/* ========== 对话布局 ========== */
+.chat-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chat-sidebar {
+  width: 264px;
+  flex: 0 0 264px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-shell);
+}
+
+.chat-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px 16px;
+}
+
+.chat-sidebar-error {
+  margin: 4px 12px 8px;
+}
+
+.chat-sidebar-search {
+  margin: 0 12px 8px;
+}
+
+.chat-sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+}
+
+.chat-sidebar-center {
+  padding: 16px 8px;
+}
+
+.chat-sidebar-more {
+  padding: 4px 4px 8px;
+}
+
+.chat-conv-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 8px 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+}
+
+.chat-conv-item:hover {
+  background: var(--color-bg-hover);
+}
+
+/* 契约 8.3.11 第 3 条：键盘焦点保留 outline——悬停底相对侧栏只有 1.4:1，
+   不足以单独指示焦点。 */
+.chat-conv-item:focus-visible {
+  background: var(--color-bg-hover);
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-conv-item.is-active {
+  background: var(--color-bg-active);
+  border-color: var(--color-border);
+}
+
+.chat-conv-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-conv-title {
+  font-size: 13px;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-conv-time {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+
+.chat-conv-more {
+  opacity: 0;
+}
+
+.chat-conv-item:hover .chat-conv-more,
+.chat-conv-item:focus-within .chat-conv-more {
+  opacity: 1;
+}
+
+.chat-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-container);
+}
+
+.chat-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-shell);
+  flex-wrap: wrap;
+  min-height: 52px;
+}
+
+.chat-topbar-spacer {
+  flex: 1;
+}
+
+.chat-topbar-title {
+  /* 六期打磨 sprint 5：max-width 对 inline 元素无效——补 inline-block，
+     省略号截断（title 属性给全文）才真正生效。 */
+  display: inline-block;
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+/* 六期打磨 sprint 5（走查 low）：/chat 的页头（全站唯一原缺页头的页面）。
+   语义同 PageHeader 的 h3，视觉弱化——顶栏高度有限，会话标题仍是主角。 */
+.chat-topbar-page-title {
+  margin: 0 !important;
+  font-size: 15px !important;
+  line-height: 1.4 !important;
+  color: var(--color-text-secondary) !important;
+  white-space: nowrap;
+}
+
+.chat-topbar-page-divider {
+  color: var(--color-text-tertiary);
+  user-select: none;
+}
+
+/* ========== 消息列表（虚拟化） ========== */
+.chat-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 24px 28px;
+  position: relative;
+}
+
+.chat-messages--center {
+  display: grid;
+  place-items: center;
+}
+
+.chat-messages-inner {
+  position: relative;
+  width: 100%;
+  max-width: 920px;
+  margin: 0 auto;
+}
+
+.chat-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding-bottom: 14px;
+}
+
+.chat-load-older {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+}
+
+.chat-jump-bottom {
+  position: sticky;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  box-shadow: var(--color-shadow);
+}
+
+.chat-empty {
+  max-width: 720px;
+  text-align: center;
+  padding: 24px;
+}
+
+.chat-empty-icon {
+  font-size: 44px;
+  color: var(--color-accent);
+}
+
+.chat-error-area {
+  padding: 24px;
+}
+
+.chat-stream-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 24px 0;
+}
+
+/* ========== 消息气泡 ========== */
+.chat-message {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 4px 0;
+}
+
+.chat-message--user {
+  flex-direction: row-reverse;
+}
+
+.chat-message-avatar {
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.chat-bubble {
+  min-width: 0;
+  max-width: min(100%, 780px);
+  border-radius: 10px;
+  padding: 10px 14px;
+}
+
+.chat-bubble--user {
+  background: var(--color-bg-subtle);
+  max-width: min(85%, 640px);
+}
+
+.chat-bubble--assistant {
+  background: transparent;
+  flex: 1;
+  padding-left: 0;
+}
+
+.chat-user-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-message-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.chat-message--user .chat-message-meta {
+  justify-content: flex-end;
+  margin: 4px 0 0;
+}
+
+.chat-message-error {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 悬停消息行时才出现的复制按钮（键盘焦点同样可见）。 */
+.chat-copy-button {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.chat-message:hover .chat-copy-button,
+.chat-copy-button:focus-visible {
+  opacity: 1;
+}
+
+.chat-regenerate-button {
+  margin-left: 4px;
+}
+
+.chat-reasoning {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  border-left: 2px solid var(--color-border);
+  padding-left: 10px;
+}
+
+.chat-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+/* ========== Markdown ========== */
+.opsmind-markdown {
+  word-break: break-word;
+  line-height: 1.7;
+}
+
+.opsmind-md-block > :first-child {
+  margin-top: 0;
+}
+
+.opsmind-md-block > :last-child {
+  margin-bottom: 0;
+}
+
+.opsmind-markdown p {
+  margin: 0 0 10px;
+}
+
+.opsmind-markdown h1,
+.opsmind-markdown h2,
+.opsmind-markdown h3,
+.opsmind-markdown h4 {
+  margin: 16px 0 8px;
+  font-weight: 600;
+}
+
+.opsmind-markdown ul,
+.opsmind-markdown ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.opsmind-markdown li {
+  margin: 2px 0;
+}
+
+.opsmind-markdown blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--color-border);
+  color: var(--color-text-tertiary);
+}
+
+.opsmind-inline-code {
+  background: var(--color-bg-subtle);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.92em;
+  color: var(--color-code-variable);
+}
+
+.opsmind-table-wrap {
+  overflow-x: auto;
+  margin: 10px 0;
+}
+
+.opsmind-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+.opsmind-markdown th,
+.opsmind-markdown td {
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.opsmind-markdown th {
+  background: var(--color-bg-subtle);
+}
+
+.opsmind-markdown a {
+  color: var(--color-link);
+}
+
+.opsmind-cursor {
+  color: var(--color-primary);
+  animation: opsmind-blink 1s step-end infinite;
+}
+
+/* ========== 代码块 ========== */
+.opsmind-codeblock-wrap {
+  position: relative;
+  margin: 8px 0;
+}
+
+.opsmind-codeblock-header {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  z-index: 1;
+}
+
+.opsmind-codeblock-label {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+  text-transform: lowercase;
+}
+
+.opsmind-codeblock-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background 0.15s ease;
+}
+
+.opsmind-codeblock-copy:hover {
+  color: var(--color-text);
+  background: var(--color-bg-active);
+}
+
+/* 契约 8.3.11 第 3 条：复制按钮的焦点不能只靠底色（相对代码底 2.06:1）。 */
+.opsmind-codeblock-copy:focus-visible {
+  color: var(--color-text);
+  background: var(--color-bg-active);
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.opsmind-codeblock {
+  background: var(--color-bg-code);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow: auto;
+  margin: 0;
+  max-height: 480px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.opsmind-codeblock code {
+  background: transparent;
+  color: var(--color-text);
+}
+
+/* highlight.js 颜色映射（CONTRACT.md 8.3） */
+.opsmind-codeblock .hljs-keyword,
+.opsmind-codeblock .hljs-selector-tag,
+.opsmind-codeblock .hljs-literal,
+.opsmind-codeblock .hljs-built_in,
+.opsmind-codeblock .hljs-type {
+  color: var(--color-code-keyword);
+}
+
+.opsmind-codeblock .hljs-string,
+.opsmind-codeblock .hljs-attr,
+.opsmind-codeblock .hljs-template-variable,
+.opsmind-codeblock .hljs-addition,
+.opsmind-codeblock .hljs-regexp {
+  color: var(--color-code-string);
+}
+
+.opsmind-codeblock .hljs-number,
+.opsmind-codeblock .hljs-symbol,
+.opsmind-codeblock .hljs-bullet,
+.opsmind-codeblock .hljs-meta {
+  color: var(--color-code-number);
+}
+
+.opsmind-codeblock .hljs-comment,
+.opsmind-codeblock .hljs-quote {
+  color: var(--color-code-comment);
+}
+
+.opsmind-codeblock .hljs-title,
+.opsmind-codeblock .hljs-title.function_,
+.opsmind-codeblock .hljs-section,
+.opsmind-codeblock .hljs-name {
+  color: var(--color-code-function);
+}
+
+.opsmind-codeblock .hljs-variable,
+.opsmind-codeblock .hljs-params,
+.opsmind-codeblock .hljs-property,
+.opsmind-codeblock .hljs-attribute {
+  color: var(--color-code-variable);
+}
+
+/* ========== 工具调用卡片 ========== */
+.chat-toolgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.chat-toolcall {
+  margin: 8px 0;
+}
+
+.chat-toolcall-card {
+  border-color: var(--color-border);
+}
+
+.chat-toolcall--danger .chat-toolcall-card {
+  border-color: var(--color-danger);
+  box-shadow: inset 3px 0 0 var(--color-danger);
+}
+
+.chat-toolcall--danger {
+  /* 契约 8.3.8：由半透明红改为不透明柔和底（浅色 / 深色各一套）。 */
+  background: var(--color-danger-soft);
+  border-radius: 8px;
+}
+
+.chat-toolcall .opsmind-codeblock {
+  max-height: 280px;
+}
+
+/* ========== 审批卡片 ========== */
+.chat-approval {
+  margin-top: 8px;
+  border-color: var(--color-warning);
+}
+
+.chat-approval--approved {
+  border-color: var(--color-success);
+}
+
+.chat-approval--denied,
+.chat-approval--expired {
+  border-color: var(--color-border-strong);
+  opacity: 0.92;
+}
+
+.chat-approval .opsmind-codeblock {
+  max-height: 220px;
+}
+
+/* 审批卡内的「规则详情」折叠：默认收起，只露一行标题。 */
+.chat-approval-rule-detail {
+  margin-top: 2px;
+}
+
+.chat-approval-rule-detail .ant-collapse-header {
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.chat-approval-rule-detail .ant-collapse-content-box {
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+  font-size: 12px;
+}
+
+/* ---- 六期 FE-P1：审批卡命令编辑与门限徽标 ---- */
+/* 历史改写双行：原命令（删除线）与实际执行的改写文对照。 */
+.chat-approval-command-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-approval-command-text {
+  margin: 2px 0 0;
+  font-family: var(--font-mono, 'JetBrains Mono', 'Fira Code', monospace);
+  font-size: 12.5px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.chat-approval-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 门限四档中的危险档（免审批）：统一红字（契约 8.7）。 */
+.approval-mode-danger-text {
+  color: var(--color-danger);
+}
+
+.approval-mode-option {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+/* ---- 六期 FE-P1：深度思考块（ReasoningBlock） ---- */
+.chat-reasoning-block {
+  margin: 2px 0 6px;
+}
+
+.chat-reasoning-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.chat-reasoning-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-tertiary);
+  font-size: 12.5px;
+  padding: 0 4px;
+}
+
+.chat-reasoning-copy {
+  color: var(--color-text-tertiary);
+}
+
+.chat-reasoning-block .chat-reasoning {
+  margin-top: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* ---- 六期 FE-P1：ChatPage 头部门限来源小字 / 设置页说明行 ---- */
+.chat-topbar-mode-source {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.settings-approval-mode-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--color-border-subtle);
+}
+
+.settings-approval-mode-item:last-of-type {
+  border-bottom: none;
+}
+
+/* ========== Composer ========== */
+.chat-composer {
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-shell);
+  padding: 10px 16px 12px;
+}
+
+.chat-composer-hint {
+  font-size: 12px;
+  color: var(--color-warning);
+  margin-bottom: 6px;
+}
+
+.chat-composer-tip {
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .chat-messages {
+    padding: 16px 12px 20px;
+  }
+
+  .chat-topbar {
+    padding: 8px 12px;
+  }
+
+  .chat-topbar-title {
+    max-width: 140px;
+  }
+
+  .chat-bubble--user {
+    max-width: 92%;
+  }
+}

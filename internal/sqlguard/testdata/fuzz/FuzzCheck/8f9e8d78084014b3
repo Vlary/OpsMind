@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("WITH x AS (DELETE FROM t) SELECT 1")

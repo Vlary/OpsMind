@@ -1,0 +1,134 @@
+/* FE2：资源管理页（登录、服务器、数据库、模型、审计）样式。
+   色值一律引用 tokens.css 的语义变量（CONTRACT.md 8.3.1：本文件不得出现
+   十六进制 / rgb 字面量）；两套主题同名变量由 tokens.css 提供。 */
+
+.opsmind-admin-page {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.opsmind-admin-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.opsmind-admin-toolbar-grow {
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.opsmind-admin-meta {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.opsmind-admin-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.opsmind-admin-cell-title {
+  font-weight: 600;
+}
+
+.opsmind-admin-cell-sub {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.opsmind-admin-url {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.opsmind-admin-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.opsmind-admin-section-title {
+  margin: 16px 0 8px;
+}
+
+.opsmind-sql-editor textarea {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.opsmind-admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.opsmind-admin-actions .ant-btn {
+  padding-inline: 4px;
+}
+
+.opsmind-admin-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.opsmind-login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 20% 20%, var(--color-primary-glow), transparent 45%),
+    radial-gradient(circle at 80% 75%, var(--color-accent-glow), transparent 40%),
+    var(--color-bg-base);
+}
+
+.opsmind-login-card {
+  width: 100%;
+  max-width: 400px;
+}
+
+.opsmind-login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.opsmind-login-logo {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--color-bg-subtle);
+  color: var(--color-primary);
+  font-size: 20px;
+}
+
+@media (max-width: 768px) {
+  .opsmind-admin-toolbar {
+    align-items: stretch;
+  }
+
+  .opsmind-admin-toolbar-grow {
+    flex-basis: 100%;
+  }
+}

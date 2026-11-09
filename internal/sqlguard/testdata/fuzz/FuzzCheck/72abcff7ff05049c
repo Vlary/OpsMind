@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("UPDATE t SET a = 1")

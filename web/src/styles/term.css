@@ -1,0 +1,158 @@
+/* F1：终端 / 回放 / RDP 页样式。
+   色值一律引用 tokens.css 的语义变量（CONTRACT.md 8.3.1：本文件不得出现
+   十六进制 / rgb 字面量）；两套主题同名变量由 tokens.css 提供。 */
+
+/* ===== 终端（实时）===== */
+
+.opsmind-term-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.opsmind-term-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.opsmind-term-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.opsmind-term-header-meta-code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.opsmind-term-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-subtle);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.opsmind-term-status--alert {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.opsmind-term-viewport {
+  /* 代码块底色（契约 8.3.2/8.3.3 的 --color-bg-code），xterm 自身透明背景。 */
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  min-height: 380px;
+  height: 56vh;
+  overflow: hidden;
+}
+
+.opsmind-term-viewport .xterm {
+  height: 100%;
+  padding: 4px;
+}
+
+/* xterm 自带的 `.xterm-viewport` 规则把滚动层底色写死为纯黑（不受
+   xterm theme 控制）：浅色主题下会在画布边缘露出一圈黑框（实测截图），
+   深色下也与 `--color-bg-code` 略有偏差。这里用语义变量覆盖为代码底色，
+   两主题都与画布一致。 */
+.opsmind-term-viewport .xterm .xterm-viewport,
+.opsmind-player-viewport .xterm .xterm-viewport {
+  background-color: var(--color-bg-code);
+}
+
+/* ===== 回放播放器 ===== */
+
+.opsmind-player-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.opsmind-player-viewport {
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  overflow: auto;
+  max-height: 60vh;
+}
+
+.opsmind-player-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.opsmind-player-time {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  min-width: 118px;
+  text-align: right;
+}
+
+.opsmind-player-slider {
+  flex: 1 1 260px;
+  min-width: 200px;
+}
+
+/* ===== RDP ===== */
+
+.opsmind-rdp-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.opsmind-rdp-stage {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  /* RDP 画布即 xterm 之外的另一块「内容视口」，用代码底色承载远端帧缓冲。 */
+  background: var(--color-bg-code);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  min-height: 420px;
+  overflow: hidden;
+}
+
+.opsmind-rdp-stage canvas {
+  display: block;
+}
+
+.opsmind-rdp-stage:fullscreen {
+  padding: 0;
+  border-radius: 0;
+  border: none;
+}
+
+.opsmind-rdp-idle-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  /* 覆盖在远端帧缓冲（亮度不受本站主题控制）上：必须用两主题同值的
+     overlay-media 令牌（契约 8.3.7）。 */
+  background: var(--color-overlay-media-bg);
+  color: var(--color-overlay-media-text);
+  font-size: 14px;
+  text-align: center;
+  padding: 24px;
+}

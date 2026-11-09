@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("REPLACE INTO t VALUES (1)")

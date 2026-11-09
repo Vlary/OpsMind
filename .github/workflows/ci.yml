@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aiops
+          POSTGRES_PASSWORD: aiops
+          POSTGRES_DB: aiops
+        ports:
+          - 65432:5432
+        options: >-
+          --health-cmd "pg_isready -U aiops -d aiops"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://aiops:aiops@127.0.0.1:65432/aiops?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: smoke
+        run: go run ./cmd/smoke
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: install
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: generate api types
+        run: pnpm -C web gen:api
+
+      - name: verify generated types are committed
+        run: git diff --exit-code -- web/src/api/schema.d.ts
+
+      - name: typecheck
+        run: pnpm -C web typecheck
+
+      - name: lint
+        run: pnpm -C web lint
+
+      # 颜色字面量门禁（CONTRACT.md 8.3.1 第 1 条 / 9.5 第 6 条）：
+      # 除白名单三文件（tokens.css / theme.ts / palette.ts）外不得出现
+      # 色值字面量；图腾三态切换与组件级 token 都靠它防止回退。
+      - name: color literal gate
+        run: pnpm -C web check:colors
+
+      - name: test
+        run: pnpm -C web test
+
+      - name: build
+        run: pnpm -C web build
+
+      # 首屏 JS gzip 体积门禁（README 8.7 预算 ≤ 150KB，已知限制 19 的修复）：
+      # index.html 直接引用的 JS chunk gzip 总和超标即失败，防止懒加载边界
+      # 与分包策略被无意劣化。
+      - name: bundle size gate
+        run: pnpm -C web check:bundle-size
