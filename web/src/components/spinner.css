@@ -1,0 +1,32 @@
+.opsmind-spinner {
+  display: inline-block;
+  border-radius: 50%;
+  border: 2px solid var(--color-border-strong);
+  border-top-color: var(--color-primary);
+  animation: opsmind-spinner-rotate 0.8s linear infinite;
+  vertical-align: middle;
+}
+
+@keyframes opsmind-spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Markdown 渲染 chunk 加载占位：给足预期高度，避免零高空白与就绪后的
+   虚拟行高度突变；轻微脉冲提示内容在途。 */
+.markdown-loading {
+  min-height: 3.2em;
+  border-radius: 6px;
+  animation: markdown-loading-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes markdown-loading-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}

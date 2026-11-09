@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("WITH x AS (SELECT 1 AS n) SELECT * FROM x")

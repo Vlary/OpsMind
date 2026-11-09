@@ -1,0 +1,217 @@
+/*
+ * CONTRACT.md 8.3：语义颜色令牌的唯一 CSS 来源（唯一允许色值字面量的三个
+ * 文件之一，另两个是 styles/theme.ts 与 styles/palette.ts）。
+ *
+ * 规则（8.3.1）：
+ * 1. 浅色为默认，`:root` 即浅色；深色只认 `:root[data-theme='dark']`。
+ * 2. 任何令牌必须在两套选择器里同时给出取值，键名完全相同（唯一例外是
+ *    `--color-overlay-media-*`：它们压在亮度未知的远端画面/终端画布上，
+ *    两主题同值才可读，见 8.3.7）。
+ * 3. 页面、组件、图表、终端一律引用这里的变量，不得自带色值。
+ * 4. `color-scheme` 必须与当前主题一致，否则浏览器会用错滚动条/表单控件配色。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- 表面（8.3.2） ---- */
+  --color-bg-base: #f0f3f8;
+  --color-bg-container: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-bg-shell: #ffffff;
+  --color-bg-subtle: #e9edf4;
+  --color-bg-hover: #e9eef7;
+  --color-bg-active: #e4e9f2;
+  --color-bg-selected: #e3edfd;
+  --color-bg-code: #f6f8fa;
+
+  /* ---- 文本（8.3.2 逐底色实测，最小 4.96；禁用态 3.34） ---- */
+  --color-text: #1f2430;
+  --color-text-secondary: #4a5163;
+  --color-text-tertiary: #5b6373;
+  --color-text-placeholder: #5b6373;
+  --color-text-disabled: #767e91;
+  --color-text-inverse: #ffffff;
+
+  /* ---- 语义色（8.3.2） ---- */
+  --color-primary: #1a56c4;
+  --color-primary-hover: #14479f;
+  --color-primary-active: #0d3b9e;
+  --color-info: #0b6e7f;
+  --color-success: #146c2e;
+  --color-warning: #8a5a00;
+  --color-danger: #c0272d;
+  --color-accent: #6d28d9;
+  --color-focus-ring: #1a56c4;
+
+  /* ---- 链接（与 antd colorLink 同源，8.3.8） ---- */
+  --color-link: #0b6e7f;
+  --color-link-hover: #0a6373;
+  --color-link-active: #08505c;
+
+  /* ---- 边框（8.3.2：border 为装饰线，border-strong 为可操作边界） ---- */
+  --color-border-strong: #767e91;
+  --color-border: #c8d0dd;
+  --color-border-subtle: #e1e7f0;
+
+  /* ---- 柔和底（8.3.4：同行取背景 + 同语义前景，不得跨行混搭） ---- */
+  --color-primary-soft: #e8effc;
+  --color-info-soft: #e8fafd;
+  --color-success-soft: #e9fbef;
+  --color-warning-soft: #fff6e5;
+  --color-danger-soft: #fbeaea;
+  --color-accent-soft: #f0e9fb;
+
+  /* ---- 图表折线（8.3.5a：两两 ΔE ≥ 40，且每卡有文字标题） ---- */
+  --color-chart-1: #1a56c4;
+  --color-chart-2: #146c2e;
+  --color-chart-3: #8a5a00;
+  --color-chart-4: #9d174d;
+  --color-chart-5: #0b6e7f;
+  --color-chart-6: #6d28d9;
+
+  /* ---- 代码高亮（8.3.5b：全部在 --color-bg-code 上实测 ≥ 4.5） ---- */
+  --color-code-keyword: #6d28d9;
+  --color-code-string: #146c2e;
+  --color-code-number: #a35200;
+  --color-code-comment: #5b6373;
+  --color-code-function: #1a56c4;
+  --color-code-variable: #8a5a00;
+
+  /* ---- 阴影/遮罩/媒体浮层（8.3.7） ---- */
+  --color-shadow: 0 4px 16px rgb(15 23 42 / 12%);
+  --color-scrim: rgb(15 23 42 / 45%);
+  /* 覆盖在远端帧缓冲 / xterm 画布上，底层亮度不受本站主题控制，故两主题同值。 */
+  --color-overlay-media-bg: rgb(15 23 42 / 72%);
+  --color-overlay-media-text: #f8fafc;
+  --color-primary-glow: rgb(26 86 196 / 12%);
+  --color-accent-glow: rgb(109 40 217 / 10%);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* ---- 表面（8.3.3：container 与 base 同值，层级靠描边 + elevated 表达） ---- */
+  --color-bg-base: #1e1e2e;
+  --color-bg-container: #1e1e2e;
+  --color-bg-elevated: #313244;
+  --color-bg-shell: #181825;
+  --color-bg-subtle: #313244;
+  --color-bg-hover: #313244;
+  --color-bg-active: #383b4d;
+  --color-bg-selected: #383b4d;
+  --color-bg-code: #11111b;
+
+  /* ---- 文本（8.3.3 逐底色实测，最小 4.96；禁用态 3.49） ---- */
+  --color-text: #cdd6f4;
+  --color-text-secondary: #bac2de;
+  --color-text-tertiary: #a6adc8;
+  --color-text-placeholder: #a6adc8;
+  --color-text-disabled: #8b90a6;
+  --color-text-inverse: #1e1e2e;
+
+  /* ---- 语义色（8.3.3） ---- */
+  --color-primary: #89b4fa;
+  --color-primary-hover: #a8c9fc;
+  --color-primary-active: #82adf2;
+  --color-info: #74c7ec;
+  --color-success: #a6e3a1;
+  --color-warning: #f9e2af;
+  --color-danger: #f38ba8;
+  --color-accent: #cba6f7;
+  --color-focus-ring: #89b4fa;
+
+  /* ---- 链接（8.3.8） ---- */
+  --color-link: #74c7ec;
+  --color-link-hover: #9fd8f2;
+  --color-link-active: #5aa6c6;
+
+  /* ---- 边框 ---- */
+  --color-border-strong: #9399b2;
+  --color-border: #45475a;
+  --color-border-subtle: #313244;
+
+  /* ---- 柔和底（8.3.4） ---- */
+  --color-primary-soft: #222c3f;
+  --color-info-soft: #1f3038;
+  --color-success-soft: #243027;
+  --color-warning-soft: #38331f;
+  --color-danger-soft: #3a232c;
+  --color-accent-soft: #2e2740;
+
+  /* ---- 图表折线（8.3.5a） ---- */
+  --color-chart-1: #89b4fa;
+  --color-chart-2: #a6e3a1;
+  --color-chart-3: #f9e2af;
+  --color-chart-4: #fab387;
+  --color-chart-5: #74c7ec;
+  --color-chart-6: #cba6f7;
+
+  /* ---- 代码高亮（8.3.5b：注释色从 #6c7086 提亮，原值在代码底上仅 3.84） ---- */
+  --color-code-keyword: #cba6f7;
+  --color-code-string: #a6e3a1;
+  --color-code-number: #fab387;
+  --color-code-comment: #9399b2;
+  --color-code-function: #89b4fa;
+  --color-code-variable: #f9e2af;
+
+  /* ---- 阴影/遮罩/媒体浮层（8.3.7） ---- */
+  --color-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+  --color-scrim: rgb(0 0 0 / 45%);
+  /* 两主题同值，见上方浅色块注释。 */
+  --color-overlay-media-bg: rgb(15 23 42 / 72%);
+  --color-overlay-media-text: #f8fafc;
+  --color-primary-glow: rgb(137 180 250 / 14%);
+  --color-accent-glow: rgb(203 166 247 / 10%);
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * antd 预设色阶桥（Tag filled / Button 状态兜底色）。
+ *
+ * 为什么需要这一层：antd v6 的 `defaultAlgorithm` 在运行时**用 seed 色板
+ * 重新生成** `green1..10` / `gold1..10` 等彩色阶梯，并覆盖 theme.ts 里显式
+ * 给出的同名键（`theme/themes/default/index.js:13-30` 的
+ * `{...token, ...colorPalettes}`，色板在后）。实测：`getDesignToken` 返回钉死
+ * 值，但浏览器 `<style>` 里仍是默认 `#f6ffed`，于是深色下 green/gold Tag 变成
+ * 浅底浅字（截图复现，不可读）。因此 theme.ts 里不再重复声明这些键（写了也
+ * 会被算法覆盖、且会让 themeTokens 测试误以为生效），改由这里覆盖。
+ *
+ * 作用域为什么是 `.css-var-*` 而不只是 `:root`：每个 `<ConfigProvider>` 会生成
+ * 自己的 `css-var-_r_N_` 类并挂在实际容器元素上（AppShell 内层一个、AntdAppRoot
+ * 外层一个）。变量继承以最近祖先为准，只覆盖 `html` 会被内层作用域盖掉
+ * （实测 Tag 仍取 #f6ffed）。这里同时覆盖 `html` 与所有 css-var 容器。
+ *
+ * 值只引用 `--color-*`，不重复定义色值（8.3.1 第 1 条的单一来源仍成立）；
+ * `!important` 作用面限于这 24 个由 antd 生成的桥接变量，不触碰业务样式。
+ * 覆盖的 6 组 = RiskBadge / StatusTag / runtimeBadge / 容器状态实际使用的
+ * `green|gold|red|blue|cyan|geekblue`（契约 8.3.8 末段）。
+ * ---------------------------------------------------------------------------
+ */
+:root,
+[class*='css-var-'] {
+  --ant-green-1: var(--color-success-soft) !important;
+  --ant-green-3: var(--color-border-strong) !important;
+  --ant-green-6: var(--color-success) !important;
+  --ant-green-7: var(--color-success) !important;
+  --ant-gold-1: var(--color-warning-soft) !important;
+  --ant-gold-3: var(--color-border-strong) !important;
+  --ant-gold-6: var(--color-warning) !important;
+  --ant-gold-7: var(--color-warning) !important;
+  --ant-red-1: var(--color-danger-soft) !important;
+  --ant-red-3: var(--color-border-strong) !important;
+  --ant-red-6: var(--color-danger) !important;
+  --ant-red-7: var(--color-danger) !important;
+  --ant-blue-1: var(--color-primary-soft) !important;
+  --ant-blue-3: var(--color-border-strong) !important;
+  --ant-blue-6: var(--color-primary) !important;
+  --ant-blue-7: var(--color-primary) !important;
+  --ant-cyan-1: var(--color-info-soft) !important;
+  --ant-cyan-3: var(--color-border-strong) !important;
+  --ant-cyan-6: var(--color-info) !important;
+  --ant-cyan-7: var(--color-info) !important;
+  --ant-geekblue-1: var(--color-accent-soft) !important;
+  --ant-geekblue-3: var(--color-border-strong) !important;
+  --ant-geekblue-6: var(--color-accent) !important;
+  --ant-geekblue-7: var(--color-accent) !important;
+}

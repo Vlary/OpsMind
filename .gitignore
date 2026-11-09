@@ -1,0 +1,29 @@
+# 运行时数据（master.key）
+data/*
+!data/.gitkeep
+
+# 前端
+web/node_modules/
+web/dist/
+web/.vite/
+web/coverage/
+node_modules/
+
+# 环境变量
+.env
+.env.local
+*.local
+
+# Go
+*.test
+*.out
+/aiops
+/bin/
+/tmp/
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.log

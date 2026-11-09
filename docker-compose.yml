@@ -1,0 +1,93 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aiops
+      POSTGRES_PASSWORD: aiops
+      POSTGRES_DB: aiops
+    ports:
+      - "127.0.0.1:65432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aiops -d aiops"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  guacd:
+    # 二期 RDP 网关边车：浏览器(WS) ↔ app(Go 透传) ↔ guacd(TCP 4822, FreeRDP)。
+    # 镜像版本与调研实测一致（guacamole 1.5.0，协议 VERSION_1_5_0）。
+    # 镜像无 ENTRYPOINT、CMD 为 "/bin/sh -c /opt/guacamole/sbin/guacd -b
+    # 0.0.0.0 -L $GUACD_LOG_LEVEL -f"（实测 docker inspect），因此 command
+    # 必须整体覆盖为完整命令行；-f 前台。
+    # 实测 guacd CLI 无 -r 选项（unrecognized option: r）：录制目录是
+    # connect 的 recording-path 连接参数（契约 4.14），Go 网关按
+    # RdpRecordingsDir 注入；因此 guacd 与 app 以相同路径挂同一卷
+    # （/app/rdp-recordings），两侧路径一致，guacd 写入即 app 可见。
+    # 不引入 Java Guacamole webapp/数据库；协议语义由 guacd 处理，Go 侧纯透传。
+    image: guacamole/guacd:1.5.0
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -c
+      - /opt/guacamole/sbin/guacd -b 0.0.0.0 -L "$$GUACD_LOG_LEVEL" -f
+    environment:
+      GUACD_LOG_LEVEL: info
+    volumes:
+      - rdp-recordings:/app/rdp-recordings
+    healthcheck:
+      # guacd 无 HTTP 健康端点；实测镜像内无 bash（仅 dash，不支持
+      # /dev/tcp），用镜像自带的 nc 探测 4822 握手端口。
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4822 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    ports:
+      # 仅绑环回，供宿主机 `go run` 本地开发时通过
+      # AIOPS_GUACD_ADDR=127.0.0.1:14822 连接；容器内 app 走 guacd:4822。
+      - "127.0.0.1:14822:4822"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      guacd:
+        condition: service_healthy
+    environment:
+      AIOPS_ADDR: ":8080"
+      # 栈内默认 DSN 指向 compose 的 db 服务（本地部署验证用，非生产凭据）；
+      # 也可通过环境变量 DATABASE_URL/AIOPS_DATABASE_URL 覆盖。
+      AIOPS_DATABASE_URL: postgres://aiops:aiops@db:5432/aiops?sslmode=disable
+      # 浏览器从宿主机 18081 访问，Origin 校验必须与对外端口一致。
+      AIOPS_ALLOWED_ORIGINS: ${AIOPS_ALLOWED_ORIGINS:-http://localhost:18081}
+      AIOPS_PUBLIC_ORIGIN: ${AIOPS_PUBLIC_ORIGIN:-http://localhost:18081}
+      AIOPS_WEB_DIR: /app/web/dist
+      AIOPS_DATA_DIR: /app/data
+      # 留空时首次启动自动生成 24 字符随机密码并打印到容器 stdout（仅一次）；
+      # 严禁把真实密码写进 compose 或镜像。
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # 留空时从 /app/data/master.key（持久卷）读取或自动生成（0600）；
+      # 提供值时必须是 base64 的 32 字节密钥。不写真实密钥进镜像。
+      AIOPS_MASTER_KEY: ${AIOPS_MASTER_KEY:-}
+      # RDP 网关：guacd 边车地址与 .guac 录制目录（与 guacd 服务共享卷）。
+      # guacd 不可达只影响 RDP 端点（503 GUACD_UNAVAILABLE），进程本身可运行；
+      # 不用 RDP 的部署可整体移除 guacd 服务与本条依赖。
+      AIOPS_GUACD_ADDR: guacd:4822
+      AIOPS_RDP_RECORDINGS_DIR: /app/rdp-recordings
+    ports:
+      # 宿主机 18081 → 容器 8080（部署验证约定端口）。
+      # 绑 0.0.0.0 以便局域网访问；生产环境仍建议经反向代理。
+      - "18081:8080"
+    volumes:
+      - aiops-data:/app/data
+      - rdp-recordings:/app/rdp-recordings
+
+volumes:
+  pgdata:
+  aiops-data:
+  rdp-recordings:

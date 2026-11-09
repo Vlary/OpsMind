@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM t WHERE n<10) SELECT * FROM t")

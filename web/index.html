@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 契约 8.3.11 第 6 条：两套主题都支持，不得写死 dark。 -->
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>云枢 OpsMind</title>
+    <!--
+      CONTRACT.md 8.3.12：首次绘制前同步确定主题，避免闪白/闪黑（FOUC）。
+      必须在 <body> 渲染前、且不能异步——任何「等 React 挂载后再设」的做法
+      都会先画一帧错误主题。
+
+      逻辑与 src/styles/themePreference.ts 的 readStoredPreference /
+      resolveTheme 一一对应（内联脚本无法 import 模块，故此处复写）：
+        - 键名 opsmind.theme，取值 light | dark | system
+        - 缺失 / 非法值 / localStorage 抛异常（隐私模式）一律按 light
+        - system 跟随 prefers-color-scheme
+      全仓无 CSP 配置，内联脚本可直接执行；将来引入 CSP 时必须为它加
+      nonce 或 sha256，不得改回异步取主题。
+    -->
+    <script>
+      (function () {
+        var pref = 'light';
+        try {
+          var raw = window.localStorage.getItem('opsmind.theme');
+          if (raw === 'light' || raw === 'dark' || raw === 'system') {
+            pref = raw;
+          }
+        } catch (e) {
+          pref = 'light';
+        }
+        var dark = false;
+        try {
+          dark =
+            typeof window.matchMedia === 'function' &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches;
+        } catch (e) {
+          dark = false;
+        }
+        var resolved = pref === 'system' ? (dark ? 'dark' : 'light') : pref;
+        var root = document.documentElement;
+        root.setAttribute('data-theme', resolved);
+        root.setAttribute('data-theme-preference', pref);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

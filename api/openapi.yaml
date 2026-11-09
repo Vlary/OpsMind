@@ -1,0 +1,6302 @@
+openapi: 3.1.0
+info:
+  title: 云枢 OpsMind API
+  version: 1.0.0
+  description: |
+    云枢 OpsMind 单管理员 AI 运维控制台 API。
+
+    - 除 `POST /api/auth/login` 与 `GET /healthz` 外，所有端点要求 `opsmind_session` Cookie。
+    - 所有非 GET/HEAD 的 `/api/*` 请求必须携带与允许列表精确匹配的 `Origin` 头；缺失或不匹配返回 `403 ORIGIN_FORBIDDEN`。
+    - 成功响应为 JSON；失败统一为 `{"error":{"code","message","request_id","details"?}}`。
+    - `/api/chat` 成功时返回 `text/event-stream`，不使用压缩，事件格式见 `x-sse-events` 与 `docs/CONTRACT.md` 第 6 节。
+    - 密钥字段只写不读：请求可包含 `password|private_key|passphrase|api_key`，任何响应都不会包含明文或密文。
+  contact:
+    name: 云枢 OpsMind
+  license:
+    name: Proprietary
+servers:
+  - url: /
+    description: 同源部署
+security:
+  - cookieAuth: []
+tags:
+  - name: auth
+    description: 登录、登出、当前用户
+  - name: servers
+    description: SSH 服务器资产
+  - name: databases
+    description: 外部数据库与只读查询
+  - name: providers
+    description: 大模型供应商
+  - name: conversations
+    description: 会话、消息、工具调用
+  - name: chat
+    description: 对话流
+  - name: approvals
+    description: 命令审批
+  - name: audit
+    description: 只追加审计日志
+  - name: ops
+    description: 运维辅助
+  - name: monitor
+    description: 监控指标采集与仪表盘（五期）
+  - name: alerts
+    description: 告警规则、事件与通知渠道（五期）
+  - name: diagnosis
+    description: AI 自诊断会话（五期）
+  - name: inspection
+    description: 定时巡检任务与报告（五期）
+  - name: batch
+    description: 批量操作任务（五期）
+  - name: settings
+    description: 系统设置（六期：审批门限）
+  - name: terminal
+    description: 堡垒机式终端会话与回放
+  - name: rdp
+    description: 堡垒机式 RDP 远程桌面网关
+  - name: health
+    description: 健康检查
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: 健康检查
+      description: 检查进程与 PostgreSQL。数据库不可达时返回 503。无需鉴权，不校验 Origin。
+      security: []
+      responses:
+        '200':
+          description: 健康
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: 主库不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: 管理员登录
+      description: 密码校验成功后设置 `opsmind_session` Cookie。按 IP 限流（5 次/分钟）。必须携带 Origin。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: '登录成功；`Set-Cookie: opsmind_session=...; HttpOnly; SameSite=Lax; Path=/`'
+          headers:
+            Set-Cookie:
+              description: 会话 Cookie
+              schema:
+                type: string
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 退出登录
+      description: 删除当前会话并清除 Cookie。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: 已退出
+          headers:
+            Set-Cookie:
+              description: 过期 Cookie
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: 当前登录用户
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/password:
+    post:
+      tags: [auth]
+      operationId: changePassword
+      summary: 修改管理员密码
+      description: |
+        校验 `old_password` 后将密码更新为 `new_password`，写审计
+        `auth.password_changed`；成功后吊销该用户全部会话（含当前会话），
+        清除 `opsmind_session` Cookie，客户端须引导重新登录。
+        `new_password` 长度 1..72 字节（bcrypt 明文上限）；`old_password`
+        错误返回 401 并写审计 `auth.password_change_failed`。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '204':
+          description: 已修改；`Set-Cookie` 清除会话 Cookie
+          headers:
+            Set-Cookie:
+              description: 过期 Cookie
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/servers:
+    get:
+      tags: [servers]
+      operationId: listServers
+      summary: 服务器列表
+      responses:
+        '200':
+          description: 服务器列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [servers]
+      operationId: createServer
+      summary: 新增服务器
+      description: 凭据字段只写不读。os=linux 时 auth_method 只能 password/private_key（SSH）；os=windows 还可用 password_ntlm/password_basic（WinRM，端口 winrm_port，默认 5985）。密码认证必须提供 `password`；私钥认证必须提供 `private_key`，`passphrase` 可选。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/servers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [servers]
+      operationId: getServer
+      summary: 服务器详情
+      responses:
+        '200':
+          description: 服务器
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [servers]
+      operationId: updateServer
+      summary: 更新服务器
+      description: 省略字段表示不变。提供任一凭据字段时必须同时提供 `auth_method`；提供 `auth_method` 时按该方式要求对应凭据。修改 host 或 port 会清空已信任的主机密钥。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerUpdate'
+      responses:
+        '200':
+          description: 更新后的服务器
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Server'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [servers]
+      operationId: deleteServer
+      summary: 删除服务器
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/servers/{id}/test:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [servers]
+      operationId: testServer
+      summary: 测试服务器连接
+      description: 按 os 与 auth_method 路由：SSH 通道（linux 全部；windows 的 password/private_key）做 SSH 握手、返回指纹；WinRM 通道（windows 的 password_ntlm/password_basic，端口 winrm_port）做 WinRM 握手（Get-WmiObject Win32_ComputerSystem 探针），无主机密钥语义，fingerprint 恒为空串、first_seen 恒为 false。首次 SSH 连接返回 `first_seen=true` 并写审计；主机密钥变化返回 409。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '200':
+          description: 连接成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerTestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/HostKeyChanged'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/servers/{id}/containers:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [containers]
+      operationId: listContainers
+      summary: 服务器容器列表
+      description: 经现有执行通道调 docker/podman CLI（实时查询，不落库）。container_runtime 为空串时先同步探测并写回；network_device、runtime 为 none/containerd 时 400 CONTAINER_UNSUPPORTED。
+      responses:
+        '200':
+          description: 容器列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /api/servers/{id}/containers/{cid}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/ContainerIdPath'
+    get:
+      tags: [containers]
+      operationId: inspectContainer
+      summary: 容器详情摘要（inspect）
+      responses:
+        '200':
+          description: 容器详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /api/servers/{id}/containers/{cid}/action:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/ContainerIdPath'
+    post:
+      tags: [containers]
+      operationId: containerAction
+      summary: 容器操作（start/stop/restart）
+      description: |
+        六期起按统一审批门限（契约 2.11 约定 2）分流：NeedsApproval=true 时创建
+        source=console 的审批（conversation_id/tool_call_id 为 null，command 为按
+        运行时固化的逐字节命令）并返回 `approval`（execution=null），用户经
+        POST /api/approvals/{id}/decide 决策，批准时同步执行；NeedsApproval=false
+        时直接同步执行并返回 `execution`（approval=null）。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContainerActionRequest'
+      responses:
+        '200':
+          description: 需审批时返回 approval（pending，execution=null）；门限判定直执行时返回 execution（approval=null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerActionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /api/servers/{id}/containers/{cid}/logs:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - $ref: '#/components/parameters/ContainerIdPath'
+    get:
+      tags: [containers]
+      operationId: containerLogs
+      summary: 容器日志（最近 N 行）
+      parameters:
+        - name: tail
+          in: query
+          description: 行数；缺省 200。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 200
+      responses:
+        '200':
+          description: 容器日志（stdout+stderr 合并原文）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerLogsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /api/servers/{id}/images:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [containers]
+      operationId: listServerImages
+      summary: 服务器本地镜像列表
+      responses:
+        '200':
+          description: 镜像列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+
+  /api/databases:
+    get:
+      tags: [databases]
+      operationId: listDatabases
+      summary: 数据库列表
+      responses:
+        '200':
+          description: 数据库列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [databases]
+      operationId: createDatabase
+      summary: 新增数据库
+      description: PostgreSQL/MySQL 需要 host、port、database_name、username；SQLite 只需要绝对路径 `sqlite_path`；mssql 需要 host、database_name、username、password，端口直连（默认 1433）或 instance_name 命名实例（此时 port=0）；redis 需要 host、port，username/password 可选，redis_db 默认 0。密码只写不读。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DatabaseCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Database'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/databases/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [databases]
+      operationId: getDatabase
+      summary: 数据库详情
+      responses:
+        '200':
+          description: 数据库
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Database'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [databases]
+      operationId: updateDatabase
+      summary: 更新数据库
+      description: 省略字段表示不变；`engine` 不可修改。`password` 提供时替换，空字符串表示清空。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DatabaseUpdate'
+      responses:
+        '200':
+          description: 更新后的数据库
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Database'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [databases]
+      operationId: deleteDatabase
+      summary: 删除数据库
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/databases/{id}/test:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [databases]
+      operationId: testDatabase
+      summary: 测试数据库连接
+      description: 使用保存的凭据建立只读连接并执行最小探针。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '200':
+          description: 连接成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatabaseTestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/databases/{id}/query:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [databases]
+      operationId: queryDatabase
+      summary: 执行只读 SQL
+      description: |
+        只允许单条 SELECT、WITH...SELECT、EXPLAIN（非 ANALYZE）。写语句、DDL、多语句返回 422 `SQL_NOT_READONLY`，不会执行，也不会创建审批。
+        结果最多 1000 行 / 1MB；超限时 `truncated=true`。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SqlQueryRequest'
+      responses:
+        '200':
+          description: 查询结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SqlQueryResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/SqlNotReadOnly'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/providers/presets:
+    get:
+      tags: [providers]
+      operationId: listProviderPresets
+      summary: 内置供应商预设
+      description: 返回 9 个预设（8 个内置 + custom）。不含任何密钥。
+      responses:
+        '200':
+          description: 预设列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderPresetList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/providers:
+    get:
+      tags: [providers]
+      operationId: listProviders
+      summary: 供应商列表
+      responses:
+        '200':
+          description: 供应商列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [providers]
+      operationId: createProvider
+      summary: 新增供应商
+      description: '`api_key` 只写不读；Ollama 与自定义端点可省略。必须携带 Origin。'
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/providers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [providers]
+      operationId: getProvider
+      summary: 供应商详情
+      responses:
+        '200':
+          description: 供应商
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [providers]
+      operationId: updateProvider
+      summary: 更新供应商
+      description: 省略字段表示不变。`api_key` 提供时替换；`clear_api_key=true` 表示清空；二者不能同时出现。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderUpdate'
+      responses:
+        '200':
+          description: 更新后的供应商
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [providers]
+      operationId: deleteProvider
+      summary: 删除供应商
+      description: 关联会话的 `provider_id` 置空，历史消息保留；下一次聊天会重新选择供应商。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/providers/{id}/test:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [providers]
+      operationId: testProvider
+      summary: 测试供应商连接
+      description: 调用 `GET /models`，不发起聊天。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '200':
+          description: 连接成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderTestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/providers/{id}/models/refresh:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [providers]
+      operationId: refreshProviderModels
+      summary: 拉取并保存模型列表
+      description: 调用供应商 `/models`，排序去重后写回 `providers.models`，返回最新列表。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '200':
+          description: 模型列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderModels'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/conversations:
+    get:
+      tags: [conversations]
+      operationId: listConversations
+      summary: 会话列表
+      description: |
+        按 `last_message_at DESC, id DESC` 游标分页返回。缺省 limit=200（兼容
+        旧契约首屏）；带游标参数返回排序在 (before_last_message_at, before_id)
+        之后的更早会话。`next_cursor` 为下一页游标，`has_more=false` 时为 null。
+      parameters:
+        - name: limit
+          in: query
+          description: 每页数量，缺省 200。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 200
+        - name: before_last_message_at
+          in: query
+          description: 上一页末条会话的 last_message_at（RFC3339）；必须与 before_id 成对出现。
+          schema:
+            type: string
+            format: date-time
+        - name: before_id
+          in: query
+          description: 上一页末条会话 ID；必须与 before_last_message_at 成对出现。
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 会话列表（分页）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [conversations]
+      operationId: createConversation
+      summary: 新建会话
+      description: 标题省略或为空时使用“新会话”。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/conversations/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [conversations]
+      operationId: getConversation
+      summary: 会话详情
+      responses:
+        '200':
+          description: 会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [conversations]
+      operationId: updateConversation
+      summary: 更新会话（重命名 / 审批门限覆盖）
+      description: |
+        六期起 body 携带 `title` 与/或 `approval_mode`（至少一项）。
+        `approval_mode` 为 null 表示清除会话覆盖、回到跟随全局门限（契约 2.11 约定 1）。
+        必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationUpdate'
+      responses:
+        '200':
+          description: 更新后的会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [conversations]
+      operationId: deleteConversation
+      summary: 删除会话
+      description: 级联删除消息、工具调用、审批；审计日志保留。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 会话仍有活跃流
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/conversations/{id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - name: before_seq
+        in: query
+        description: 返回该 seq 之前的消息；0 或不传表示最新一页。结果按 seq 升序。
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+      - $ref: '#/components/parameters/Limit'
+    get:
+      tags: [conversations]
+      operationId: listMessages
+      summary: 消息分页
+      responses:
+        '200':
+          description: 消息页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagePage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/conversations/{id}/tool-calls:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+      - name: before_seq
+        in: query
+        description: 返回该 seq 之前的工具调用；0 或不传表示最新一页。结果按 seq 升序。
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+          default: 0
+      - $ref: '#/components/parameters/Limit'
+    get:
+      tags: [conversations]
+      operationId: listToolCalls
+      summary: 工具调用分页
+      responses:
+        '200':
+          description: 工具调用页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToolCallPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/conversations/{id}/replay:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [conversations]
+      operationId: conversationReplay
+      summary: 会话执行回放（六期）
+      description: |
+        从持久化表（messages / tool_calls / approvals）重建会话的有序事件序列，
+        用于回放播放器。排序写死：timestamp ASC；同 timestamp 按 kind 权重
+        user_message(0) → tool_call(1) → approval(2) → execution(3) →
+        reasoning(4) → assistant_text(5)，同权重内按来源 seq/id 升序；
+        输出统一重编 seq=1..N（契约 2.11 约定 4）。
+        步数上限 20000：超出丢弃最旧步骤并置顶层 truncated=true（11 节）。
+        另有一处独立截断：单状态审批满 200 条（approvals.List 无游标）时更早
+        审批不纳入回放。两种来源的 truncated 均为 true，具体原因见
+        truncated_reason（`steps` / `approvals`；未截断为空串）。
+        权限与 GET /api/conversations/{id}/messages 相同（登录态；v1 单管理员）。
+      responses:
+        '200':
+          description: 有序回放步骤
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/chat:
+    post:
+      tags: [chat]
+      operationId: chat
+      summary: 发送消息并流式接收回答
+      description: |
+        成功返回 `text/event-stream`。响应不压缩，`X-Accel-Buffering: no`，每事件立即 flush，15s 心跳。
+        进入 SSE 前的错误（无供应商、会话不存在、已有活跃流等）返回普通 JSON 错误。
+        进入 SSE 后错误只通过 `event: error` 发送，HTTP 状态保持 200。SSE 不自动重连。
+        必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: 'SSE 流。`done` 与 `error` 互斥且为最后一个事件；心跳为 `: ping`。'
+          headers:
+            X-Accel-Buffering:
+              description: 固定 `no`
+              schema:
+                type: string
+                const: 'no'
+            Cache-Control:
+              description: 固定 `no-cache, no-transform`
+              schema:
+                type: string
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE 帧，事件 schema 见 x-sse-events
+          x-sse-events:
+            heartbeat:
+              format: ': ping\n\n'
+              description: 连续 15s 无事件时发送
+            token:
+              schema:
+                $ref: '#/components/schemas/SseToken'
+            reasoning:
+              schema:
+                $ref: '#/components/schemas/SseReasoning'
+            tool_call:
+              schema:
+                $ref: '#/components/schemas/SseToolCall'
+            tool_result:
+              schema:
+                $ref: '#/components/schemas/SseToolResult'
+            approval_required:
+              schema:
+                $ref: '#/components/schemas/Approval'
+            approval_resolved:
+              schema:
+                $ref: '#/components/schemas/SseApprovalResolved'
+            done:
+              schema:
+                $ref: '#/components/schemas/SseDone'
+            error:
+              schema:
+                $ref: '#/components/schemas/SseError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 会话已有活跃流，或会话已绑定其他供应商/模型
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: 未配置供应商
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NO_PROVIDER_CONFIGURED
+                  message: no LLM provider is configured
+                  request_id: 0123456789abcdef
+        '429':
+          description: 全局流并发达到上限
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/approvals:
+    get:
+      tags: [approvals]
+      operationId: listApprovals
+      summary: 审批列表
+      parameters:
+        - name: conversation_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApprovalStatus'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 审批列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/approvals/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [approvals]
+      operationId: getApproval
+      summary: 审批详情
+      responses:
+        '200':
+          description: 审批
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/approvals/{id}/decide:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    post:
+      tags: [approvals]
+      operationId: decideApproval
+      summary: 批准或拒绝审批（六期支持批准时改写命令）
+      description: |
+        只有 `pending` 可决策。批准后命令才会执行；拒绝或超时不执行。必须携带 Origin。
+        六期起请求体可带 `edited_command`（仅 decision=approve 时合法；1..2000 字符、
+        禁止 NUL）：服务端按审批目标重新 risk.Classify——改写后 forbidden 返回
+        403 COMMAND_FORBIDDEN 且审批保持 pending；否则落库 edited_* 并执行改写后
+        命令（契约 2.11 约定 3）。改写不改变「已批准」语义。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecision'
+      responses:
+        '200':
+          description: 决策后的审批；source=console/batch 且批准时携带同步执行结果 execution（chat 审批恒 null）。批准且携带 edited_command 时执行的是改写后命令，approval.edited_* 非空。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalDecisionResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Origin 不允许；或改写命令被风险规则禁止（COMMAND_FORBIDDEN，审批保持 pending）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 审批已决策或已过期
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/audit:
+    get:
+      tags: [audit]
+      operationId: listAuditLogs
+      summary: 审计日志
+      description: 按 id 降序分页（`before_id` 不含），返回后由前端按需反转。日志只追加。
+      parameters:
+        - name: before_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: resource_id
+          in: query
+          schema:
+            type: string
+        - name: conversation_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: server_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 审计页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ops/preview-risk:
+    post:
+      tags: [ops]
+      operationId: previewRisk
+      summary: 命令风险预览
+      description: 只做分类，不执行、不落审批。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RiskPreviewRequest'
+      responses:
+        '200':
+          description: 风险分类
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskPreviewResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/monitor/overview:
+    get:
+      tags: [monitor]
+      operationId: getMonitorOverview
+      summary: 监控仪表盘概览
+      description: 返回全部 server 资产的最新指标、firing 告警计数（按等级）与最近一次巡检均分。只读，不校验 Origin（GET）。
+      responses:
+        '200':
+          description: 概览
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonitorOverview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/monitor/collector:
+    get:
+      tags: [monitor]
+      operationId: getCollector
+      summary: 读取采集配置
+      responses:
+        '200':
+          description: 配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectorConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [monitor]
+      operationId: updateCollector
+      summary: 更新采集配置
+      description: interval_seconds 30..3600；变更下一轮采集生效。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CollectorConfig'
+      responses:
+        '200':
+          description: 更新后的配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CollectorConfig'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/servers/{id}/metrics:
+    get:
+      tags: [monitor]
+      operationId: getServerMetrics
+      summary: 服务器指标时间序列
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: minutes
+          in: query
+          schema:
+            type: integer
+            minimum: 15
+            maximum: 1440
+            default: 60
+        - name: metric
+          in: query
+          description: 可选过滤单指标
+          schema:
+            type: string
+            enum: [cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps]
+      responses:
+        '200':
+          description: 按时间升序的点集
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricSeries'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/alert-rules:
+    get:
+      tags: [alerts]
+      operationId: listAlertRules
+      summary: 告警规则列表
+      responses:
+        '200':
+          description: 规则
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRuleList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [alerts]
+      operationId: createAlertRule
+      summary: 创建告警规则
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertRuleCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/alert-rules/{id}:
+    get:
+      tags: [alerts]
+      operationId: getAlertRule
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 规则
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [alerts]
+      operationId: updateAlertRule
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertRuleUpdate'
+      responses:
+        '200':
+          description: 更新后
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [alerts]
+      operationId: deleteAlertRule
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/alert-events:
+    get:
+      tags: [alerts]
+      operationId: listAlertEvents
+      summary: 告警事件列表
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [firing, resolved]
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [info, warning, critical]
+        - name: server_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: before_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 事件（fired_at DESC）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertEventList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notification-channels:
+    get:
+      tags: [alerts]
+      operationId: listNotificationChannels
+      summary: 通知渠道列表
+      responses:
+        '200':
+          description: 渠道（含 config_hint，绝无明文/密文）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannelList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [alerts]
+      operationId: createNotificationChannel
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationChannelCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notification-channels/{id}:
+    patch:
+      tags: [alerts]
+      operationId: updateNotificationChannel
+      description: config 留空表示不修改；不存在「清空配置」（整体配置必填）。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationChannelUpdate'
+      responses:
+        '200':
+          description: 更新后
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [alerts]
+      operationId: deleteNotificationChannel
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: 已删除（引用它的规则 notify_channel_id 置 NULL）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notification-channels/{id}/test:
+    post:
+      tags: [alerts]
+      operationId: testNotificationChannel
+      summary: 投递测试消息
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 投递结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotifyTestResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: 投递失败（NOTIFICATION_TEST_FAILED）
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/diagnosis/sessions:
+    post:
+      tags: [diagnosis]
+      operationId: createDiagnosisSession
+      summary: 发起 AI 自诊断
+      description: 创建 pending 会话并入队；并发/队列满返回 429 DIAGNOSIS_BUSY。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [server_id]
+              additionalProperties: false
+              properties:
+                server_id:
+                  type: string
+                  format: uuid
+                alert_event_id:
+                  type: integer
+                  format: int64
+      responses:
+        '201':
+          description: 已创建（状态 pending）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosisSession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [diagnosis]
+      operationId: listDiagnosisSessions
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, diagnosing, report, awaiting_fix, done, expired, failed]
+        - name: server_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 会话（created_at DESC）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosisSessionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/diagnosis/sessions/{id}:
+    get:
+      tags: [diagnosis]
+      operationId: getDiagnosisSession
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 会话（report 在 report/awaiting_fix 之后非 null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosisSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/diagnosis/sessions/{id}/fix:
+    post:
+      tags: [diagnosis]
+      operationId: diagnoseFix
+      summary: 对报告建议发起修复（按统一审批门限分流）
+      description: |
+        command 必须逐字节等于 report.suggestions[].command 之一。六期起按统一
+        审批门限（契约 2.11 约定 2）分流：NeedsApproval=true 时创建 source=console
+        审批并返回 approval（execution=null），经 decide 批准后执行；false 时本端点
+        同步执行并返回 execution（approval=null）。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              additionalProperties: false
+              properties:
+                command:
+                  type: string
+                  minLength: 1
+                  maxLength: 16384
+      responses:
+        '200':
+          description: 需审批时返回 approval（execution=null）；门限判定直执行时返回 execution（approval=null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosisFixResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/diagnosis/sessions/{id}/complete:
+    post:
+      tags: [diagnosis]
+      operationId: completeDiagnosisSession
+      summary: 标记诊断会话完成
+      description: awaiting_fix → done（CAS）。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 完成后的会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosisSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/jobs:
+    get:
+      tags: [inspection]
+      operationId: listInspectionJobs
+      responses:
+        '200':
+          description: 任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionJobList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [inspection]
+      operationId: createInspectionJob
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InspectionJobCreate'
+      responses:
+        '201':
+          description: 已创建（next_run_at 已按 cron 计算）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/jobs/{id}:
+    get:
+      tags: [inspection]
+      operationId: getInspectionJob
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionJob'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [inspection]
+      operationId: updateInspectionJob
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InspectionJobUpdate'
+      responses:
+        '200':
+          description: 更新后（cron 变更时 next_run_at 重算）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [inspection]
+      operationId: deleteInspectionJob
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: 已删除（历史报告级联删除）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/jobs/{id}/run:
+    post:
+      tags: [inspection]
+      operationId: runInspectionJob
+      summary: 立即执行巡检
+      description: 异步触发（202）；报告经 GET /api/inspection/reports 轮询获取。同 job 上一轮未结束返回 409。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '202':
+          description: 已触发
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/run:
+    post:
+      tags: [inspection]
+      operationId: runInspectionNow
+      summary: 即时巡检（不落 job）
+      description: 同步执行并返回完整报告（目标 1..200 台）；也可由对话 run_inspection 工具触发（上限 50 台由工具 schema 保证）。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [server_ids]
+              additionalProperties: false
+              properties:
+                server_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: string
+                    format: uuid
+                template:
+                  type: string
+                  enum: [basic, full]
+                  default: basic
+      responses:
+        '200':
+          description: 巡检报告（含 items）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionReportDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/reports:
+    get:
+      tags: [inspection]
+      operationId: listInspectionReports
+      parameters:
+        - name: job_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 报告（created_at DESC）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionReportList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/reports/{id}:
+    get:
+      tags: [inspection]
+      operationId: getInspectionReport
+      description: 含 items 与 previous_scores（同 job 上一份 per-server 评分，趋势对比）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 报告详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionReportDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/batch/jobs:
+    post:
+      tags: [batch]
+      operationId: createBatchJob
+      summary: 创建批量任务
+      description: 逐台分类分派（2.10 约定 5）。同步返回含逐台分派结果；审批台由用户逐台 decide。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchJobCreate'
+      responses:
+        '201':
+          description: 已创建并分派
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchJobDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [batch]
+      operationId: listBatchJobs
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 任务（created_at DESC，含计数摘要）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchJobList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/batch/jobs/{id}:
+    get:
+      tags: [batch]
+      operationId: getBatchJob
+      description: 全部 results（进度轮询端点；running 时前端 2s 轮询）。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchJobDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/batch/jobs/{id}/cancel:
+    post:
+      tags: [batch]
+      operationId: cancelBatchJob
+      description: pending/awaiting_approval 的台置 cancelled；执行中的台不中断；随后重算 job 状态。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 取消后的任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchJobDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/settings:
+    get:
+      tags: [settings]
+      operationId: getSettings
+      summary: 读取公开系统设置（六期）
+      description: |
+        只返回契约公开键（v1 仅 approval_mode——全局审批门限，契约 2.11 约定 1）；
+        内部键（bootstrap.*、monitor.*）不暴露。settings['approval.mode'] 缺失时
+        按 standard 兜底返回。monitor.collector 继续走 GET/PUT /api/monitor/collector。
+        七期起明确：**主题偏好不属于本端点**——light/dark/system 三态存浏览器
+        localStorage（键 opsmind.theme），理由是登录页首次绘制早于任何 API
+        （本端点在鉴权组，未登录取不到），且纯展示偏好不应产生 settings.update
+        审计；详见契约 8.3.12。禁止为本偏好扩展本响应。
+      responses:
+        '200':
+          description: 设置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [settings]
+      operationId: updateSettings
+      summary: 更新公开系统设置（六期）
+      description: |
+        写 settings['approval.mode']（JSON 字符串）。变更对后续新审批即时生效
+        （已 pending 的审批不迁移、按创建时快照展示）。写审计 settings.update。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingsUpdate'
+      responses:
+        '200':
+          description: 更新后的设置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/term/sessions:
+    post:
+      tags: [terminal]
+      operationId: createTerminalSession
+      summary: 创建终端会话
+      description: |
+        为 server_id 打开堡垒机式交互终端。仅支持 SSH 通道的服务器（os=linux，
+        或 os=windows 且 auth_method 为 password/private_key）；WinRM 认证的
+        服务器无 PTY 语义，返回 400 `TERM_UNSUPPORTED`。同一服务器同时只允许
+        一个活动会话（409 `TERM_SESSION_EXISTS`）；全局活动会话达到上限返回
+        429 `TERM_SESSION_LIMIT`。创建即写审计 `session.start`（resource_type=
+        terminal_session）。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminalSessionCreate'
+      responses:
+        '201':
+          description: 已创建；随 ws_url 建立 WebSocket 后开始传输
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalSessionCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [terminal]
+      operationId: listTerminalSessions
+      summary: 终端会话列表
+      description: 按 created_at DESC, id DESC 返回，`status` 过滤可选（active|closed）。
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/InteractiveSessionStatus'
+        - name: server_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 会话列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalSessionList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/term/sessions/{id}/ws:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [terminal]
+      operationId: terminalSessionSocket
+      summary: 终端 WebSocket 通道
+      description: |
+        升级为 WebSocket（子协议必须为 `opsmind-term-v1`，缺失或不匹配返回
+        400 `TERM_WS_PROTOCOL`）。鉴权与 Origin 同 REST：升级前校验
+        `opsmind_session` Cookie 与 Origin 精确匹配，失败分别 401/403。
+        会话行必须为 active 且属于当前用户，否则 404/409。连接建立后服务端
+        通过 SSH PTY 双向转发；仅输出流录制为 asciinema v2。空闲 10 分钟或
+        时长满 8 小时服务端主动断开；任一方断开即关闭 PTY、封盘录制并写
+        审计 `session.end` 与 `session.input_summary`。帧格式见
+        x-websocket-events 与 docs/CONTRACT.md 第 11 节。
+      responses:
+        '101':
+          description: 协议升级为 WebSocket（子协议 opsmind-term-v1）
+          content:
+            application/json:
+              schema:
+                type: string
+          x-websocket-events:
+            client_input:
+              schema:
+                $ref: '#/components/schemas/TermFrameInput'
+            client_resize:
+              schema:
+                $ref: '#/components/schemas/TermFrameResize'
+            server_output:
+              schema:
+                $ref: '#/components/schemas/TermFrameOutput'
+            server_resized:
+              schema:
+                $ref: '#/components/schemas/TermFrameResized'
+            server_error:
+              schema:
+                $ref: '#/components/schemas/TermFrameError'
+            server_closed:
+              schema:
+                $ref: '#/components/schemas/TermFrameClosed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/term/recordings:
+    get:
+      tags: [terminal]
+      operationId: listTerminalRecordings
+      summary: 终端录制列表
+      description: 返回有录制文件的已结束终端会话（status=closed 且 recording_file 非空），按 started_at DESC。
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 录制列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalRecordingList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/term/recordings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [terminal]
+      operationId: downloadTerminalRecording
+      summary: 下载终端录制
+      description: |
+        以 asciinema v2（.cast）下发会话输出流录制。id 为终端会话 ID；文件名
+        `<id>.cast` 不可预测。会话不存在返回 404 `TERM_SESSION_NOT_FOUND`，
+        无录制或文件缺失返回 404 `RECORDING_NOT_FOUND` / 502
+        `RECORDING_UNAVAILABLE`。
+      responses:
+        '200':
+          description: asciicast v2 文件
+          content:
+            application/x-asciicast:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/rdp/sessions:
+    post:
+      tags: [rdp]
+      operationId: createRdpSession
+      summary: 创建 RDP 会话
+      description: |
+        为 os=windows 的服务器打开 RDP 网关会话。分辨率在创建时固定（运行中
+        不支持 resize）。服务器必须已保存密码凭据（auth_method=password/
+        password_ntlm/password_basic），否则 400 `RDP_NO_CREDENTIALS`；非
+        windows 服务器 400 `RDP_UNSUPPORTED`；guacd 未配置或不可达 503
+        `GUACD_UNAVAILABLE`。同一服务器同时只允许一个活动会话；全局上限
+        429。创建即写审计 `session.start`（resource_type=rdp_session）。
+        服务器凭据在 Go 网关注入 guacd 握手，绝不进入浏览器。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RdpSessionCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RdpSessionCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [rdp]
+      operationId: listRdpSessions
+      summary: RDP 会话列表
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/InteractiveSessionStatus'
+        - name: server_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 会话列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RdpSessionList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/rdp/sessions/{id}/ws:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [rdp]
+      operationId: rdpSessionSocket
+      summary: RDP WebSocket 通道（guacamole 协议透传）
+      description: |
+        升级为 WebSocket（无子协议要求，兼容 guacamole-common-js 的
+        WebSocketTunnel）。鉴权与 Origin 同 REST。服务端连接 guacd（TCP
+        4822），select rdp 后在握手 args 注入 hostname/port/username/
+        password/security/ignore-cert/width/height/dpi/recording-name，随后
+        与浏览器双向透传字节流；不解析 guacamole 指令语义。空闲 30 分钟或
+        时长满 8 小时断开；断开即结束 guacd 连接并写审计 `session.end`。
+      responses:
+        '101':
+          description: 协议升级为 WebSocket；载荷为 guacamole 协议（长度前缀指令流），Go 侧纯透传
+          content:
+            application/json:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/OriginForbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/rdp/recordings:
+    get:
+      tags: [rdp]
+      operationId: listRdpRecordings
+      summary: RDP 录制列表
+      description: 返回有录制文件的已结束 RDP 会话（guacd 侧 recording-name 命中的 .guac 文件），按 started_at DESC。
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 录制列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RdpRecordingList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/rdp/recordings/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [rdp]
+      operationId: downloadRdpRecording
+      summary: 下载 RDP 录制
+      description: |
+        下发 guacd 原生 .guac 录制文件（application/octet-stream）；转码不在
+        二期范围。文件名 `<id>.guac` 不可预测。
+      responses:
+        '200':
+          description: guacamole 录制文件
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: opsmind_session
+      description: 登录成功后由服务端设置的 HttpOnly 会话 Cookie。
+
+  headers:
+    XRequestID:
+      description: 请求 ID；与错误体中的 request_id 一致。
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,64}$'
+
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      description: 必须精确匹配允许的 Origin；缺失或不匹配返回 403。
+      schema:
+        type: string
+        examples:
+          - http://localhost:5173
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ContainerIdPath:
+      name: cid
+      in: path
+      required: true
+      description: 容器 ID 或名称；必须匹配 ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$'
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+  responses:
+    BadRequest:
+      description: 参数校验失败
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: 未登录或会话过期
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    OriginForbidden:
+      description: Origin 缺失或不匹配
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: 资源冲突（重名、重复、状态不允许）
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    HostKeyChanged:
+      description: SSH 主机密钥与已信任值不一致，命令未执行
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    SqlNotReadOnly:
+      description: SQL 非只读、包含多语句或被守卫拒绝
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: 登录限流或流并发超限
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+        Retry-After:
+          description: 建议重试秒数
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    BadGateway:
+      description: 上游（SSH、数据库、LLM）失败
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    GatewayTimeout:
+      description: 上游超时
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: 依赖组件（guacd）不可用或服务关闭中
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: 服务内部错误
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorCode:
+      type: string
+      description: 错误码。实现集中在 internal/apierr/codes.go。
+      enum:
+        - AUTH_REQUIRED
+        - AUTH_INVALID
+        - AUTH_RATE_LIMITED
+        - ORIGIN_FORBIDDEN
+        - VALIDATION_FAILED
+        - NOT_FOUND
+        - CONFLICT
+        - INTERNAL
+        - SERVICE_UNAVAILABLE
+        - TOO_MANY_STREAMS
+        - STREAM_ACTIVE
+        - CONVERSATION_NOT_FOUND
+        - CONVERSATION_MODEL_LOCKED
+        - NO_PROVIDER_CONFIGURED
+        - PROVIDER_NOT_FOUND
+        - PROVIDER_TEST_FAILED
+        - PROVIDER_MODELS_FAILED
+        - SERVER_NOT_FOUND
+        - SERVER_TEST_FAILED
+        - SSH_HOST_KEY_CHANGED
+        - SSH_TIMEOUT
+        - SSH_EXEC_FAILED
+        - COMMAND_TOO_LARGE
+        - COMMAND_INVALID
+        - COMMAND_FORBIDDEN
+        - DATABASE_NOT_FOUND
+        - DATABASE_TEST_FAILED
+        - SQL_NOT_READONLY
+        - SQL_TIMEOUT
+        - SQL_QUERY_FAILED
+        - APPROVAL_NOT_FOUND
+        - APPROVAL_NOT_PENDING
+        - APPROVAL_DENIED
+        - APPROVAL_TIMEOUT
+        - APPROVAL_CANCELLED
+        - TOOL_NOT_FOUND
+        - TOOL_ARGS_INVALID
+        - AGENT_MAX_ITERATIONS
+        - LLM_UPSTREAM_ERROR
+        - LLM_TIMEOUT
+        - LLM_OUTPUT_TRUNCATED
+        - LLM_STREAM_ERROR
+        - AUDIT_WRITE_FAILED
+        - STREAM_TIMEOUT
+        - SERVER_SHUTTING_DOWN
+        - APPROVAL_STREAM_CANCELLED
+        - CLIENT_DISCONNECTED
+        - TERM_SESSION_NOT_FOUND
+        - TERM_SESSION_EXISTS
+        - TERM_SESSION_LIMIT
+        - TERM_CONNECT_FAILED
+        - TERM_UNSUPPORTED
+        - TERM_WS_PROTOCOL
+        - RECORDING_NOT_FOUND
+        - RECORDING_UNAVAILABLE
+        - RDP_SESSION_NOT_FOUND
+        - RDP_SESSION_EXISTS
+        - RDP_SESSION_LIMIT
+        - RDP_CONNECT_FAILED
+        - RDP_UNSUPPORTED
+        - RDP_NO_CREDENTIALS
+        - GUACD_UNAVAILABLE
+        - NETCLI_LOGIN_FAILED
+        - NETCLI_EXEC_FAILED
+        - CONTAINER_UNSUPPORTED
+        - CONTAINER_NOT_FOUND
+        - CONTAINER_CLI_FAILED
+    MaybeErrorCode:
+      description: 错误码；空字符串表示无错误。
+      oneOf:
+        - $ref: '#/components/schemas/ErrorCode'
+        - type: string
+          const: ''
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: 英文短句；前端按 code 显示中文。
+          minLength: 1
+          maxLength: 500
+        request_id:
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+        details:
+          type: object
+          additionalProperties: true
+          description: 非敏感结构化细节；可省略。
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+
+    RiskLevel:
+      type: string
+      enum: [safe, needs_approval, forbidden]
+    ApprovalStatus:
+      type: string
+      enum: [pending, approved, denied, expired]
+    AuthMethod:
+      type: string
+      description: 'linux：password|private_key（SSH）。windows：password|private_key（Windows OpenSSH，走 SSH）或 password_ntlm|password_basic（WinRM，端口 winrm_port）。network_device（三期）：仅 password（SSH 或 Telnet）。'
+      enum: [password, private_key, password_ntlm, password_basic]
+    DeviceKind:
+      type: string
+      description: 资产形态（三期）：server=主机（linux/windows）；network_device=网络设备（交换机/路由器/防火墙，CLI 行协议）。
+      enum: [server, network_device]
+    NetdevBrand:
+      type: string
+      description: 网络设备厂商（三期），决定 netcli profile 与风险分册；仅 device_kind=network_device 时非空。
+      enum: [cisco, huawei, h3c, junos, generic]
+    AccessProto:
+      type: string
+      description: 网络设备接入协议（三期）。telnet 为明文传输，创建/更新必须显式携带 confirm_telnet_cleartext=true。
+      enum: [ssh, telnet]
+    DatabaseEngine:
+      type: string
+      enum: [postgres, mysql, sqlite, mssql, redis, mongodb]
+    TargetOS:
+      type: string
+      description: server 类资产的操作系统；network 仅用于 device_kind=network_device（网络设备风险分册路由）。
+      enum: [linux, windows, network]
+    ProviderKind:
+      type: string
+      enum: [openai_compatible, anthropic]
+    ProviderPresetName:
+      type: string
+      enum: [openai, deepseek, dashscope, moonshot, zhipu, anthropic, gemini, ollama, custom]
+    SSLMode:
+      type: string
+      enum: [disable, prefer, require, verify-ca, verify-full]
+    MessageRole:
+      type: string
+      enum: [user, assistant]
+    MessageStatus:
+      type: string
+      enum: [complete, error]
+    ToolCallStatus:
+      type: string
+      enum: [started, awaiting_approval, succeeded, failed, denied, expired, awaiting_user]
+
+    User:
+      type: object
+      required: [id, username, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+          const: admin
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    LoginRequest:
+      type: object
+      required: [password]
+      additionalProperties: false
+      properties:
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+    PasswordChangeRequest:
+      type: object
+      required: [old_password, new_password]
+      additionalProperties: false
+      properties:
+        old_password:
+          type: string
+          minLength: 1
+          maxLength: 256
+        new_password:
+          type: string
+          minLength: 1
+          maxLength: 72
+          description: 长度按字节计（bcrypt 明文上限 72 字节）。
+    LoginResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+    MeResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+
+    Server:
+      type: object
+      required:
+        - id
+        - name
+        - device_kind
+        - os
+        - netdev_brand
+        - access_proto
+        - host
+        - port
+        - winrm_port
+        - username
+        - auth_method
+        - tags
+        - auto_exec_enabled
+        - has_password
+        - has_private_key
+        - has_enable_secret
+        - container_runtime
+        - host_key_fingerprint
+        - host_key_verified_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        device_kind:
+          $ref: '#/components/schemas/DeviceKind'
+        os:
+          $ref: '#/components/schemas/TargetOS'
+          description: device_kind=server 时 linux|windows；network_device 时恒 network。
+        netdev_brand:
+          $ref: '#/components/schemas/NetdevBrand'
+          description: 仅 network_device 非空；server 恒空串。
+        access_proto:
+          $ref: '#/components/schemas/AccessProto'
+          description: 仅 network_device 有意义（ssh|telnet）；server 恒 ssh。
+        host:
+          type: string
+          minLength: 1
+          maxLength: 255
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: SSH 端口（linux/windows 的 OpenSSH 与网络设备 SSH/Telnet 共用）。
+        winrm_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: WinRM 端口；仅 auth_method 为 password_ntlm/password_basic 时使用，其余情况仍返回该字段但不参与连接。
+        username:
+          type: string
+          minLength: 1
+          maxLength: 100
+        auth_method:
+          $ref: '#/components/schemas/AuthMethod'
+        tags:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+        auto_exec_enabled:
+          type: boolean
+        has_password:
+          type: boolean
+        has_private_key:
+          type: boolean
+        has_enable_secret:
+          type: boolean
+          description: 网络设备 enable/super 特权密码是否已配置；server 恒 false。
+        container_runtime:
+          $ref: '#/components/schemas/ContainerRuntime'
+        host_key_fingerprint:
+          type: string
+          description: 空字符串表示尚未 TOFU 记录；Telnet 接入恒空串（无主机密钥语义）。
+        host_key_verified_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ServerList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Server'
+    ServerCreate:
+      type: object
+      required: [name, host, username, auth_method]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        device_kind:
+          $ref: '#/components/schemas/DeviceKind'
+          default: server
+        os:
+          $ref: '#/components/schemas/TargetOS'
+          default: linux
+        netdev_brand:
+          anyOf:
+            - $ref: '#/components/schemas/NetdevBrand'
+            - type: string
+              const: ''
+          description: 仅 device_kind=network_device 时必填。
+        access_proto:
+          $ref: '#/components/schemas/AccessProto'
+          default: ssh
+        host:
+          type: string
+          minLength: 1
+          maxLength: 255
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 22
+        winrm_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 5985
+        username:
+          type: string
+          minLength: 1
+          maxLength: 100
+        auth_method:
+          $ref: '#/components/schemas/AuthMethod'
+        password:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+          description: auth_method=password/password_ntlm/password_basic 时必填（NTLM/Basic 存入同一加密字段）；network_device 恒用 password 登录。
+        private_key:
+          type: string
+          minLength: 1
+          maxLength: 65536
+          writeOnly: true
+        passphrase:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+        enable_secret:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+          description: 仅 network_device：enable/super 特权密码，可选（空=未配置；空串与缺省等价）。
+        confirm_telnet_cleartext:
+          type: boolean
+          default: false
+          writeOnly: true
+          description: access_proto=telnet 时必须显式传 true（明文风险确认）；缺失/false 返回 400。
+        tags:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+        auto_exec_enabled:
+          type: boolean
+          default: false
+      allOf:
+        - if:
+            properties:
+              device_kind:
+                const: network_device
+            required: [device_kind]
+          then:
+            required: [netdev_brand, password]
+            properties:
+              os:
+                const: network
+              auth_method:
+                const: password
+              private_key:
+                const: ''
+        - if:
+            properties:
+              device_kind:
+                const: network_device
+              access_proto:
+                const: telnet
+            required: [device_kind, access_proto]
+          then:
+            required: [confirm_telnet_cleartext]
+            properties:
+              confirm_telnet_cleartext:
+                const: true
+        - if:
+            properties:
+              os:
+                const: linux
+            required: [os]
+          then:
+            properties:
+              auth_method:
+                enum: [password, private_key]
+        - if:
+            properties:
+              auth_method:
+                const: password
+            required: [auth_method]
+          then:
+            required: [password]
+            not:
+              required: [private_key]
+        - if:
+            properties:
+              auth_method:
+                const: password_ntlm
+            required: [auth_method]
+          then:
+            required: [os]
+            properties:
+              os:
+                const: windows
+              password:
+                minLength: 1
+            not:
+              required: [private_key]
+        - if:
+            properties:
+              auth_method:
+                const: password_basic
+            required: [auth_method]
+          then:
+            required: [os]
+            properties:
+              os:
+                const: windows
+              password:
+                minLength: 1
+            not:
+              required: [private_key]
+        - if:
+            properties:
+              auth_method:
+                const: private_key
+            required: [auth_method]
+          then:
+            required: [private_key]
+            not:
+              required: [password]
+    ServerUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        device_kind:
+          $ref: '#/components/schemas/DeviceKind'
+        os:
+          $ref: '#/components/schemas/TargetOS'
+        netdev_brand:
+          anyOf:
+            - $ref: '#/components/schemas/NetdevBrand'
+            - type: string
+              const: ''
+        access_proto:
+          $ref: '#/components/schemas/AccessProto'
+        host:
+          type: string
+          minLength: 1
+          maxLength: 255
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        winrm_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        username:
+          type: string
+          minLength: 1
+          maxLength: 100
+        auth_method:
+          $ref: '#/components/schemas/AuthMethod'
+        password:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          writeOnly: true
+        private_key:
+          type: string
+          minLength: 1
+          maxLength: 65536
+          writeOnly: true
+        passphrase:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+        enable_secret:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+          description: 仅 network_device：提供即替换；空字符串表示清空 enable 密码。
+        confirm_telnet_cleartext:
+          type: boolean
+          default: false
+          writeOnly: true
+          description: 更新使 access_proto 生效为 telnet 时必须显式传 true。
+        tags:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+        auto_exec_enabled:
+          type: boolean
+      allOf:
+        - if:
+            properties:
+              access_proto:
+                const: telnet
+            required: [access_proto]
+          then:
+            required: [confirm_telnet_cleartext]
+            properties:
+              confirm_telnet_cleartext:
+                const: true
+          description: 近似表达；跨请求终态组合（存量 telnet + 本次改密码）由服务端按契约 2.6 强制。
+        - if:
+            anyOf:
+              - required: [password]
+              - required: [private_key]
+              - required: [passphrase]
+          then:
+            required: [auth_method]
+        - if:
+            required: [auth_method]
+            properties:
+              auth_method:
+                const: password
+          then:
+            required: [password]
+            not:
+              required: [private_key]
+        - if:
+            required: [auth_method]
+            properties:
+              auth_method:
+                enum: [password_ntlm, password_basic]
+          then:
+            required: [os, password]
+            properties:
+              os:
+                const: windows
+            not:
+              required: [private_key]
+        - if:
+            required: [auth_method]
+            properties:
+              auth_method:
+                const: private_key
+          then:
+            required: [private_key]
+            not:
+              required: [password]
+    ServerTestResult:
+      type: object
+      required: [ok, latency_ms, fingerprint, first_seen, server_version]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        cleartext_warning:
+          type: string
+          description: Telnet 接入的网络设备返回明文风险告警（契约 2.6「UI 必须显示明文风险提示」）；其余通道不下发。
+        latency_ms:
+          type: integer
+          minimum: 0
+        fingerprint:
+          type: string
+          description: 形如 SHA256:...；Telnet 接入的网络设备恒空串（无主机密钥语义）。
+        first_seen:
+          type: boolean
+          description: true 表示首次信任并已记录主机密钥。
+        server_version:
+          type: string
+
+    Database:
+      type: object
+      required:
+        - id
+        - name
+        - engine
+        - host
+        - port
+        - database_name
+        - username
+        - sqlite_path
+        - instance_name
+        - redis_db
+        - auth_db
+        - ssl_mode
+        - has_password
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        engine:
+          $ref: '#/components/schemas/DatabaseEngine'
+        host:
+          type: string
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        database_name:
+          type: string
+          description: mssql/mongodb 必填；redis 固定空串（redis 用整数 redis_db）。
+        username:
+          type: string
+          description: mssql 必填；mongodb 与 password 成对（同空=无认证）；redis 可空（Redis 6 ACL 用户，默认 default 可省略）。
+        sqlite_path:
+          type: string
+        instance_name:
+          type: string
+          description: 仅 mssql：SQL Server 命名实例名；非空时 port 必须为 0（经 SQL Server Browser 解析），为空时 port 必填直连。其他 engine 固定空串。
+        redis_db:
+          type: integer
+          minimum: 0
+          maximum: 1023
+          description: 仅 redis：逻辑库编号；其他 engine 固定 0。
+        auth_db:
+          type: string
+          maxLength: 100
+          description: 仅 mongodb：认证库（AuthSource）；空串表示驱动默认 admin。其他 engine 固定空串。
+        ssl_mode:
+          $ref: '#/components/schemas/SSLMode'
+        has_password:
+          type: boolean
+          description: mssql 恒为 true；mongodb 表示是否配置了认证密码（与 username 成对）；redis 表示是否配置了 AUTH 密码。
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DatabaseList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Database'
+    DatabaseCreate:
+      type: object
+      required: [name, engine]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        engine:
+          $ref: '#/components/schemas/DatabaseEngine'
+        host:
+          type: string
+          maxLength: 255
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        database_name:
+          type: string
+          maxLength: 255
+        username:
+          type: string
+          maxLength: 100
+        password:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+          description: mssql 必填；mongodb 与 username 成对可选（无认证则都不提供）；redis 可选（requirepass/ACL 密码）；postgres/mysql 同一期。
+        sqlite_path:
+          type: string
+          maxLength: 4096
+          description: SQLite 绝对路径；必须以 / 开头，且服务端可读。
+        instance_name:
+          type: string
+          maxLength: 100
+          description: 仅 mssql；与 port 互斥（instance 非空时 port 必须为 0）。
+        redis_db:
+          type: integer
+          minimum: 0
+          maximum: 1023
+        auth_db:
+          type: string
+          maxLength: 100
+          description: 仅 mongodb：认证库（AuthSource）；缺省空串 = admin。
+        ssl_mode:
+          $ref: '#/components/schemas/SSLMode'
+      allOf:
+        - if:
+            properties:
+              engine:
+                const: sqlite
+            required: [engine]
+          then:
+            required: [sqlite_path]
+            properties:
+              host:
+                const: ''
+              port:
+                const: 0
+              database_name:
+                const: ''
+              username:
+                const: ''
+        - if:
+            properties:
+              engine:
+                enum: [postgres, mysql]
+            required: [engine]
+          then:
+            required: [host, port, database_name, username]
+            properties:
+              sqlite_path:
+                const: ''
+        - if:
+            properties:
+              engine:
+                const: mssql
+            required: [engine]
+          then:
+            required: [host, database_name, username, password]
+            properties:
+              sqlite_path:
+                const: ''
+        - if:
+            properties:
+              engine:
+                const: redis
+            required: [engine]
+          then:
+            required: [host, port]
+            properties:
+              database_name:
+                const: ''
+              sqlite_path:
+                const: ''
+        - if:
+            properties:
+              engine:
+                const: mongodb
+            required: [engine]
+          then:
+            required: [host, database_name]
+            properties:
+              port:
+                default: 27017
+                minimum: 1
+                maximum: 65535
+              sqlite_path:
+                const: ''
+              instance_name:
+                const: ''
+              redis_db:
+                const: 0
+    DatabaseUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        host:
+          type: string
+          maxLength: 255
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        database_name:
+          type: string
+          maxLength: 255
+        username:
+          type: string
+          maxLength: 100
+        password:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+          description: 提供时替换；空字符串表示清空密码。mongodb 与 username 成对（清空须两者同时清）。
+        sqlite_path:
+          type: string
+          maxLength: 4096
+        instance_name:
+          type: string
+          maxLength: 100
+        redis_db:
+          type: integer
+          minimum: 0
+          maximum: 1023
+        auth_db:
+          type: string
+          maxLength: 100
+        ssl_mode:
+          $ref: '#/components/schemas/SSLMode'
+    DatabaseTestResult:
+      type: object
+      required: [ok, latency_ms, server_version]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        latency_ms:
+          type: integer
+          minimum: 0
+        server_version:
+          type: string
+    SqlQueryRequest:
+      type: object
+      required: [sql]
+      additionalProperties: false
+      properties:
+        sql:
+          type: string
+          minLength: 1
+          maxLength: 65536
+    SqlColumn:
+      type: object
+      required: [name, type]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+    SqlQueryResult:
+      type: object
+      required: [columns, rows, row_count, truncated, duration_ms]
+      properties:
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/SqlColumn'
+        rows:
+          type: array
+          items:
+            type: array
+            items: {}
+        row_count:
+          type: integer
+          minimum: 0
+        truncated:
+          type: boolean
+        duration_ms:
+          type: integer
+          minimum: 0
+
+    Provider:
+      type: object
+      required:
+        - id
+        - name
+        - preset
+        - kind
+        - base_url
+        - api_key_masked
+        - has_api_key
+        - default_model
+        - models
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        preset:
+          $ref: '#/components/schemas/ProviderPresetName'
+        kind:
+          $ref: '#/components/schemas/ProviderKind'
+        base_url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        api_key_masked:
+          type: string
+          description: 只有 key 存在时为 `****` + 末 4 位；绝不返回明文。
+        has_api_key:
+          type: boolean
+        default_model:
+          type: string
+          minLength: 1
+        models:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ProviderList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Provider'
+    ProviderCreate:
+      type: object
+      required: [name, preset, kind, base_url, default_model]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        preset:
+          $ref: '#/components/schemas/ProviderPresetName'
+        kind:
+          $ref: '#/components/schemas/ProviderKind'
+        base_url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: http/https，去掉尾部斜杠后保存；不得包含 userinfo 或 fragment。
+        api_key:
+          type: string
+          maxLength: 8192
+          writeOnly: true
+        default_model:
+          type: string
+          minLength: 1
+          maxLength: 255
+        models:
+          type: array
+          maxItems: 500
+          items:
+            type: string
+            minLength: 1
+            maxLength: 255
+      allOf:
+        - if:
+            properties:
+              preset:
+                not:
+                  enum: [ollama, custom]
+            required: [preset]
+          then:
+            required: [api_key]
+        - if:
+            properties:
+              preset:
+                const: anthropic
+            required: [preset]
+          then:
+            properties:
+              kind:
+                const: anthropic
+        - if:
+            properties:
+              preset:
+                not:
+                  const: anthropic
+            required: [preset]
+          then:
+            properties:
+              kind:
+                const: openai_compatible
+    ProviderUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      not:
+        required: [api_key, clear_api_key]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        preset:
+          $ref: '#/components/schemas/ProviderPresetName'
+        kind:
+          $ref: '#/components/schemas/ProviderKind'
+        base_url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        api_key:
+          type: string
+          maxLength: 8192
+          writeOnly: true
+        clear_api_key:
+          type: boolean
+          default: false
+        default_model:
+          type: string
+          minLength: 1
+          maxLength: 255
+        models:
+          type: array
+          maxItems: 500
+          items:
+            type: string
+            minLength: 1
+            maxLength: 255
+    ProviderPreset:
+      type: object
+      required: [preset, name, kind, base_url, suggested_models, api_key_required]
+      properties:
+        preset:
+          $ref: '#/components/schemas/ProviderPresetName'
+        name:
+          type: string
+        kind:
+          $ref: '#/components/schemas/ProviderKind'
+        base_url:
+          type: string
+        suggested_models:
+          type: array
+          items:
+            type: string
+        api_key_required:
+          type: boolean
+    ProviderPresetList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderPreset'
+    ProviderTestResult:
+      type: object
+      required: [ok, latency_ms, model_count]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        latency_ms:
+          type: integer
+          minimum: 0
+        model_count:
+          type: integer
+          minimum: 0
+    ProviderModels:
+      type: object
+      required: [models, refreshed_at]
+      properties:
+        models:
+          type: array
+          items:
+            type: string
+        refreshed_at:
+          type: string
+          format: date-time
+
+    Conversation:
+      type: object
+      required:
+        - id
+        - title
+        - provider_id
+        - model
+        - created_at
+        - updated_at
+        - last_message_at
+        - approval_mode
+        - effective_approval_mode
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        provider_id:
+          type: [string, 'null']
+          format: uuid
+        model:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_message_at:
+          type: string
+          format: date-time
+        approval_mode:
+          oneOf:
+            - $ref: '#/components/schemas/ApprovalMode'
+            - type: 'null'
+          description: 会话级审批门限覆盖（六期）；null=跟随全局。
+        effective_approval_mode:
+          $ref: '#/components/schemas/ApprovalMode'
+          description: 有效门限（会话覆盖 > 全局缺省 standard；handler 装配的派生字段，不落库）。
+    ConversationList:
+      type: object
+      required: [items, has_more, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Conversation'
+        has_more:
+          type: boolean
+        next_cursor:
+          type: [object, 'null']
+          description: 下一页游标（本页末条排序键）；has_more=false 时为 null。
+          required: [last_message_at, id]
+          properties:
+            last_message_at:
+              type: string
+              format: date-time
+            id:
+              type: string
+              format: uuid
+    ConversationCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+    ConversationUpdate:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        approval_mode:
+          oneOf:
+            - $ref: '#/components/schemas/ApprovalMode'
+            - type: 'null'
+          description: 六期：会话级审批门限覆盖；null=清除覆盖（跟随全局）。与 title 至少携带一项。
+
+    Message:
+      type: object
+      required:
+        - id
+        - seq
+        - conversation_id
+        - turn_id
+        - role
+        - content
+        - reasoning
+        - reasoning_duration_ms
+        - status
+        - error_code
+        - model
+        - prompt_tokens
+        - completion_tokens
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        conversation_id:
+          type: string
+          format: uuid
+        turn_id:
+          type: string
+          format: uuid
+        role:
+          $ref: '#/components/schemas/MessageRole'
+        content:
+          type: string
+        reasoning:
+          type: string
+        reasoning_duration_ms:
+          type: [integer, 'null']
+          format: int64
+          minimum: 0
+          description: |
+            本轮 reasoning 首/尾 SSE delta 的服务端毫秒时间差（六期打磨）。
+            null = 无 reasoning 或 00009 之前的旧消息无计时数据；
+            0 = 有 reasoning 但不足 1ms（前端显示「深度思考 · 耗时 0s」）。
+        status:
+          $ref: '#/components/schemas/MessageStatus'
+        error_code:
+          $ref: '#/components/schemas/MaybeErrorCode'
+          description: 空字符串表示无错误。
+        model:
+          type: string
+        prompt_tokens:
+          type: integer
+          minimum: 0
+        completion_tokens:
+          type: integer
+          minimum: 0
+        created_at:
+          type: string
+          format: date-time
+    MessagePage:
+      type: object
+      required: [items, has_more, next_before_seq]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        has_more:
+          type: boolean
+        next_before_seq:
+          type: [integer, 'null']
+          format: int64
+
+    ToolCall:
+      type: object
+      required:
+        - id
+        - seq
+        - conversation_id
+        - turn_id
+        - provider_call_id
+        - name
+        - arguments
+        - result
+        - risk_level
+        - status
+        - error_code
+        - error_message
+        - approval_mode
+        - started_at
+        - finished_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+        conversation_id:
+          type: string
+          format: uuid
+        turn_id:
+          type: string
+          format: uuid
+        provider_call_id:
+          type: string
+        name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+        result:
+          type: [object, 'null']
+          additionalProperties: true
+        risk_level:
+          $ref: '#/components/schemas/RiskLevel'
+        status:
+          $ref: '#/components/schemas/ToolCallStatus'
+        error_code:
+          $ref: '#/components/schemas/MaybeErrorCode'
+          description: |
+            空字符串表示无错误。六期打磨 sprint 3：审批因回答流中断被连带取消的
+            调用落 `APPROVAL_CANCELLED`（status=expired），不再永久停在
+            awaiting_approval——与同会话审批卡（expired + note=stream_cancelled
+            显示为「已取消」）口径一致。
+        error_message:
+          type: string
+          description: 失败的底层原因（与 SSE tool_result.error.message 一致）；空字符串表示无错误或无消息。
+        approval_mode:
+          type: string
+          enum: ['', all, standard, high, none]
+          description: |
+            判定时的有效审批门限快照（六期打磨 sprint 1，tool_calls.approval_mode，
+            迁移 00010）。仅命令执行类工具（ssh_exec / container_action /
+            batch_execute）记录；其余工具与 00010 之前的旧行为空串（前端不渲染
+            门限徽标）。刷新/重新进入会话后工具卡的「在 <mode> 门限下执行」徽标
+            据此持久化显示，与 SSE tool_result.approval_mode 同源。
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+    ToolCallPage:
+      type: object
+      required: [items, has_more, next_before_seq]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolCall'
+        has_more:
+          type: boolean
+        next_before_seq:
+          type: [integer, 'null']
+          format: int64
+
+    ApprovalMode:
+      type: string
+      enum: [all, standard, high, none]
+      description: |
+        审批门限四档（六期契约 2.11 约定 1）：all=全部命令审批（含只读）；
+        standard=危险命令审批、只读免审（一至五期现行默认）；high=仅高危审批
+        （warning 级 needs_approval 也免审）；none=免审批、全部自动执行（仍必须
+        落审计；auto_exec_enabled=false 为服务器级硬保护——非只读命令一律审批）。
+
+    ReplayStep:
+      type: object
+      required: [seq, timestamp, kind]
+      additionalProperties: false
+      description: |
+        回放单步（六期）。除 seq/timestamp/kind 外字段按 kind 可空：字段全集写死，
+        未用字段为 null（不缺省键）。各 kind 的字段契约：
+        user_message/assistant_text/reasoning→message_id+content（reasoning 另带
+        reasoning_duration_ms；user_message 的 content 已剥离 ChatPage 的
+        `<!--opsmind-context … -->` 内部上下文前缀）；
+        tool_call→tool_call_id+name+arguments+risk_level+status+error_code+
+        approval_mode；approval→approval_id+tool_call_id+source+server_name+command+
+        original_command+risk_level+edited_risk_level+status；execution→
+        tool_call_id+name+command+status+exit_code+output+error_code+duration_ms
+        （失败且无 result 的调用也生成 status=failed + error_code 的 execution 步，
+        exit_code=-1、output 为空串）。
+      properties:
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 重建后统一重编的全局序（1..N，升序即时间序）。
+        timestamp:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum: [user_message, assistant_text, reasoning, tool_call, approval, execution]
+        message_id:
+          type: [string, 'null']
+          format: uuid
+        tool_call_id:
+          type: [string, 'null']
+          format: uuid
+        approval_id:
+          type: [string, 'null']
+          format: uuid
+        name:
+          type: [string, 'null']
+          description: 工具名（tool_call/execution）。
+        source:
+          type: [string, 'null']
+          enum: [chat, console, batch, 'null']
+          description: 审批发起来源（approval）。
+        server_name:
+          type: [string, 'null']
+          description: 审批目标服务器名（approval；服务器删除后空串）。
+        content:
+          type: [string, 'null']
+          description: 文本内容（user_message/assistant_text/reasoning）。
+        reasoning_duration_ms:
+          type: [integer, 'null']
+          format: int64
+          minimum: 0
+          description: |
+            该轮 reasoning 服务端计时毫秒（六期打磨 sprint 1，仅 reasoning 步）：
+            取自 messages.reasoning_duration_ms；null = 无计时数据（00009 之前的
+            旧消息或非 reasoning 步）。回放播放器的「深度思考 · 耗时 Ns」据此
+            与消息页保持一致。
+        command:
+          type: [string, 'null']
+          description: 实际执行命令（approval/execution；审批被改写时为改写后命令）。
+        original_command:
+          type: [string, 'null']
+          description: 审批原命令（approval；仅被改写时非 null）。
+        arguments:
+          type: [object, 'null']
+          additionalProperties: true
+          description: 工具调用参数（tool_call）。
+        risk_level:
+          type: [string, 'null']
+          enum: [safe, needs_approval, forbidden, 'null']
+          description: 风险级别（tool_call/approval；approval 为原始命令级别）。
+        edited_risk_level:
+          type: [string, 'null']
+          enum: [safe, needs_approval, 'null']
+          description: 改写后命令级别（approval；未改写为 null）。
+        status:
+          type: [string, 'null']
+          description: 状态（tool_call 的 ToolCallStatus / approval 的 ApprovalStatus / execution 为 succeeded|failed）。
+        exit_code:
+          type: [integer, 'null']
+          description: 退出码（execution；通道失败 -1）。
+        output:
+          type: [string, 'null']
+          description: 执行输出（execution；tool_calls.result 持久化值，已受 64KB 截断）。
+        error_code:
+          type: [string, 'null']
+          description: |
+            错误码（tool_call/execution）。六期打磨 sprint 2 起 tool_call 步也
+            填充（openapi 早已声明但此前恒 null）：失败的调用可直接看出
+            SSH_EXEC_FAILED 等原因；execution 步同样携带。
+        approval_mode:
+          type: [string, 'null']
+          enum: [all, standard, high, none, 'null']
+          description: |
+            判定时的有效审批门限快照（tool_call 步；取自 tool_calls.approval_mode，
+            六期打磨 sprint 2）。回放据此复用聊天侧的免审批判定：none/high 档下
+            needs_approval 命令未建审批且已执行时显示「高风险 · 免审批执行」而不是
+            「需审批」。null=非命令执行类工具，或 00010 之前的旧行未记录。
+        duration_ms:
+          type: [integer, 'null']
+          minimum: 0
+          description: 执行耗时毫秒（execution）。
+
+    ReplayResponse:
+      type: object
+      required: [conversation_id, steps, truncated, truncated_reason]
+      additionalProperties: false
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReplayStep'
+          maxItems: 20000
+        truncated:
+          type: boolean
+          description: 有步骤/审批被丢弃时为 true（11 节防 OOM）；原因见 truncated_reason。
+        truncated_reason:
+          type: string
+          enum: ['', steps, approvals]
+          description: |
+            截断原因（六期打磨 sprint 4）。`''`=未截断；`steps`=步数超 20000 丢弃最旧；
+            `approvals`=单状态审批满 200 条（approvals.List 无游标，4×200=800 上限），
+            更早审批未纳入回放。两种来源此前共用 truncated 标志，前端文案硬编码
+            「超出 20000 步上限」，给只有 200 步的会话显示 20000 上限。
+
+    ChatRequest:
+      type: object
+      required: [conversation_id, content]
+      additionalProperties: false
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+          minLength: 1
+          maxLength: 16000
+        provider_id:
+          type: string
+          format: uuid
+          description: 省略时使用会话已绑定供应商，其次第一个创建的供应商。
+        model:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: 省略时使用会话已绑定模型或供应商默认模型。
+
+    Approval:
+      type: object
+      required:
+        - id
+        - conversation_id
+        - tool_call_id
+        - source
+        - server_id
+        - server_name
+        - command
+        - risk_level
+        - reason
+        - status
+        - approval_mode
+        - requested_at
+        - expires_at
+        - decided_at
+        - decided_by
+        - note
+        - edited_command
+        - edited_risk_level
+        - edited_rule_id
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversation_id:
+          type: [string, 'null']
+          format: uuid
+          description: console/batch 审批（source=console|batch）为 null；chat 审批恒非 null。
+        tool_call_id:
+          type: [string, 'null']
+          format: uuid
+          description: console/batch 审批为 null；chat 审批恒非 null。
+        source:
+          type: string
+          enum: [chat, console, batch]
+          description: 审批发起来源（四期 console、五期 batch；历史数据等价 chat）。
+        server_id:
+          type: [string, 'null']
+          format: uuid
+        server_name:
+          type: string
+        command:
+          type: string
+        risk_level:
+          type: string
+          enum: [safe, needs_approval]
+        rule_id:
+          type: string
+          description: 命中的风险规则 ID（如 RM_PROTECTED、FILE_WRITE）；历史数据可能为空串。
+        reason:
+          type: string
+        status:
+          $ref: '#/components/schemas/ApprovalStatus'
+        approval_mode:
+          $ref: '#/components/schemas/ApprovalMode'
+          description: 创建审批时的有效门限快照（六期 00008 起；历史行为 standard）。
+        requested_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: [string, 'null']
+          format: date-time
+        decided_by:
+          type: [string, 'null']
+          format: uuid
+        note:
+          type: string
+          maxLength: 500
+        edited_command:
+          type: string
+          maxLength: 2000
+          description: 用户改写后的命令（六期）；空串=未改写。执行（console/batch decide 或 chat 等待方）使用本字段非空时的值。
+        edited_risk_level:
+          type: string
+          enum: ['', safe, needs_approval]
+          description: 改写后命令的重新分类级别（六期）；空串=未改写。改写后 forbidden 在 decide 即被 403 拒绝，不落库。
+        edited_rule_id:
+          type: string
+          description: 改写后命令命中的风险规则 ID（六期）；未改写为空串。
+    ApprovalList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Approval'
+    ApprovalDecision:
+      type: object
+      required: [decision]
+      additionalProperties: false
+      properties:
+        decision:
+          type: string
+          enum: [approve, deny]
+        note:
+          type: string
+          maxLength: 500
+        edited_command:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: |
+            六期：批准时改写命令（可选）。仅 decision=approve 时合法（deny 携带本字段
+            返回 400）；禁止 NUL；服务端按审批目标重新 risk.Classify——改写后
+            forbidden 返回 403 COMMAND_FORBIDDEN 且审批保持 pending。
+
+    AuditLog:
+      type: object
+      required:
+        - id
+        - created_at
+        - actor_type
+        - actor_id
+        - actor_name
+        - action
+        - resource_type
+        - resource_id
+        - request_id
+        - conversation_id
+        - server_id
+        - ip
+        - detail
+        - prev_hash
+        - hash
+      properties:
+        id:
+          type: integer
+          format: int64
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        actor_type:
+          type: string
+          enum: [user, system, model]
+        actor_id:
+          type: string
+        actor_name:
+          description: 操作者用户名；仅 actor_type=user 且能匹配到用户时非空，否则 null。
+          type: [string, 'null']
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        request_id:
+          type: string
+        conversation_id:
+          type: [string, 'null']
+          format: uuid
+        server_id:
+          type: [string, 'null']
+          format: uuid
+        ip:
+          type: string
+        detail:
+          type: object
+          additionalProperties: true
+        prev_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+    AuditPage:
+      type: object
+      required: [items, has_more, next_before_id]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+        has_more:
+          type: boolean
+        next_before_id:
+          type: [integer, 'null']
+          format: int64
+
+    ContainerRuntime:
+      type: string
+      description: 容器运行时探测结果（四期）。空串=未探测（network_device 恒空串）；containerd 仅探测展示，容器管理面不支持。
+      enum: ['', none, docker, podman, containerd]
+    Container:
+      type: object
+      required: [id, name, image, state, status, ports, created]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        image:
+          type: string
+        state:
+          type: string
+          description: running|exited|paused|created|...（运行时原值）
+        status:
+          type: string
+          description: 人类可读状态原文（如 "Up 2 hours (healthy)"）。
+        ports:
+          type: array
+          items:
+            type: string
+          description: 发布串原样（如 "0.0.0.0:5432->5432/tcp"）；无则空数组。
+        created:
+          type: string
+          description: RFC3339；无法可靠解析时为空串（podman 列表）。
+    ContainerMount:
+      type: object
+      required: [source, destination, rw]
+      properties:
+        source:
+          type: string
+        destination:
+          type: string
+        rw:
+          type: boolean
+    ContainerDetail:
+      type: object
+      required: [id, name, image, state, status, ports, created, exit_code, pid, started_at, finished_at, health_status, mounts]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        image:
+          type: string
+        state:
+          type: string
+        status:
+          type: string
+        ports:
+          type: array
+          items:
+            type: string
+        created:
+          type: string
+        exit_code:
+          type: integer
+        pid:
+          type: integer
+        started_at:
+          type: string
+          description: RFC3339；未启动为空串。
+        finished_at:
+          type: string
+          description: RFC3339；未停止为空串。
+        health_status:
+          type: string
+          description: healthy|unhealthy|starting|...；无健康检查块为空串。
+        mounts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContainerMount'
+    ContainerListResponse:
+      type: object
+      required: [runtime, items]
+      properties:
+        runtime:
+          $ref: '#/components/schemas/ContainerRuntime'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Container'
+    ContainerImage:
+      type: object
+      required: [repo, tag, size_bytes, created]
+      properties:
+        repo:
+          type: string
+          description: '<none> 占位原样保留。'
+        tag:
+          type: string
+          description: '<none> 占位原样保留。'
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 字节数；docker 人类可读串按 1000 进制解析，解析失败为 0。
+        created:
+          type: string
+          description: RFC3339；无法解析时为空串。
+    ImageListResponse:
+      type: object
+      required: [runtime, items]
+      properties:
+        runtime:
+          $ref: '#/components/schemas/ContainerRuntime'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContainerImage'
+    ContainerActionRequest:
+      type: object
+      required: [action]
+      additionalProperties: false
+      properties:
+        action:
+          type: string
+          enum: [start, stop, restart]
+    ContainerActionResponse:
+      type: object
+      required: [approval, execution]
+      description: 六期起统一 wrapper：需审批时 approval 非 null（execution=null）；门限判定直执行时 execution 非 null（approval=null）。四期「恒建审批」的裸 Approval 形态废弃。
+      properties:
+        approval:
+          oneOf:
+            - $ref: '#/components/schemas/Approval'
+            - type: 'null'
+        execution:
+          oneOf:
+            - $ref: '#/components/schemas/ApprovalExecution'
+            - type: 'null'
+    ContainerLogsResponse:
+      type: object
+      required: [server_id, container_id, tail, output, truncated]
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        container_id:
+          type: string
+        tail:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        output:
+          type: string
+          description: stdout+stderr 合并原文（通道已合并）；上限 256KB。
+        truncated:
+          type: boolean
+    ApprovalExecution:
+      type: object
+      required: [exit_code, output, truncated, duration_ms]
+      properties:
+        exit_code:
+          type: integer
+          description: 通道执行失败（命令未到达/连接错误）时为 -1。
+        output:
+          type: string
+        truncated:
+          type: boolean
+        duration_ms:
+          type: integer
+          minimum: 0
+        error_code:
+          type: string
+          description: 通道/执行失败时的错误码（如 SSH_EXEC_FAILED）；成功时缺省。
+    ApprovalDecisionResult:
+      type: object
+      required: [approval, execution]
+      properties:
+        approval:
+          $ref: '#/components/schemas/Approval'
+        execution:
+          oneOf:
+            - $ref: '#/components/schemas/ApprovalExecution'
+            - type: 'null'
+          description: 仅 source=console|batch 且批准时非 null（四期容器/五期批量同步执行结果；执行命令为 edited_command 非空时的改写后命令）；chat 审批与拒绝/过期恒 null。
+    DiagnosisFixResult:
+      type: object
+      required: [approval, execution]
+      description: 六期起诊断 fix 统一 wrapper：需审批时 approval 非 null（execution=null）；门限判定直执行时 execution 非 null（approval=null）。五期裸 Approval 形态废弃。
+      properties:
+        approval:
+          oneOf:
+            - $ref: '#/components/schemas/Approval'
+            - type: 'null'
+        execution:
+          oneOf:
+            - $ref: '#/components/schemas/ApprovalExecution'
+            - type: 'null'
+    SettingsResponse:
+      type: object
+      required: [approval_mode]
+      additionalProperties: false
+      properties:
+        approval_mode:
+          $ref: '#/components/schemas/ApprovalMode'
+          description: 全局审批门限（settings['approval.mode']；键缺失兜底 standard）。
+    SettingsUpdate:
+      type: object
+      required: [approval_mode]
+      additionalProperties: false
+      properties:
+        approval_mode:
+          $ref: '#/components/schemas/ApprovalMode'
+    RiskPreviewRequest:
+      type: object
+      required: [command]
+      additionalProperties: false
+      properties:
+        command:
+          type: string
+          minLength: 1
+          maxLength: 16384
+        os:
+          $ref: '#/components/schemas/TargetOS'
+          default: linux
+          description: 选择规则分册：linux 用第 7.3 节 shell 分册；windows 用 PowerShell/cmd 分册（契约 7.3B）；network 用网络设备分册（契约 7.3C，brand 缺省 generic）。
+        netdev_brand:
+          $ref: '#/components/schemas/NetdevBrand'
+          default: generic
+          description: 仅 os=network 时生效（三期）：选择网络设备分册（cisco/huawei/h3c/junos/generic）。
+        server_id:
+          type: string
+          format: uuid
+          description: 仅用于上下文；提供且存在时以该服务器实际 os（network_device 时连同 netdev_brand）覆盖显式 os/netdev_brand。
+    RiskPreviewResult:
+      type: object
+      required: [risk_level, rule_id, reason, normalized_command]
+      properties:
+        risk_level:
+          $ref: '#/components/schemas/RiskLevel'
+        rule_id:
+          type: string
+        reason:
+          type: string
+        normalized_command:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status, version, time, database]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+        time:
+          type: string
+          format: date-time
+        database:
+          type: string
+          enum: [ok, error]
+
+    SseToken:
+      type: object
+      required: [delta]
+      properties:
+        delta:
+          type: string
+    SseReasoning:
+      type: object
+      required: [delta]
+      properties:
+        delta:
+          type: string
+    SseToolCall:
+      type: object
+      required: [tool_call_id, provider_call_id, name, arguments]
+      properties:
+        tool_call_id:
+          type: string
+          format: uuid
+        provider_call_id:
+          type: string
+        name:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+    SseToolError:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+    SseToolResult:
+      type: object
+      required: [tool_call_id, name, ok, result, error, duration_ms]
+      properties:
+        tool_call_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        ok:
+          type: boolean
+        result:
+          type: [object, 'null']
+          additionalProperties: true
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/SseToolError'
+            - type: 'null'
+        duration_ms:
+          type: integer
+          minimum: 0
+        approval_mode:
+          $ref: '#/components/schemas/ApprovalMode'
+          description: 六期：命令执行类工具（ssh_exec/container_action/batch_execute）携带本工具调用判定时的有效门限，便于 UI 展示「在 <mode> 门限下执行」；其余工具不携带。
+    SseApprovalResolved:
+      type: object
+      required: [approval_id, status, decided_at]
+      properties:
+        approval_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [approved, denied, expired]
+        decided_at:
+          type: [string, 'null']
+          format: date-time
+        edited_command:
+          type: [string, 'null']
+          maxLength: 2000
+          description: 六期：decide 批准时携带改写后命令则非 null（等待方按它执行）；未改写/拒绝/过期为 null。
+    SseDone:
+      type: object
+      required: [turn_id, message_id, finish_reason, usage]
+      properties:
+        turn_id:
+          type: string
+          format: uuid
+        message_id:
+          type: string
+          format: uuid
+        finish_reason:
+          type: string
+          enum: [stop, length, tool_error, ask_user]
+        usage:
+          type: object
+          required: [prompt_tokens, completion_tokens, total_tokens]
+          properties:
+            prompt_tokens:
+              type: integer
+              minimum: 0
+            completion_tokens:
+              type: integer
+              minimum: 0
+            total_tokens:
+              type: integer
+              minimum: 0
+    SseError:
+      type: object
+      required: [code, message, request_id, retryable]
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+        request_id:
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+        retryable:
+          type: boolean
+
+    InteractiveSessionStatus:
+      type: string
+      enum: [active, closed]
+    SessionEndReason:
+      type: string
+      enum: ['', client_closed, idle_timeout, max_duration, server_shutdown, error]
+
+    TerminalSessionCreate:
+      type: object
+      required: [server_id]
+      additionalProperties: false
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        cols:
+          type: integer
+          minimum: 10
+          maximum: 500
+          default: 120
+        rows:
+          type: integer
+          minimum: 4
+          maximum: 200
+          default: 40
+    TerminalSessionCreated:
+      type: object
+      required: [session, ws_url]
+      properties:
+        session:
+          $ref: '#/components/schemas/TerminalSession'
+        ws_url:
+          type: string
+          description: '相对路径 /api/term/sessions/{id}/ws；客户端带子协议 opsmind-term-v1 发起升级。'
+    TerminalSession:
+      type: object
+      required:
+        - id
+        - server_id
+        - server_name
+        - os
+        - username
+        - status
+        - cols
+        - rows
+        - ended_reason
+        - has_recording
+        - bytes_written
+        - started_at
+        - last_activity_at
+        - ended_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+          description: 由 servers.name JOIN 填充；服务器删除后为空串。
+        os:
+          $ref: '#/components/schemas/TargetOS'
+        username:
+          type: string
+          description: 发起终端的登录用户名（v1 恒为 admin）。
+        status:
+          $ref: '#/components/schemas/InteractiveSessionStatus'
+        cols:
+          type: integer
+          minimum: 10
+          maximum: 500
+        rows:
+          type: integer
+          minimum: 4
+          maximum: 200
+        ended_reason:
+          $ref: '#/components/schemas/SessionEndReason'
+        has_recording:
+          type: boolean
+        bytes_written:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 录制文件累计字节数。
+        started_at:
+          type: string
+          format: date-time
+        last_activity_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TerminalSessionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TerminalSession'
+
+    TermFrameInput:
+      type: object
+      description: 客户端 → 服务端；data 为终端原始输入字节的 base64（StdEncoding）。
+      required: [type, data]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: input
+        data:
+          type: string
+          maxLength: 10928
+          description: base64(≤8KB 原始字节)；单帧超限断开（error invalid_frame）。
+    TermFrameResize:
+      type: object
+      required: [type, cols, rows]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          const: resize
+        cols:
+          type: integer
+          minimum: 10
+          maximum: 500
+        rows:
+          type: integer
+          minimum: 4
+          maximum: 200
+    TermFrameOutput:
+      type: object
+      description: 服务端 → 客户端；data 为 PTY 输出原始字节的 base64；同时写入 .cast 的 o 事件。
+      required: [type, data]
+      properties:
+        type:
+          type: string
+          const: output
+        data:
+          type: string
+    TermFrameResized:
+      type: object
+      description: resize 实际生效后的确认帧（cols/rows 为远端 PTY 最终值）；同时写入 .cast 的 r 事件。
+      required: [type, cols, rows]
+      properties:
+        type:
+          type: string
+          const: resized
+        cols:
+          type: integer
+        rows:
+          type: integer
+    TermFrameError:
+      type: object
+      required: [type, code, message]
+      properties:
+        type:
+          type: string
+          const: error
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+    TermFrameClosed:
+      type: object
+      description: 服务端最后一帧；发送后关闭连接。终端输入摘要此时已审计。
+      required: [type, reason]
+      properties:
+        type:
+          type: string
+          const: closed
+        reason:
+          type: string
+          enum: [client_closed, idle_timeout, max_duration, server_shutdown, error]
+
+    TerminalRecording:
+      type: object
+      required:
+        - id
+        - server_id
+        - server_name
+        - os
+        - username
+        - bytes_written
+        - started_at
+        - ended_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 终端会话 ID；下载路径 /api/term/recordings/{id}。
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        os:
+          $ref: '#/components/schemas/TargetOS'
+        username:
+          type: string
+        bytes_written:
+          type: integer
+          format: int64
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    TerminalRecordingList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TerminalRecording'
+
+    RdpSessionCreate:
+      type: object
+      required: [server_id]
+      additionalProperties: false
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        width:
+          type: integer
+          minimum: 640
+          maximum: 3840
+          default: 1280
+        height:
+          type: integer
+          minimum: 480
+          maximum: 2160
+          default: 800
+        dpi:
+          type: integer
+          minimum: 72
+          maximum: 120
+          default: 96
+    RdpSessionCreated:
+      type: object
+      required: [session, ws_url]
+      properties:
+        session:
+          $ref: '#/components/schemas/RdpSession'
+        ws_url:
+          type: string
+          description: '相对路径 /api/rdp/sessions/{id}/ws；无子协议，直接交 guacamole-common-js 的 WebSocketTunnel。'
+    RdpSession:
+      type: object
+      required:
+        - id
+        - server_id
+        - server_name
+        - width
+        - height
+        - dpi
+        - status
+        - ended_reason
+        - has_recording
+        - bytes_written
+        - started_at
+        - last_activity_at
+        - ended_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        dpi:
+          type: integer
+        status:
+          $ref: '#/components/schemas/InteractiveSessionStatus'
+        ended_reason:
+          $ref: '#/components/schemas/SessionEndReason'
+        has_recording:
+          type: boolean
+        bytes_written:
+          type: integer
+          format: int64
+          minimum: 0
+          description: guacd 侧 .guac 文件的近似字节数（会话结束时 stat 一次）。
+        started_at:
+          type: string
+          format: date-time
+        last_activity_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RdpSessionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RdpSession'
+
+    RdpRecording:
+      type: object
+      required:
+        - id
+        - server_id
+        - server_name
+        - bytes_written
+        - started_at
+        - ended_at
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: RDP 会话 ID；下载路径 /api/rdp/recordings/{id}。
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        bytes_written:
+          type: integer
+          format: int64
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    RdpRecordingList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RdpRecording'
+
+    # ---------- 五期（M1/M2/M3）----------
+
+    MetricPoint:
+      type: object
+      required: [created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps]
+      additionalProperties: false
+      properties:
+        created_at:
+          type: string
+          format: date-time
+        cpu_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+        mem_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+        disk_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+        load_1:
+          type: number
+          minimum: 0
+        net_in_bps:
+          type: integer
+          format: int64
+          minimum: 0
+        net_out_bps:
+          type: integer
+          format: int64
+          minimum: 0
+
+    MetricSeries:
+      type: object
+      required: [server_id, minutes, points, truncated]
+      additionalProperties: false
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        minutes:
+          type: integer
+        points:
+          type: array
+          maxItems: 1440
+          items:
+            $ref: '#/components/schemas/MetricPoint'
+        truncated:
+          type: boolean
+
+    CollectorConfig:
+      type: object
+      required: [enabled, interval_seconds]
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        interval_seconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+
+    MonitorOverview:
+      type: object
+      required: [servers, firing, last_inspection, collector]
+      additionalProperties: false
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricLatestRow'
+        firing:
+          type: object
+          required: [info, warning, critical, total]
+          properties:
+            info:
+              type: integer
+            warning:
+              type: integer
+            critical:
+              type: integer
+            total:
+              type: integer
+        last_inspection:
+          type: object
+          nullable: true
+          properties:
+            report_id:
+              type: string
+              format: uuid
+            avg_score:
+              type: integer
+              minimum: 0
+              maximum: 100
+            created_at:
+              type: string
+              format: date-time
+        collector:
+          $ref: '#/components/schemas/CollectorConfig'
+
+    MetricLatestRow:
+      type: object
+      required: [server_id, server_name, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps]
+      additionalProperties: false
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        cpu_pct:
+          type: number
+        mem_pct:
+          type: number
+        disk_pct:
+          type: number
+        load_1:
+          type: number
+        net_in_bps:
+          type: integer
+          format: int64
+        net_out_bps:
+          type: integer
+          format: int64
+
+    AlertSeverity:
+      type: string
+      enum: [info, warning, critical]
+
+    AlertMetricName:
+      type: string
+      enum: [cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps]
+
+    AlertRule:
+      type: object
+      required: [id, name, metric, comparator, threshold, duration_windows, cooldown_seconds, severity, silent_until, notify_channel_id, enabled, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        metric:
+          $ref: '#/components/schemas/AlertMetricName'
+        comparator:
+          type: string
+          enum: [gt, lt]
+        threshold:
+          type: number
+          minimum: 0
+        duration_windows:
+          type: integer
+          minimum: 1
+          maximum: 30
+        cooldown_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        severity:
+          $ref: '#/components/schemas/AlertSeverity'
+        silent_until:
+          type: string
+          format: date-time
+          nullable: true
+        notify_channel_id:
+          type: string
+          format: uuid
+          nullable: true
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AlertRuleList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertRule'
+
+    AlertRuleCreate:
+      type: object
+      required: [name, metric, comparator, threshold]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        metric:
+          $ref: '#/components/schemas/AlertMetricName'
+        comparator:
+          type: string
+          enum: [gt, lt]
+        threshold:
+          type: number
+          minimum: 0
+        duration_windows:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 3
+        cooldown_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+          default: 300
+        severity:
+          allOf:
+            - $ref: '#/components/schemas/AlertSeverity'
+          default: warning
+        silent_until:
+          type: string
+          format: date-time
+          nullable: true
+        notify_channel_id:
+          type: string
+          format: uuid
+          nullable: true
+        enabled:
+          type: boolean
+          default: true
+
+    AlertRuleUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        metric:
+          $ref: '#/components/schemas/AlertMetricName'
+        comparator:
+          type: string
+          enum: [gt, lt]
+        threshold:
+          type: number
+          minimum: 0
+        duration_windows:
+          type: integer
+          minimum: 1
+          maximum: 30
+        cooldown_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        severity:
+          $ref: '#/components/schemas/AlertSeverity'
+        silent_until:
+          type: string
+          format: date-time
+          nullable: true
+        clear_silent_until:
+          type: boolean
+        notify_channel_id:
+          type: string
+          format: uuid
+          nullable: true
+        clear_notify_channel:
+          type: boolean
+        enabled:
+          type: boolean
+
+    AlertEvent:
+      type: object
+      required: [id, rule_id, rule_name, server_id, server_name, metric, status, severity, value, message, fired_at, resolved_at, last_notified_at, notify_status, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: integer
+          format: int64
+        rule_id:
+          type: string
+          format: uuid
+        rule_name:
+          type: string
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        metric:
+          $ref: '#/components/schemas/AlertMetricName'
+        status:
+          type: string
+          enum: [firing, resolved]
+        severity:
+          $ref: '#/components/schemas/AlertSeverity'
+        value:
+          type: number
+        message:
+          type: string
+        fired_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_notified_at:
+          type: string
+          format: date-time
+          nullable: true
+        notify_status:
+          type: string
+          enum: [none, pending, sent, failed, skipped]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AlertEventList:
+      type: object
+      required: [items, has_more, next_before_id]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertEvent'
+        has_more:
+          type: boolean
+        next_before_id:
+          type: integer
+          format: int64
+          nullable: true
+
+    NotificationChannel:
+      type: object
+      required: [id, name, kind, config_hint, has_config, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        kind:
+          type: string
+          enum: [webhook, feishu, dingtalk, email]
+        config_hint:
+          type: string
+        has_config:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    NotificationChannelList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationChannel'
+
+    NotificationChannelCreate:
+      type: object
+      required: [name, kind, config]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        kind:
+          type: string
+          enum: [webhook, feishu, dingtalk, email]
+        config:
+          type: object
+          description: 明文配置（schema 见 CONTRACT.md 5.15；按 kind 校验）；加密落库，响应永不回显。
+          additionalProperties: true
+
+    NotificationChannelUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        kind:
+          type: string
+          enum: [webhook, feishu, dingtalk, email]
+        config:
+          type: object
+          description: 留空表示不修改；提供即整体替换。
+          additionalProperties: true
+
+    NotifyTestResult:
+      type: object
+      required: [kind, ok, duration_ms]
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum: [webhook, feishu, dingtalk, email]
+        ok:
+          type: boolean
+        error_code:
+          type: string
+        duration_ms:
+          type: integer
+
+    DiagnosisSession:
+      type: object
+      required: [id, alert_event_id, server_id, server_name, conversation_id, trigger, status, report, error_code, started_at, finished_at, expires_at, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        alert_event_id:
+          type: integer
+          format: int64
+          nullable: true
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        trigger:
+          type: string
+          enum: [alert, manual, chat]
+        status:
+          type: string
+          enum: [pending, diagnosing, report, awaiting_fix, done, expired, failed]
+        report:
+          allOf:
+            - $ref: '#/components/schemas/DiagnosisReport'
+          nullable: true
+        error_code:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DiagnosisReport:
+      type: object
+      description: 诊断报告 schema（CONTRACT.md 5.16 写死）。
+      required: [summary, severity, root_cause, evidence, suggestions, confidence]
+      additionalProperties: false
+      properties:
+        summary:
+          type: string
+          maxLength: 2048
+        severity:
+          type: string
+          enum: [info, warning, critical]
+        root_cause:
+          type: string
+          maxLength: 8192
+        evidence:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/DiagnosisEvidence'
+        suggestions:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/FixSuggestion'
+        confidence:
+          type: string
+          enum: [low, medium, high]
+
+    DiagnosisEvidence:
+      type: object
+      required: [source, output_excerpt, note]
+      additionalProperties: false
+      properties:
+        source:
+          type: string
+          enum: [command, metric, alert, log]
+        command:
+          type: string
+        output_excerpt:
+          type: string
+          maxLength: 4096
+        note:
+          type: string
+
+    FixSuggestion:
+      type: object
+      required: [command, reason, risk_level]
+      additionalProperties: false
+      properties:
+        command:
+          type: string
+          minLength: 1
+          maxLength: 16384
+        reason:
+          type: string
+        risk_level:
+          type: string
+          enum: [safe, needs_approval]
+
+    DiagnosisSessionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiagnosisSession'
+
+    InspectionJob:
+      type: object
+      required: [id, name, cron, target_tags, template, notify_enabled, notify_channel_id, enabled, last_run_at, next_run_at, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        cron:
+          type: string
+          description: 五段标准 cron（分 时 日 月 周），UTC。
+        target_tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 32
+          maxItems: 16
+        template:
+          type: string
+          enum: [basic, full]
+        notify_enabled:
+          type: boolean
+        notify_channel_id:
+          type: string
+          format: uuid
+          nullable: true
+        enabled:
+          type: boolean
+        last_run_at:
+          type: string
+          format: date-time
+          nullable: true
+        next_run_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    InspectionJobList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionJob'
+
+    InspectionJobCreate:
+      type: object
+      required: [name, cron]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        cron:
+          type: string
+        target_tags:
+          type: array
+          items:
+            type: string
+          maxItems: 16
+          default: []
+        template:
+          type: string
+          enum: [basic, full]
+          default: basic
+        notify_enabled:
+          type: boolean
+          default: false
+        notify_channel_id:
+          type: string
+          format: uuid
+          nullable: true
+        enabled:
+          type: boolean
+          default: true
+
+    InspectionJobUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        cron:
+          type: string
+        target_tags:
+          type: array
+          items:
+            type: string
+          maxItems: 16
+        template:
+          type: string
+          enum: [basic, full]
+        notify_enabled:
+          type: boolean
+        notify_channel_id:
+          type: string
+          format: uuid
+          nullable: true
+        clear_notify_channel:
+          type: boolean
+        enabled:
+          type: boolean
+
+    InspectionReport:
+      type: object
+      required: [id, job_id, job_name, trigger, server_count, avg_score, anomaly_count, started_at, finished_at, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+        job_name:
+          type: string
+        trigger:
+          type: string
+          enum: [cron, manual, chat]
+        server_count:
+          type: integer
+          minimum: 0
+        avg_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        anomaly_count:
+          type: integer
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    InspectionReportList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionReport'
+
+    InspectionAnomaly:
+      type: object
+      required: [item, detail, severity]
+      additionalProperties: false
+      properties:
+        item:
+          type: string
+          enum: [collect, service, disk, load, memory, journal]
+        detail:
+          type: string
+        severity:
+          type: string
+          enum: [info, warning, critical]
+
+    InspectionReportItem:
+      type: object
+      required: [id, report_id, server_id, server_name, score, anomaly_count, anomalies, raw_output, command, truncated, duration_ms, error_code, created_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: integer
+          format: int64
+        report_id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        anomaly_count:
+          type: integer
+          minimum: 0
+        anomalies:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionAnomaly'
+        raw_output:
+          type: string
+        command:
+          type: string
+          maxLength: 4096
+          description: |
+            模板展开后实际执行的命令清单（换行分隔，按执行顺序；六期打磨 sprint 1，
+            inspection_report_items.command，迁移 00011）。报告抽屉「命令」列据此
+            提供复制入口（契约 8.7 ⑧）；空串 = 00011 之前的旧行未记录。
+        truncated:
+          type: boolean
+        duration_ms:
+          type: integer
+        error_code:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    InspectionReportDetail:
+      type: object
+      required: [report, items, previous_scores]
+      additionalProperties: false
+      properties:
+        report:
+          $ref: '#/components/schemas/InspectionReport'
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/InspectionReportItem'
+        previous_scores:
+          type: object
+          nullable: true
+          description: 同 job 上一份报告的 server_id → score（趋势对比）；即时巡检为 null。
+          additionalProperties:
+            type: integer
+
+    BatchJobCreate:
+      type: object
+      required: [command, server_ids]
+      additionalProperties: false
+      properties:
+        description:
+          type: string
+          maxLength: 2000
+          description: 自然语言意图原文。
+        command:
+          type: string
+          minLength: 1
+          maxLength: 16384
+        server_ids:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+
+    BatchJob:
+      type: object
+      required: [id, description, command, server_ids, source, conversation_id, status, total_count, done_count, finished_at, created_by, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        command:
+          type: string
+        server_ids:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+        source:
+          type: string
+          enum: [console, chat]
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [pending, running, partial, done, failed, cancelled]
+        total_count:
+          type: integer
+          minimum: 1
+        done_count:
+          type: integer
+          minimum: 0
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    BatchJobList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchJob'
+
+    BatchResult:
+      type: object
+      required: [id, batch_job_id, server_id, server_name, risk_level, rule_id, approval_id, status, edited_command, exit_code, output, truncated, error_code, duration_ms, created_at, updated_at]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          format: uuid
+        batch_job_id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        server_name:
+          type: string
+        risk_level:
+          type: string
+          enum: [safe, needs_approval, forbidden]
+        rule_id:
+          type: string
+        approval_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [pending, awaiting_approval, executed, failed, denied, expired, skipped, cancelled]
+        edited_command:
+          type: string
+          description: >-
+            该台审批的用户改写命令（六期打磨 sprint 5；approval.edited_command
+            的关联读值）。空串=未改写或无审批（safe 直执行）。批量详情「命令」列
+            据此显示「实际执行：<改写命令>」。
+        exit_code:
+          type: integer
+          nullable: true
+        output:
+          type: string
+        truncated:
+          type: boolean
+        error_code:
+          type: string
+        duration_ms:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    BatchJobDetail:
+      type: object
+      required: [job, results]
+      additionalProperties: false
+      properties:
+        job:
+          $ref: '#/components/schemas/BatchJob'
+        results:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/BatchResult'

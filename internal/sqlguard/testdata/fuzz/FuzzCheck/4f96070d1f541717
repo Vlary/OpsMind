@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("SELECT \"pg_terminate_backend\"(1234)")

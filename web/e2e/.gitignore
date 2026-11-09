@@ -1,0 +1,3 @@
+# Playwright 运行产物：globalSetup 写入的登录态与失败附件，不入库。
+.auth/
+.test-results/
