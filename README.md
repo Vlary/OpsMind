@@ -272,3 +272,7 @@ pnpm -C web test:e2e
 ---
 
 其他说明见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
