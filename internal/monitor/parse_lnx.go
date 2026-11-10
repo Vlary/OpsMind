@@ -1,7 +1,14 @@
-// parse_linux.go 解析 Linux 采集模板（契约 7.7 SAFE_COLLECT）输出。
+// parse_lnx.go 解析 Linux 采集模板（契约 7.7 SAFE_COLLECT）输出。
 // 模板按 ===stat / ===loadavg / ===meminfo / ===df / ===netdev 分段；
 // cpu_pct 与 net_*_bps 为两次采样的差值（首轮为 0，不阻塞入库）。
 // net_*_bps 单位是字节/秒（契约 7.7：字节差 ÷ interval，不乘 8）。
+//
+// 文件名偏离契约树的 parse_linux.go：_linux.go 后缀会被 Go 隐式附加
+// GOOS=linux 构建约束（与 parse_win.go 头注释记录的是同一陷阱），
+// macOS/Windows 上整个文件不参与编译，collector.go 引用 LinuxSample /
+// ParseLinuxOutput / clampPct 时报 undefined，非 Linux 开发机无法
+// `go build ./...`。定名 parse_lnx.go 后解析逻辑在全部平台参与编译，
+// 运行期由采集路径按目标 OS 选择模板（语义不变）。
 //
 // 防终止条件铁律：全部解析函数对输入行数与每行字段数有硬上限——
 // maxParseLines 限制总行数，超出部分丢弃（采集输出本身受通道层 256KB
