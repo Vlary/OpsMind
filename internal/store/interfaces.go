@@ -189,6 +189,10 @@ type ConversationStore interface {
 	// mode=nil 清除覆盖（跟随全局）；PATCH /api/conversations/:id 的
 	// approval_mode 分支唯一写入口。mode 合法性由 DB CHECK 兜底。
 	SetApprovalMode(ctx context.Context, id string, mode *ApprovalMode, at time.Time) (Conversation, error)
+	// ListReplayCatalog 是回放目录聚合查询（八期 BE-R，契约 2.12 约定 4 /
+	// 5.19.1）。排序 last_message_at DESC, id DESC；多查一条判定 hasMore；
+	// 游标语义与 ListPage 完全一致。计数经 LATERAL 子查询一次取回（禁止 N+1）。
+	ListReplayCatalog(ctx context.Context, p ListReplayCatalogParams) ([]ReplayCatalogItem, bool, error)
 }
 
 // MessageStore 是消息仓储。

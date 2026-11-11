@@ -14,7 +14,8 @@ import {
 } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { message } from '../../components/antdMessage';
-import { lazy, Suspense, useState } from 'react';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { api } from '../../api/client';
 import { qk } from '../../api/queryKeys';
@@ -51,9 +52,6 @@ import '../../styles/admin.css';
 import { isValidUUID, normalizeUUID } from './uuidFilter';
 
 type AuditLog = components['schemas']['AuditLog'];
-
-// FE-P2（六期）：会话执行回放播放器，点击展开行「回放」链接时动态加载。
-const ReplayViewer = lazy(() => import('../chat/ReplayViewer'));
 
 const PAGE_SIZES = [20, 50, 100, 200];
 
@@ -168,11 +166,12 @@ function AuditDetail({
       children: record.conversation_id ? (
         <Space size={4}>
           <CopyableValue value={record.conversation_id} label="复制会话 ID" />
-          {/* FE-P2（六期，契约 8.7 回放播放器）：审计行 → 会话执行回放。 */}
+          {/* 八期 FE-R（契约 2.12 约定 2）：审计行「回放」→ 同标签页 SPA
+              跳转 `/replays/<conversationId>`（不再打开 Modal）。 */}
           <Button
             type="link"
             size="small"
-            aria-label="回放会话"
+            aria-label="回放"
             onClick={() => onReplay(record.conversation_id ?? '')}
           >
             回放
@@ -256,8 +255,7 @@ export default function AuditPage() {
   const [pageSize, setPageSize] = useState(50);
   const [cursors, setCursors] = useState<Array<number | undefined>>([undefined]);
   const [pageIndex, setPageIndex] = useState(0);
-  // FE-P2（六期）：从展开行的「回放」链接打开会话执行回放。
-  const [replay, setReplay] = useState<{ id: string } | null>(null);
+  const navigate = useNavigate();
 
   const beforeId = cursors[pageIndex];
 
@@ -564,7 +562,7 @@ export default function AuditPage() {
             pagination={false}
             expandable={{
               expandedRowRender: (record) => (
-                <AuditDetail record={record} onReplay={(id) => setReplay({ id })} />
+                <AuditDetail record={record} onReplay={(id) => navigate(`/replays/${id}`)} />
               ),
             }}
             locale={{
@@ -587,18 +585,8 @@ export default function AuditPage() {
         </>
       ) : null}
 
-      {/* FE-P2（六期）：会话执行回放（审计行「回放」链接打开）。key 保证
-          连续回放不同会话时播放器复位。 */}
-      {replay ? (
-        <Suspense fallback={null}>
-          <ReplayViewer
-            key={replay.id}
-            open={replay !== null}
-            conversationId={replay.id}
-            onClose={() => setReplay(null)}
-          />
-        </Suspense>
-      ) : null}
+      {/* 八期 FE-R（契约 2.12 约定 2）：Modal 回放形态下线——审计行「回放」
+          直接 SPA 跳转 `/replays/<conversationId>`（见 AuditDetail）。 */}
     </div>
   );
 }

@@ -1,8 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- 品牌图标（Catppuccin Mocha，与 styles/theme.ts 一致）：
-       圆角方底 base(#1e1e2e) + 品牌蓝云朵 blue(#89b4fa) + sapphire(#74c7ec)
-       信号点，呼应「云枢 OpsMind」的云端运维定位。 -->
-  <rect width="64" height="64" rx="14" fill="#1e1e2e"/>
-  <circle cx="49" cy="17" r="4" fill="#74c7ec"/>
-  <path transform="translate(10 10) scale(1.8333)" fill="#89b4fa" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="favicon-title">
+  <title id="favicon-title">云枢 OpsMind</title>
+  <!-- 16/32px favicon：固定底板，不能依赖主题继承。底板 #1e1e2e + mark #89b4fa
+       = 7.79:1；裸 #1a56c4 在深色标签栏只有 2.48:1、在中灰 #5a6070 只有 1.05:1，
+       透明底描边会消失。几何：轴 8 / 弧 6 / hub r=8（轴宽 2×）。
+       光学轴心 x=28：32px 下 +2px、16px 下 +1px，均落在整像素列。
+       精确 16px 请用 favicon-16.svg（描边吸附像素）；本文件服务 sizes="any"。 -->
+  <rect width="64" height="64" rx="14" fill="#1e1e2e" />
+  <g transform="translate(4 0)">
+    <g fill="none" stroke="#89b4fa" stroke-linecap="round">
+      <path d="M24 8V56" stroke-width="8" />
+      <path d="M36 16A20 20 0 0 1 36 48" stroke-width="6" />
+    </g>
+    <circle cx="24" cy="32" r="8" fill="#89b4fa" />
+  </g>
+
 </svg>

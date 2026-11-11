@@ -193,17 +193,22 @@ test.describe('六期：执行回放播放器', () => {
       }),
     );
 
-    await page.getByRole('button', { name: '回放' }).click();
+    // 八期 FE-R（契约 2.12 约定 2）：对话页「回放执行」按钮改为 SPA 跳转到
+    // `/replays/<id>`（不再开 Modal）。
+    await page.getByRole('button', { name: '回放执行' }).click();
+    await expect(page).toHaveURL(new RegExp(`/replays/${cid}$`));
+    await expect(page.locator('.ant-modal')).toHaveCount(0);
     const steps = page.locator('.replay-steps');
     await expect(steps).toBeVisible();
 
     // truncated 提示（步数上限）。
     await expect(page.getByText('超出 20000 步上限，仅显示最近 6 步')).toBeVisible();
 
-    // 初始：第 1 步（user_message）高亮，只有已播放步渲染。
+    // 初始：第 1 步（user_message）高亮。八期起时间轴是完整列表（虚拟滚动
+    // 只裁 DOM 数量，不裁逻辑步数），不再只渲染「已播放步」。
     await expect(page.locator('.replay-counter')).toHaveText('第 1 / 6 步');
     await expect(page.locator('.replay-step--active')).toHaveAttribute('data-kind', 'user_message');
-    await expect(page.locator('.replay-step')).toHaveCount(1);
+    await expect(page.locator('.replay-step')).toHaveCount(6);
 
     // 单步推进：reasoning 步复用 ReasoningBlock（默认收起摘要「深度思考」）。
     await page.getByRole('button', { name: '下一步' }).click();
@@ -278,9 +283,8 @@ test.describe('六期：执行回放播放器', () => {
     await page.keyboard.press('Home');
     await expect(page.locator('.replay-counter')).toHaveText('第 1 / 6 步');
 
-    // 关闭弹窗：点击右上角「关闭」（速度下拉聚焦时 ESC 会被其吞掉）。
-    await page.getByRole('button', { name: '关闭' }).click();
-    await expect(page.locator('.replay-steps')).toHaveCount(0);
+    // 八期：没有弹窗可关——离开 `#` 之后步骤卡片不复存在（路由离开即卸载）。
+    await expect(page.locator('.ant-modal')).toHaveCount(0);
   });
 
   test('审计页展开行「回放」链接打开同一播放器', async ({ page }) => {
@@ -310,7 +314,10 @@ test.describe('六期：执行回放播放器', () => {
     await expect(expanded).toBeVisible();
     // 展开态还有会话 ID 复制按钮（契约 8.7 ④）。
     await expect(expanded.getByLabel('复制会话 ID')).toBeVisible();
+    // 八期 FE-R：审计行「回放」→ SPA 跳转 `/replays/<id>`（不再开 Modal）。
     await expanded.getByRole('button', { name: '回放' }).click();
+    await expect(page).toHaveURL(new RegExp(`/replays/${cid}$`));
+    await expect(page.locator('.ant-modal')).toHaveCount(0);
     await expect(page.locator('.replay-steps')).toBeVisible();
     await expect(page.locator('.replay-counter')).toHaveText('第 1 / 6 步');
   });

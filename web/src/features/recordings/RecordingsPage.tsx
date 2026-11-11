@@ -1,4 +1,7 @@
-// F1：回放页（/recordings）。任务定稿：终端录制可浏览器内回放（.cast），
+// F1：录制页（/recordings）。八期 FE-R：导航与页头标题从「回放」改为
+// 「录制」（契约 2.12 约定 1）——它是终端/RDP 会话录像；AI 会话的事件级
+// 执行回放在 `/replays`（「回放执行」），两者语义不同不得同名。
+// 任务定稿：终端录制可浏览器内回放（.cast），
 // RDP 录制仅展示元数据与「下载 .guac」——浏览器内播放按契约明确标注
 // v1 不支持（转码不在二期范围）。
 //
@@ -256,7 +259,7 @@ export default function RecordingsPage() {
   return (
     <div className="opsmind-admin-page">
       <PageHeader
-        title="回放"
+        title="录制"
         description="终端会话录制（asciinema v2）回放与下载；RDP 会话录制下载"
         extra={
           <Button

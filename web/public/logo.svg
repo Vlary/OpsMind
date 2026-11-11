@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="brand-logo-title">
+  <title id="brand-logo-title">云枢 OpsMind</title>
+  <!-- 独立文档图标（<img>、分享卡、PDF、非浏览器渲染器）。这些场景拿不到宿主的
+       data-theme，prefers-color-scheme 又只反映操作系统，所以本文件不写任何
+       主题查询：固定 #1e1e2e 圆角底板 + #89b4fa mark（mark 对底板
+       7.79:1），不依赖宿主底色。应用内请用内联 BrandMark.tsx（currentColor
+       跟随主色令牌（color-primary））；需要透明底时用 logo-mark.svg（浅色）或
+       logo-mark-dark.svg（深色）。
+       几何：轴 8 / 弧 6 / hub r=8；光学轴心 x=26.625（alpha 质心对齐 32）。
+       16px 请用 favicon-16.svg，不要把本文件缩到 16px。 -->
+  <rect width="64" height="64" rx="14" fill="#1e1e2e" />
+  <g transform="translate(2.625 0)">
+    <g fill="none" stroke="#89b4fa" stroke-linecap="round">
+      <path d="M24 8V56" stroke-width="8" />
+      <path d="M36 16A20 20 0 0 1 36 48" stroke-width="6" />
+    </g>
+    <circle cx="24" cy="32" r="8" fill="#89b4fa" />
+  </g>
+
+</svg>

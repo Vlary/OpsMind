@@ -407,7 +407,8 @@ test.describe('六期打磨 sprint 6：回放正文与聊天页同源 Markdown',
       }),
     );
 
-    await page.getByRole('button', { name: '回放' }).click();
+    // 八期 FE-R：回放已是独立页面，直接进入 `/replays/<id>`（Modal 下线）。
+    await page.goto(`/replays/${cid}`);
     const replayStep = page.locator('.replay-step').first();
     await expect(replayStep).toHaveAttribute('data-kind', 'assistant_text');
     // Markdown 渲染：代码围栏变成代码块（此前是 <p> 里的 ```bash 字面量）。

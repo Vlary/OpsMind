@@ -105,7 +105,7 @@ test('回放页列表能渲染', async ({ page }) => {
   });
 
   await page.goto('/recordings');
-  await expect(page.getByRole('heading', { name: '回放' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '录制' })).toBeVisible();
 
   // 终端录制列表：空态明确。
   await expect(page.getByTestId('term-recordings-tab')).toBeVisible();

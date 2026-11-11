@@ -62,6 +62,8 @@ func NewRouter(d *Deps) *gin.Engine {
 	protected.GET("/conversations/:id/tool-calls", d.handleListToolCalls)
 	// 六期 BE-P（契约 2.11 约定 4）：会话执行回放——持久化表重建。
 	protected.GET("/conversations/:id/replay", d.handleConversationReplay)
+	// 八期 BE-R（契约 2.12 约定 4 / 5.19.1）：回放目录聚合查询。
+	protected.GET("/replays", d.handleListReplays)
 
 	// BE2 的 RegisterBE2Routes 注册 servers/databases/approvals/audit/ops。
 	d.RegisterBE2Routes(protected)

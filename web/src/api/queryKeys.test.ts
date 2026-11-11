@@ -64,3 +64,22 @@ describe('参数化 query key 隔离', () => {
     expect(qk.audit({})).not.toEqual(qk.audit({ action: '' }));
   });
 });
+
+describe('八期 FE-R：回放目录 key', () => {
+  it('replays(q, has_actions) 结构为 [replays, filters]', () => {
+    expect(qk.replays({ q: '磁盘', has_actions: true })).toEqual([
+      'replays',
+      { q: '磁盘', has_actions: true },
+    ]);
+  });
+
+  it('q / has_actions 变化产生不同键（切 key 而不失效旧 key）', () => {
+    expect(qk.replays({ q: 'a' })).not.toEqual(qk.replays({ q: 'b' }));
+    expect(qk.replays({ has_actions: true })).not.toEqual(qk.replays({ has_actions: false }));
+  });
+
+  it('目录 key 与单会话回放 key 前缀不同（目录失效不影响播放器）', () => {
+    expect(qk.replays({})[0]).toBe('replays');
+    expect(qk.replay('c1')[0]).toBe('replay');
+  });
+});

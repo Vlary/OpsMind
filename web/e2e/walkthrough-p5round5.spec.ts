@@ -288,7 +288,10 @@ test('batch：tag 筛选+描述创建→批准→失败 toast 全文→partial �
   await drawer.getByRole('button', { name: /关\s*闭/ }).click();
   const jobRow = page.getByRole('row', { name: /走查round5批量意图/ });
   await expect(jobRow.getByText('部分完成')).toBeVisible({ timeout: 20_000 });
-  await expect(jobRow.getByText('1/1')).toBeVisible();
+  // 进度列是独立单元格「done/total」。不能用 getByText('1/1')：子串匹配
+  // 会命中年份里含「1/1」的创建时间（如 2026/11/10 02:39:35）而触发
+  // strict mode 冲突（八期门禁实测）。按单元格精确匹配。
+  await expect(jobRow.getByRole('cell', { name: '1/1', exact: true })).toBeVisible();
 
   // 重新打开详情 → 重试失败项（1 台）→ 预填表单。
   await jobRow.getByRole('button', { name: /详\s*情/ }).click();
