@@ -59,6 +59,9 @@ export const qk = {
   // FE-P2（六期，CONTRACT.md 8.4）：会话执行回放 key。每次打开重取
   // （staleTime 0）；流式进行中禁用回放入口（先等 done）。
   replay: (id: string) => ['replay', id] as const,
+  // FE-R（八期，CONTRACT.md 8.4）：回放目录（带 q/has_actions 过滤，
+  // infinite query；q/has_actions 变化直接切 key，不失效旧 key）。
+  replays: (filters: Record<string, string | boolean | undefined>) => ['replays', filters] as const,
   // 六期（FE-P1，CONTRACT.md 8.4）：公开系统设置（全局审批门限）key。
   settings: ['settings'] as const,
   // 六期（FE-P1）：审批卡编辑态的改写命令实时风险预览（preview-risk）。

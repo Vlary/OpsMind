@@ -1,0 +1,397 @@
+/* FE-R（八期）：独立回放页（/replays）样式——六期播放器样式迁移 + 页面布局。
+   kind 分色按契约 8.7：user_message 蓝 / assistant_text 默认 / reasoning 紫 /
+   tool_call 青 / approval 黄 / execution 绿；execution 输出折叠面板
+   content-visibility:auto（11 节防 OOM 第 17 条）。
+   色值一律引用 tokens.css 的语义变量（契约 8.3.1：本文件不得出现色值字面量）。 */
+
+/* ========== 页面骨架：左目录 + 右播放器 ========== */
+.opsmind-replay-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.opsmind-replay-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 12px;
+  overflow: hidden;
+}
+
+/* 左栏会话目录：固定宽 + 自身滚动（目录很长也不推开播放器）。 */
+.opsmind-replay-catalog {
+  flex: 0 0 320px;
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  background: var(--color-bg-container);
+  overflow: hidden;
+}
+
+.replay-catalog-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.replay-catalog-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.replay-catalog-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.replay-catalog-item:hover {
+  background: var(--color-bg-hover);
+}
+
+.replay-catalog-item--active {
+  background: var(--color-bg-selected);
+  border-color: var(--color-primary);
+}
+
+.replay-catalog-title {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replay-catalog-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.replay-catalog-footer {
+  padding: 8px 12px;
+  border-top: 1px solid var(--color-border-subtle);
+  display: flex;
+  justify-content: center;
+}
+
+/* 右栏播放器：占满剩余空间，内部三段（工具条 / 步骤列表 / 控制条）。 */
+.opsmind-replay-player {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 8px;
+  background: var(--color-bg-container);
+}
+
+.opsmind-replay-player--center {
+  align-items: center;
+  justify-content: center;
+}
+
+.replay-banner {
+  margin: 12px 16px 0;
+}
+
+.replay-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.replay-hotkey-hint {
+  color: var(--color-text-tertiary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+.replay-match-nav {
+  align-items: center;
+}
+
+.replay-conversation {
+  align-items: center;
+  max-width: 320px;
+}
+
+.replay-conversation-id {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+}
+
+.replay-match-label {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.replay-filter-label {
+  font-size: 12px;
+}
+
+.replay-state {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.replay-state--error {
+  align-items: flex-start;
+}
+
+/* ========== 步骤列表（虚拟滚动容器，固定高度由 flex 撑出） ========== */
+.replay-steps {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+  position: relative;
+}
+
+/* 虚拟滚动内层：总高度由 virtualizer.getTotalSize() 给定；子项绝对定位
+   由 transform 平移（不参与文档流的重排）。 */
+.replay-steps-inner {
+  position: relative;
+  width: 100%;
+}
+
+.replay-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding-bottom: 8px;
+}
+
+.replay-step {
+  border-left: 3px solid var(--color-text-tertiary);
+  border-radius: 6px;
+  background: var(--color-bg-subtle);
+  padding: 8px 12px;
+}
+
+.replay-step--blue {
+  border-left-color: var(--color-primary);
+}
+
+.replay-step--default {
+  border-left-color: var(--color-text-tertiary);
+}
+
+.replay-step--purple {
+  border-left-color: var(--color-accent);
+}
+
+.replay-step--cyan {
+  border-left-color: var(--color-info);
+}
+
+.replay-step--gold {
+  border-left-color: var(--color-warning);
+}
+
+.replay-step--green {
+  border-left-color: var(--color-success);
+}
+
+/* 播放逐条高亮推进：当前步整体提亮。 */
+.replay-step--active {
+  background: var(--color-bg-active);
+  outline: 1px solid var(--color-focus-ring);
+}
+
+.replay-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.replay-step-seq {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  min-width: 52px;
+}
+
+.replay-step-kind {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.replay-step--purple .replay-step-kind {
+  color: var(--color-accent);
+  font-style: italic;
+}
+
+/* 「复制本步」贴在头部右侧（margin-left:auto 把剩余空间吃掉）。 */
+.replay-step-copy {
+  margin-left: auto;
+  display: inline-flex;
+}
+
+.replay-step-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.replay-step-body .replay-step-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.replay-step-content {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.replay-step--purple .replay-step-content {
+  font-style: italic;
+  color: var(--color-text-secondary);
+}
+
+/* 六期打磨 sprint 6：assistant_text 步改走 LazyMarkdownView（与聊天页同源）。
+   外层不再用 pre-wrap（Markdown 渲染后换行由 p/列表承担，保留 pre-wrap 会
+   把源码式空白带进渲染结果），长历史文本仍由内容高度自然撑开；执行输出
+   折叠面板的 content-visibility 规则不变（防 OOM 第 17 条）。 */
+.replay-step-content--markdown {
+  white-space: normal;
+}
+
+.replay-step-section {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.replay-section-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.replay-inline-label {
+  font-size: 12px;
+}
+
+.replay-inline-note {
+  font-size: 12px;
+}
+
+/* 搜索命中片段（契约 8.7 ④）：只展示第一处命中，上下文各固定截断。 */
+.replay-search-hit {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  word-break: break-all;
+}
+
+.replay-search-hit mark {
+  background: var(--color-warning-soft);
+  color: var(--color-text);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.replay-command-original {
+  text-decoration: line-through;
+  color: var(--color-text-tertiary);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.replay-output {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+
+.replay-controls {
+  border-top: 1px solid var(--color-border-subtle);
+  padding: 10px 16px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.replay-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.replay-summary {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 120px;
+}
+
+.replay-counter {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* 窄屏（< md）：目录折到上方，播放器在下。 */
+@media (max-width: 900px) {
+  .opsmind-replay-layout {
+    flex-direction: column;
+  }
+
+  .opsmind-replay-catalog {
+    flex: 0 0 220px;
+    min-width: 0;
+  }
+}

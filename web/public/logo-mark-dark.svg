@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="logo-mark-dark-title">
+  <title id="logo-mark-dark-title">云枢 OpsMind</title>
+  <!-- ≥24px 固定深色版（<img> 用）：轴 8 / 弧 6 / hub r=8，光学轴心 x=28。
+       #89b4fa 在 #1e1e2e 上 7.79:1、在 #313244 上 5.97:1。浅色底请用
+       logo-mark.svg。 -->
+  <g transform="translate(4 0)">
+    <g fill="none" stroke="#89b4fa" stroke-linecap="round">
+      <path d="M24 8V56" stroke-width="8" />
+      <path d="M36 16A20 20 0 0 1 36 48" stroke-width="6" />
+    </g>
+    <circle cx="24" cy="32" r="8" fill="#89b4fa" />
+  </g>
+</svg>

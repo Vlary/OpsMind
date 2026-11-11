@@ -91,8 +91,24 @@ a:active {
 
 /* ========== 应用壳层 ========== */
 .app-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 18px 16px 12px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 光学补偿已写进 BrandMark.tsx 的几何（translate(4 0)，20px 下 +1.25px），
+   这里只保留尺寸与色值。不要再加 translateX，否则会重复补偿。 */
+.app-brand-mark {
+  flex: none;
+  color: var(--color-primary);
+}
+
+.app-brand-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -130,6 +146,17 @@ a:active {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+/* 八期回放页（/replays）：左目录 + 右播放器两栏各自滚动，页面本身不滚。
+   与对话页同构（overflow:hidden + 纵向 flex），否则内层复用 flex:1 的
+   列表拿不到确定高度，虚拟滚动容器会被内容撑开（20000 步时整页超长）。 */
+.app-content--replay {
+  padding: 16px 24px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .app-center {

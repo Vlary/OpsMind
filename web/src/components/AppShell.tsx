@@ -26,6 +26,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
 import { themeConfig } from '../styles/theme';
 import { useTheme, type ThemePreference } from '../styles/themePreference';
+import BrandMark from './BrandMark';
 import { NAV_ITEMS } from './navItems';
 
 import { api } from '../api/client';
@@ -44,6 +45,18 @@ function selectedKey(pathname: string): string {
 
 function isChatPath(pathname: string): boolean {
   return pathname === '/chat' || pathname.startsWith('/c/');
+}
+
+/**
+ * 回放页（八期 FE-R）：与对话页同为「两栏各自滚动」的固定高布局。
+ *
+ * `.app-content` 默认 `padding:24px + overflow:auto`——右栏虚拟滚动容器
+ * 的 `flex:1` 在可滚动的父级里拿不到确定高度，20000 步时整页会被撑成
+ * 数万像素。回放页改用 `app-content--replay`（overflow:hidden + 纵向
+ * flex），列表高度 = 视口 - 控制条（契约 8.7 ⑦）。
+ */
+function isReplayPath(pathname: string): boolean {
+  return pathname === '/replays' || pathname.startsWith('/replays/');
 }
 
 /**
@@ -171,7 +184,12 @@ export default function AppShell() {
 
   const brand = (
     <div className="app-brand">
-      <Typography.Text strong style={{ fontSize: 16 }}>
+      {/* 折叠态只留 "OM" 字标，不把 mark 单独留在侧栏——它的首读是
+          「轴 + 弧」的抽象符号，单独出现容易和导航图标混淆。 */}
+      {collapsed && !isMobile ? null : (
+        <BrandMark size={20} decorative className="app-brand-mark" />
+      )}
+      <Typography.Text strong className="app-brand-text" style={{ fontSize: 16 }}>
         {collapsed && !isMobile ? 'OM' : '云枢 OpsMind'}
       </Typography.Text>
     </div>
@@ -268,7 +286,11 @@ export default function AppShell() {
 
           <Layout.Content
             className={
-              isChatPath(location.pathname) ? 'app-content app-content--chat' : 'app-content'
+              isChatPath(location.pathname)
+                ? 'app-content app-content--chat'
+                : isReplayPath(location.pathname)
+                  ? 'app-content app-content--replay'
+                  : 'app-content'
             }
           >
             <Outlet />

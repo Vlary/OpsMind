@@ -54,6 +54,8 @@ describe('页面标题：导航与页面标题三层一致（契约 8.3.10）', 
       '/alerts',
       '/inspections',
       '/batch',
+      '/replays',
+      '/replays/550e8400-e29b-41d4-a716-446655440000',
       '/settings',
       '/definitely-not-a-route',
     ];

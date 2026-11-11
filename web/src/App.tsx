@@ -43,6 +43,9 @@ const InspectionsPage = lazy(() => import('./features/inspections/InspectionsPag
 const BatchPage = lazy(() => import('./features/batch/BatchPage'));
 // 六期 FE-P1（CONTRACT.md 8.1 路由表）：/settings 全局审批门限。
 const SettingsPage = lazy(() => import('./features/settings/SettingsPage'));
+// 八期 FE-R（CONTRACT.md 8.1 路由表）：/replays 与 /replays/:conversationId
+// 同一页面（左目录 + 右播放器）。
+const ReplaysPage = lazy(() => import('./features/replay/ReplaysPage'));
 
 // AntdAppRoot 是必然挂载的根壳：模块求值即预取，router 首帧渲染 lazy 时
 // 命中已在途的同一 import()（Vite 模块缓存），把「多一跳串行」压缩成
@@ -97,6 +100,13 @@ const router = createBrowserRouter([
               { path: '/batch', element: lazyPage(<BatchPage />) },
               // 六期 FE-P1：/settings 全局审批门限（受保护）。
               { path: '/settings', element: lazyPage(<SettingsPage />) },
+              // 八期 FE-R：/replays 与 /replays/:conversationId 同一页面
+              // （独立回放页：左目录 + 右时间轴，契约 2.12 约定 1）。
+              { path: '/replays', element: lazyPage(<ReplaysPage />) },
+              {
+                path: '/replays/:conversationId',
+                element: lazyPage(<ReplaysPage />),
+              },
             ],
           },
         ],

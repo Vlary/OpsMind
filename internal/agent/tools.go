@@ -53,6 +53,37 @@ const (
 	contextToolCallMaxPages = 5
 )
 
+// replayActionToolNames 是八期动作类工具的**唯一**名单（契约 7.8 写死）：
+// 会触达真实系统（远端主机 / 网络设备 / 外部数据库 / 编排引擎）的 11 个
+// 工具。回放据此为它们生成 execution 步；其余 7 个纯本地查询/交互工具
+// （list_servers / list_databases / get_metrics / list_alerts /
+// audit_search / get_inspection_report / ask_user）只有 tool_call 步。
+//
+// 禁止在 httpapi（或任何其它包）复制这份名单：判据与回放目录 SQL 的
+// $action_tools 参数都必须来自 ReplayActionTools()（契约 2.12 约定 3 /
+// 5.19.1 / 11 节第 22 条）。
+var replayActionToolNames = []string{
+	ToolSSHExec,
+	ToolServerFacts,
+	ToolContainerAction,
+	ToolContainerList,
+	ToolContainerInspect,
+	ToolContainerLogs,
+	ToolImageList,
+	ToolDBQuery,
+	ToolBatchExecute,
+	ToolRunDiagnosis,
+	ToolRunInspection,
+}
+
+// ReplayActionTools 返回动作类工具的共享清单（契约 7.8 的 11 项，顺序与
+// 表 7.8 一致）。返回副本，调用方修改不影响包内名单。
+func ReplayActionTools() []string {
+	out := make([]string, len(replayActionToolNames))
+	copy(out, replayActionToolNames)
+	return out
+}
+
 // ToolDefinitions 返回发送给模型的固定 11 个工具。
 // 所有参数 schema 均为 type=object、additionalProperties=false。
 func ToolDefinitions() []llm.Tool {

@@ -583,7 +583,9 @@ test('batch：禁止级命令预览 + 双机创建→逐台批准→partial 2/2�
   await drawer.getByRole('button', { name: /关\s*闭/ }).click();
   const jobRow = page.getByRole('row', { name: /走查r6双机批量/ });
   await expect(jobRow.getByText('部分完成')).toBeVisible({ timeout: 20_000 });
-  await expect(jobRow.getByText('2/2')).toBeVisible();
+  // 进度列按单元格精确匹配：getByText('2/2') 是子串匹配，会命中日期
+  // （如 2026/12/2x）触发 strict mode 冲突（同 round5 门禁实测）。
+  await expect(jobRow.getByRole('cell', { name: '2/2', exact: true })).toBeVisible();
 
   // ⑥ 重试失败项（2 台）→ 预填。
   await jobRow.getByRole('button', { name: /详\s*情/ }).click();

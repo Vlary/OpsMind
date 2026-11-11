@@ -6,7 +6,7 @@ import {
   isCommandExecTool,
   isExemptExecution,
 } from '../toolCallBadges';
-import { approvedToolCallIds, isReplayExemptExecution } from '../replayPlayer';
+import { approvedToolCallIds, isReplayExemptExecution } from '../../replay/replayPlayer';
 
 // 六期打磨 sprint 1（契约 8.7 / 2.11 约定 2）：工具卡风险/门限徽标互斥。
 //

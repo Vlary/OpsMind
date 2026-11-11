@@ -64,7 +64,8 @@ async function openReplayWith(page: Page, body: unknown): Promise<void> {
   await page.route(`**/api/conversations/${cid}/replay`, (route) =>
     route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) }),
   );
-  await page.getByRole('button', { name: '回放' }).click();
+  // 八期 FE-R：Modal 下线，直接经 /replays/<id> 打开播放器页。
+  await page.goto(`/replays/${cid}`);
   await expect(page.locator('.replay-steps')).toBeVisible();
 }
 

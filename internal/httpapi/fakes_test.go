@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
@@ -57,6 +58,7 @@ type memStore struct {
 	errMessagesList     error
 	errServersCreate    error
 	errServersUpdate    error
+	errServersList      error // 八期：回放 affected_servers 装配失败不阻断
 	errDatabasesGet     error
 	errProvidersCreate  error
 	errApprovalsDecide  error
@@ -275,6 +277,12 @@ type memServers memStore
 
 func (r *memServers) List(context.Context) ([]store.Server, error) {
 	m := (*memStore)(r)
+	m.mu.Lock()
+	err := m.errServersList
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]store.Server, 0, len(m.servers))
 	for _, s := range m.servers {
 		out = append(out, s)
@@ -744,6 +752,85 @@ func (r *memConversations) SetApprovalMode(_ context.Context, id string, mode *s
 	return c, nil
 }
 func (r *memConversations) Touch(_ context.Context, id string, at time.Time) error { return nil }
+
+// ListReplayCatalog 与生产 pgstore 同语义的内存实现（八期 BE-R）：
+// 排序 last_message_at DESC, id DESC；q 大小写不敏感子串（无需转义——
+// 内存比较是字面匹配）、has_actions 过滤、游标翻页、多查一条判 has_more。
+// 计数与 truncated 预判口径同契约 5.19.1。
+func (r *memConversations) ListReplayCatalog(_ context.Context, p store.ListReplayCatalogParams) ([]store.ReplayCatalogItem, bool, error) {
+	m := (*memStore)(r)
+	if p.Limit < 1 || p.Limit > replayCatalogMaxLimit {
+		return nil, false, store.ErrInvalid
+	}
+	if utf8.RuneCountInString(p.Query) > replayCatalogQueryMaxRunes {
+		return nil, false, store.ErrInvalid
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	actionTools := map[string]struct{}{}
+	for _, name := range p.ActionTools {
+		actionTools[name] = struct{}{}
+	}
+	q := strings.ToLower(p.Query)
+	out := make([]store.ReplayCatalogItem, 0, len(m.conversations))
+	for _, c := range m.conversations {
+		if q != "" && !strings.Contains(strings.ToLower(c.Title), q) {
+			continue
+		}
+		item := store.ReplayCatalogItem{
+			ConversationID: c.ID, Title: c.Title, LastMessageAt: c.LastMessageAt,
+		}
+		for _, tc := range m.toolCalls {
+			if tc.ConversationID != c.ID {
+				continue
+			}
+			item.ToolCount++
+			if _, ok := actionTools[tc.Name]; ok {
+				item.ActionCount++
+			}
+		}
+		for _, ap := range m.approvals {
+			if ap.ConversationID != nil && *ap.ConversationID == c.ID {
+				item.ApprovalCount++
+			}
+		}
+		item.HasActions = item.ActionCount > 0
+		item.Truncated = item.ToolCount+item.ApprovalCount > replayMaxSteps
+		if p.HasActions && !item.HasActions {
+			continue
+		}
+		out = append(out, item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].LastMessageAt.Equal(out[j].LastMessageAt) {
+			return out[i].LastMessageAt.After(out[j].LastMessageAt)
+		}
+		return out[i].ConversationID > out[j].ConversationID
+	})
+	start := 0
+	if p.Cursor.ID != "" {
+		for start < len(out) {
+			it := out[start]
+			if !it.LastMessageAt.Equal(p.Cursor.LastMessageAt) {
+				if it.LastMessageAt.Before(p.Cursor.LastMessageAt) {
+					break
+				}
+			} else if it.ConversationID < p.Cursor.ID {
+				break
+			}
+			start++
+		}
+	}
+	end := start + p.Limit
+	hasMore := false
+	if end < len(out) {
+		hasMore = true
+	} else {
+		end = len(out)
+	}
+	return out[start:end], hasMore, nil
+}
 func (r *memConversations) Delete(_ context.Context, id string) error {
 	m := (*memStore)(r)
 	m.mu.Lock()

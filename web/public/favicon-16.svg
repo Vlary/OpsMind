@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="favicon-16-title">
+  <title id="favicon-16-title">云枢 OpsMind</title>
+  <!-- 16px 专用像素钉版。几何与 favicon.svg 同源（轴 8 / 弧 6 / hub r=8，
+       光学轴心 x=28 → 16px 下正好 +1px），但描边组启用
+       shape-rendering="crispEdges"：1.5px 弧在 16px 被吸附成 2 列满 alpha，
+       不再出现 126/255 的半透明边缘；轴帽也由抗锯齿圆帽变为整像素。
+       底板圆角同步按 16px 取 3px（rx=12，favicon.svg 是 3.5px/rx=14）：
+       16px 角像素 231/255，rx=14 时只有 202/255。
+       16px 结果：轴占第 6/7 列、hub 直径 4px、弧 2px、全部满 alpha。
+       去掉 crispEdges 会退回半透明弧，不要改。 -->
+  <rect width="64" height="64" rx="12" fill="#1e1e2e" />
+  <g transform="translate(4 0)">
+    <g fill="none" stroke="#89b4fa" stroke-linecap="round" shape-rendering="crispEdges">
+      <path d="M24 8V56" stroke-width="8" />
+      <path d="M36 16A20 20 0 0 1 36 48" stroke-width="6" />
+    </g>
+    <circle cx="24" cy="32" r="8" fill="#89b4fa" />
+  </g>
+
+</svg>

@@ -717,3 +717,20 @@ type BatchResult struct {
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
 }
+
+// ---------- 八期（BE-R 回放目录）----------
+
+// ReplayCatalogItem 是回放目录单行（契约 2.12 约定 4 / 5.19.1）。计数由
+// ListReplayCatalog 的 LATERAL 聚合派生（不落列、不由前端拼装）。
+// ActionCount 只统计动作类工具（agent.ReplayActionTools，7.8）——含
+// failed/denied 的调用（它们是「发生过的动作事实」）。
+type ReplayCatalogItem struct {
+	ConversationID string    `json:"conversation_id"`
+	Title          string    `json:"title"`
+	LastMessageAt  time.Time `json:"last_message_at"`
+	ToolCount      int       `json:"tool_count"`
+	ActionCount    int       `json:"action_count"`
+	ApprovalCount  int       `json:"approval_count"`
+	HasActions     bool      `json:"has_actions"` // ActionCount > 0
+	Truncated      bool      `json:"truncated"`   // ToolCount+ApprovalCount > 20000
+}

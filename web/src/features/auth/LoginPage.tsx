@@ -1,4 +1,4 @@
-import { CloudServerOutlined, LockOutlined, UserOutlined } from '@ant-design/icons';
+import { LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, ConfigProvider, Form, Input, Spin, Typography } from 'antd';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
@@ -8,6 +8,7 @@ import { useTheme } from '../../styles/themePreference';
 
 import { api } from '../../api/client';
 import { qk } from '../../api/queryKeys';
+import BrandMark from '../../components/BrandMark';
 import ApiErrorAlert from '../../components/admin/ApiErrorAlert';
 import {
   ApiRequestError,
@@ -120,7 +121,10 @@ export default function LoginPage() {
         <Card className="opsmind-login-card">
           <div className="opsmind-login-brand">
             <div className="opsmind-login-logo">
-              <CloudServerOutlined />
+              {/* 40px 底座内 24px mark；颜色继承 .opsmind-login-logo 的
+                  color: var(--color-primary)，随主题切换。字标紧随其后，
+                  不把 mark 单独当导航图标使用。 */}
+              <BrandMark size={24} decorative />
             </div>
             <div>
               <Typography.Title level={4} style={{ margin: 0 }}>

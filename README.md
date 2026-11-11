@@ -1,5 +1,10 @@
 # 云枢 OpsMind
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/logo-horizontal-dark.png">
+  <img src="docs/brand/logo-horizontal.png" alt="云枢 OpsMind" width="420">
+</picture>
+
 **AI 驱动的运维控制台**：用自然语言下达运维指令，大模型通过固定的 18 个工具读取资产、执行命令、查询数据库；高风险命令强制人工审批，全部动作写入只追加的审计哈希链。
 
 单管理员、单实例部署。后端 Go 单二进制，前端 React SPA，元数据存 PostgreSQL。
@@ -272,7 +277,3 @@ pnpm -C web test:e2e
 ---
 
 其他说明见 [CHANGELOG.md](CHANGELOG.md)。
-
-## 许可证
-
-本项目采用 [MIT License](LICENSE)。

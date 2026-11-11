@@ -16,6 +16,7 @@ import {
   DatabaseOutlined,
   DesktopOutlined,
   FileSearchOutlined,
+  HistoryOutlined,
   MessageOutlined,
   RobotOutlined,
   ScheduleOutlined,
@@ -39,9 +40,11 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { key: '/databases', icon: createElement(DatabaseOutlined), label: '数据库' },
   { key: '/providers', icon: createElement(RobotOutlined), label: '模型' },
   { key: '/audit', icon: createElement(FileSearchOutlined), label: '审计' },
-  // F1 二期：终端 / 回放 / RDP 桌面导航（CONTRACT.md 8.1）。
+  // F1 二期：终端 / 录制 / RDP 桌面导航（CONTRACT.md 8.1）。
+  // 八期 FE-R：/recordings 文案「回放」→「录制」（2.12 约定 1）——它是终端/
+  // RDP 会话录像；AI 会话的事件级回放在 /replays（「回放执行」）。
   { key: '/term', icon: createElement(CodeOutlined), label: '终端' },
-  { key: '/recordings', icon: createElement(VideoCameraOutlined), label: '回放' },
+  { key: '/recordings', icon: createElement(VideoCameraOutlined), label: '录制' },
   { key: '/rdp', icon: createElement(DesktopOutlined), label: '桌面' },
   // C2 四期：容器管理导航（CONTRACT.md 8.2 AppShell 菜单含「容器」）。
   { key: '/containers', icon: createElement(AppstoreOutlined), label: '容器' },
@@ -50,6 +53,8 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { key: '/alerts', icon: createElement(AlertOutlined), label: '告警' },
   { key: '/inspections', icon: createElement(ScheduleOutlined), label: '巡检' },
   { key: '/batch', icon: createElement(ThunderboltOutlined), label: '批量' },
+  // 八期 FE-R：独立回放页（AI 会话的事件级执行回放，契约 2.12 约定 1）。
+  { key: '/replays', icon: createElement(HistoryOutlined), label: '回放执行' },
   // 六期 FE-P1：设置（全局审批门限，CONTRACT.md 8.1 /settings）。
   { key: '/settings', icon: createElement(SettingOutlined), label: '设置' },
 ];

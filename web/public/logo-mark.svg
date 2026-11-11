@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="logo-mark-title">
+  <title id="logo-mark-title">云枢 OpsMind</title>
+  <!-- ≥24px 固定浅色版（<img> 用）：轴 8 / 弧 6 / hub r=8，光学轴心 x=28
+       （24px 下 +1.5px、32px 下 +2px）。#1a56c4 在白底 6.62:1。深色底请用
+       logo-mark-dark.svg；应用内请用内联 BrandMark.tsx（currentColor），
+       <img> 不继承 CSS 的 color，所以这里必须写死色值。 -->
+  <g transform="translate(4 0)">
+    <g fill="none" stroke="#1a56c4" stroke-linecap="round">
+      <path d="M24 8V56" stroke-width="8" />
+      <path d="M36 16A20 20 0 0 1 36 48" stroke-width="6" />
+    </g>
+    <circle cx="24" cy="32" r="8" fill="#1a56c4" />
+  </g>
+</svg>

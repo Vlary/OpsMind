@@ -453,3 +453,16 @@ type FinishBatchResultParams struct {
 	DurationMS int64
 	FinishedAt time.Time
 }
+
+// ListReplayCatalogParams 是回放目录查询参数（八期 BE-R，契约 2.12 约定 4 /
+// 5.19.1）。Query 为空串表示不过滤标题（ILIKE 前必须转义 %/_/反斜杠并显式
+// ESCAPE）；HasActions=true 时只返回 ActionCount>0 的会话；ActionTools 由
+// httpapi 传入 agent.ReplayActionTools()（11 个动作类工具名，7.8）——store
+// 不得内置名单。
+type ListReplayCatalogParams struct {
+	Query       string
+	HasActions  bool
+	Cursor      ConversationListCursor // 复用会话列表游标类型（last_message_at, id）
+	Limit       int
+	ActionTools []string
+}

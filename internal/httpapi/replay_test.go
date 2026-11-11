@@ -207,7 +207,7 @@ func TestConversationReplayTruncation(t *testing.T) {
 			Status: store.MessageComplete, CreatedAt: base.Add(time.Duration(i) * time.Second),
 		})
 	}
-	steps := buildReplaySteps(msgs, nil, nil)
+	steps := buildReplaySteps(msgs, nil, nil, nil, nil)
 	if len(steps) != n {
 		t.Fatalf("expanded steps = %d, want %d", len(steps), n)
 	}
@@ -354,7 +354,7 @@ func TestReplayUserMessageStripsContextPrefix(t *testing.T) {
 			Content: "普通消息", Status: store.MessageComplete, CreatedAt: base.Add(2 * time.Second),
 		},
 	}
-	steps := buildReplaySteps(msgs, nil, nil)
+	steps := buildReplaySteps(msgs, nil, nil, nil, nil)
 	if len(steps) != 3 {
 		t.Fatalf("steps = %d, want 3", len(steps))
 	}

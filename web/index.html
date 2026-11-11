@@ -5,7 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- 契约 8.3.11 第 6 条：两套主题都支持，不得写死 dark。 -->
     <meta name="color-scheme" content="light dark" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- favicon 是独立文档，不继承主题色：favicon.svg / favicon-16.svg 都带
+         深色圆角底板 + 浅蓝 mark（7.79:1）。favicon-16.svg 不是 favicon.svg
+         的拷贝：它用 crispEdges 把 1.5px 弧吸附成 2 列满 alpha（见该文件注释）。
+         ≥24px 的 UI 用内联 BrandMark.tsx（currentColor）或 logo-mark(.dark).svg，
+         不靠 favicon。 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/favicon-16.svg" sizes="16x16" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <title>云枢 OpsMind</title>
     <!--
       CONTRACT.md 8.3.12：首次绘制前同步确定主题，避免闪白/闪黑（FOUC）。

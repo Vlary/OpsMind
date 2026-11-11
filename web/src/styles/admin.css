@@ -123,6 +123,11 @@
   font-size: 20px;
 }
 
+/* 光学补偿已写进 BrandMark.tsx 的几何（translate(4 0)，24px 下 +1.5px）。 */
+.opsmind-login-logo > svg {
+  display: block;
+}
+
 @media (max-width: 768px) {
   .opsmind-admin-toolbar {
     align-items: stretch;

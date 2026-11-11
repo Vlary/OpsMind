@@ -61,9 +61,8 @@ async function openReplayWith(page: Page, body: unknown): Promise<void> {
   );
   // 回放入口在流式进行中禁用（契约 8.4）；全文可见后 SSE 仍可能未收尾，
   // 先等按钮可用再点（全量并行跑时假 LLM 被两 worker 共享，收尾更慢）。
-  const replayButton = page.getByRole('button', { name: '回放' });
-  await expect(replayButton).toBeEnabled({ timeout: 30_000 });
-  await replayButton.click();
+  // 八期 FE-R：Modal 下线，直接经 /replays/<id> 打开播放器页。
+  await page.goto(`/replays/${cid}`);
   await expect(page.locator('.replay-steps')).toBeVisible();
 }
 

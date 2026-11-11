@@ -46,9 +46,6 @@ import {
 // 拆为动态 import，不进首屏入口链。
 const MessageList = lazy(() => import('./MessageList'));
 
-// FE-P2（六期）：执行回放播放器（Modal）。仅点击「回放」时才加载。
-const ReplayViewer = lazy(() => import('./ReplayViewer'));
-
 type Provider = components['schemas']['Provider'];
 type Server = components['schemas']['Server'];
 type Database = components['schemas']['Database'];
@@ -133,8 +130,9 @@ export default function ChatPage() {
   const [serverIds, setServerIds] = useState<string[]>([]);
   const [databaseIds, setDatabaseIds] = useState<string[]>([]);
   const [sendError, setSendError] = useState<string | null>(null);
-  // FE-P2（六期）：执行回放入口开关（契约 8.4——流式进行中禁用，先等 done）。
-  const [replayOpen, setReplayOpen] = useState(false);
+  // 八期 FE-R（契约 2.12 约定 2）：回放入口改为同标签页 SPA 跳转
+  // `/replays/<conversationId>`，不再打开 Modal。跳转只发生在流式结束后
+  // （按钮在 streaming 时禁用），因此不会触发离开守卫。
 
   const onUnauthorized = useCallback(() => {
     const next = `${window.location.pathname}${window.location.search}`;
@@ -762,11 +760,11 @@ export default function ChatPage() {
                 <Button
                   size="small"
                   icon={<PlayCircleOutlined />}
-                  aria-label="回放"
+                  aria-label="回放执行"
                   disabled={streaming}
-                  onClick={() => setReplayOpen(true)}
+                  onClick={() => navigate(`/replays/${conversationId}`)}
                 >
-                  回放
+                  回放执行
                 </Button>
               </Tooltip>
             ) : null}
@@ -1077,19 +1075,9 @@ export default function ChatPage() {
         </Drawer>
       ) : null}
 
-      {/* FE-P2（六期）：执行回放播放器。流式进行中入口禁用（上方的按钮
-          已按 streaming 屏蔽），打开时每次重取（契约 8.4）。 */}
-      {conversationId && replayOpen ? (
-        <Suspense fallback={null}>
-          <ReplayViewer
-            key={conversationId}
-            open={replayOpen}
-            conversationId={conversationId}
-            title={conversation?.title}
-            onClose={() => setReplayOpen(false)}
-          />
-        </Suspense>
-      ) : null}
+      {/* 八期 FE-R（契约 2.12 约定 2）：Modal 回放形态下线——播放器已迁至
+          `/replays` 页（features/replay/ReplayPlayer.tsx），全站只有那一份
+          实现。此处不再挂载任何回放组件。 */}
 
       {/* 离开确认文案按是否真有会话内 pending 审批区分：仅流式进行时离开
           只会停止本轮回答（batch/诊断审批落库独立于会话流，跳走不受影响），

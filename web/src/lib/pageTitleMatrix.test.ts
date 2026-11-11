@@ -23,13 +23,22 @@ describe('pageTitleFor 路由矩阵', () => {
 
   // 回归：/term /recordings /rdp /containers 四条导航路由曾漏进 PAGE_TITLES，
   // 页面标签页显示「页面不存在 · 云枢 OpsMind」。导航项与标题映射必须一一对应。
+  // 八期 FE-R（契约 8.3.10）：/recordings 更名「录制」，新增 /replays
+  // 「回放执行」——两条断言必须与 NAV_ITEMS 同一次提交更新。
   it('二至四期导航路由都有标题（回归）', () => {
     expect(pageTitleFor('/term')).toBe('终端');
-    expect(pageTitleFor('/recordings')).toBe('回放');
+    expect(pageTitleFor('/recordings')).toBe('录制');
     expect(pageTitleFor('/rdp')).toBe('桌面');
     expect(pageTitleFor('/containers')).toBe('容器');
-    expect(pageTitleFor('/recordings/abc')).toBe('回放');
+    expect(pageTitleFor('/recordings/abc')).toBe('录制');
     expect(pageTitleFor('/containers/c1/logs')).toBe('容器');
+  });
+
+  it('八期：/replays 与 /replays/:id 都是「回放执行」，且与 /recordings 区分', () => {
+    expect(pageTitleFor('/replays')).toBe('回放执行');
+    expect(pageTitleFor('/replays/550e8400-e29b-41d4-a716-446655440000')).toBe('回放执行');
+    expect(pageTitleFor('/recordings')).toBe('录制');
+    expect(pageTitleFor('/recordings')).not.toBe(pageTitleFor('/replays'));
   });
 
   it('前缀相同但不带斜杠的路径不误命中（/chatty 不是 /chat）', () => {

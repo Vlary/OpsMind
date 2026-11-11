@@ -29,7 +29,7 @@ tags:
   - name: providers
     description: 大模型供应商
   - name: conversations
-    description: 会话、消息、工具调用
+    description: 会话、消息、工具调用、执行回放（八期含回放目录）
   - name: chat
     description: 对话流
   - name: approvals
@@ -1105,7 +1105,7 @@ paths:
     get:
       tags: [conversations]
       operationId: conversationReplay
-      summary: 会话执行回放（六期）
+      summary: 会话执行回放（六期；八期扩展）
       description: |
         从持久化表（messages / tool_calls / approvals）重建会话的有序事件序列，
         用于回放播放器。排序写死：timestamp ASC；同 timestamp 按 kind 权重
@@ -1116,6 +1116,16 @@ paths:
         另有一处独立截断：单状态审批满 200 条（approvals.List 无游标）时更早
         审批不纳入回放。两种来源的 truncated 均为 true，具体原因见
         truncated_reason（`steps` / `approvals`；未截断为空串）。
+        **八期（契约 2.12 约定 3 / 7.8）**：`execution` 步从 2 个命令执行工具
+        扩到 11 个动作类工具（ssh_exec / server_facts / container_action /
+        container_list / container_inspect / container_logs / image_list /
+        db_query / batch_execute / run_diagnosis / run_inspection）；全部 18 个
+        工具的 tool_call 步与 11 个动作类工具的 execution 步都带 `result_summary`；execution 步新增
+        `affected_servers` / `result_truncated` / `diagnosis_id` /
+        `inspection_report_id` / `batch_job_id`，`command` 对非命令类工具
+        承载动作串（UI 标注为「动作」）。新增第三道截断：`arguments` 装载
+        总量超 6 MiB 或响应序列化超 8 MiB 时 `truncated_reason='payload'`
+        （优先级 steps > payload > approvals，只报最高者）。
         权限与 GET /api/conversations/{id}/messages 相同（登录态；v1 单管理员）。
       responses:
         '200':
@@ -1128,6 +1138,70 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/replays:
+    get:
+      tags: [conversations]
+      operationId: listReplays
+      summary: 回放目录（八期）
+      description: |
+        返回「可回放会话」的摘要页，供独立回放页（`/replays`）左栏目录使用
+        （契约 2.12 约定 4 / 5.19.1）。每行的计数由 `tool_calls` / `approvals`
+        聚合派生，**不由前端拼装**——前端聚合需要为每个会话各取一次
+        `GET /api/conversations/{id}/replay`（20000 步 / 8 MiB），不可接受。
+        排序 `last_message_at DESC, id DESC`；游标分页与 `GET /api/conversations`
+        同构（`before_last_message_at` + `before_id` 必须成对）。
+        `q` 按标题大小写不敏感子串匹配（`%`/`_`/`\` 转义）；
+        `has_actions=true` 只返回至少有一个动作类工具调用（12 工具，契约 7.8）
+        的会话。`truncated` 为该行步数上限预判（`tool_count + approval_count
+        > 20000`），不预判 payload 预算。
+        权限同 GET /api/conversations（登录态；v1 单管理员）。
+      parameters:
+        - name: q
+          in: query
+          description: 标题子串过滤（大小写不敏感），1..200 字符；空/缺省=不过滤。
+          schema:
+            type: string
+            maxLength: 200
+        - name: has_actions
+          in: query
+          description: true 时只返回含动作类工具调用的会话；缺省 false=不过滤。
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          description: 每页数量，缺省 50。
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: before_last_message_at
+          in: query
+          description: 上一页末行的 last_message_at（RFC3339）；必须与 before_id 成对出现。
+          schema:
+            type: string
+            format: date-time
+        - name: before_id
+          in: query
+          description: 上一页末行的会话 ID；必须与 before_last_message_at 成对出现。
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 回放目录页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayCatalogPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -4286,17 +4360,27 @@ components:
       required: [seq, timestamp, kind]
       additionalProperties: false
       description: |
-        回放单步（六期）。除 seq/timestamp/kind 外字段按 kind 可空：字段全集写死，
-        未用字段为 null（不缺省键）。各 kind 的字段契约：
+        回放单步（六期定义，八期扩展）。除 seq/timestamp/kind 外字段按 kind 可空：
+        字段全集写死，未用字段为 null（不缺省键）。各 kind 的字段契约：
         user_message/assistant_text/reasoning→message_id+content（reasoning 另带
         reasoning_duration_ms；user_message 的 content 已剥离 ChatPage 的
         `<!--opsmind-context … -->` 内部上下文前缀）；
         tool_call→tool_call_id+name+arguments+risk_level+status+error_code+
-        approval_mode；approval→approval_id+tool_call_id+source+server_name+command+
-        original_command+risk_level+edited_risk_level+status；execution→
-        tool_call_id+name+command+status+exit_code+output+error_code+duration_ms
-        （失败且无 result 的调用也生成 status=failed + error_code 的 execution 步，
-        exit_code=-1、output 为空串）。
+        approval_mode+result_summary（八期：全部 18 个工具恒非 null）；
+        approval→approval_id+tool_call_id+source+server_name+command+
+        original_command+risk_level+edited_risk_level+status；
+        execution→tool_call_id+name+command+status+exit_code+output+error_code+
+        duration_ms（六期），八期另加 result_summary+result_truncated+
+        affected_servers+server_name，按工具 kind 带 diagnosis_id /
+        inspection_report_id / batch_job_id（契约 7.8）。
+        execution 的生成范围：六期仅 ssh_exec/container_action；八期扩到 11 个
+        动作类工具（见契约 7.8 矩阵）——其余 7 个本地查询/交互工具（含只读
+        本系统库的 get_inspection_report）不生成 execution 步，但 tool_call 步
+        带 result_summary。失败且无 result 的动作类
+        调用也生成 status=failed + error_code 的 execution 步（exit_code=-1、
+        output 为空串）；denied/expired 等「命令从未执行」不生成。
+        八期 `command` 对非命令类工具承载动作串（如 `docker ps -a`、
+        `inspection:full`、`diagnosis:<id>`），UI 按 name 标注「命令」或「动作」。
       properties:
         seq:
           type: integer
@@ -4327,7 +4411,11 @@ components:
           description: 审批发起来源（approval）。
         server_name:
           type: [string, 'null']
-          description: 审批目标服务器名（approval；服务器删除后空串）。
+          description: |
+            服务器名。approval 步为审批目标服务器名（六期；服务器删除后空串）；
+            八期起 execution 步在单目标动作（affected_servers 恰好 1 个）时同值，
+            多目标/无目标为 null；tool_call 步恒 null（服务器在 arguments 与
+            execution 步）。其余 kind 为 null。
         content:
           type: [string, 'null']
           description: 文本内容（user_message/assistant_text/reasoning）。
@@ -4363,10 +4451,24 @@ components:
           description: 状态（tool_call 的 ToolCallStatus / approval 的 ApprovalStatus / execution 为 succeeded|failed）。
         exit_code:
           type: [integer, 'null']
-          description: 退出码（execution；通道失败 -1）。
+          description: |
+            退出码（execution）。仅 ssh_exec / container_action 有该语义（取
+            result.exit_code；通道失败 -1）；八期其余动作类工具为 null
+            （container_list/db_query 等没有「退出码」，不得填 0 伪装成功）。
         output:
           type: [string, 'null']
-          description: 执行输出（execution；tool_calls.result 持久化值，已受 64KB 截断）。
+          description: |
+            执行输出原文（execution；八期起恒非 null）。取值按工具固定键：
+            ssh_exec/container_action/container_logs 取 result.output；
+            server_facts 取 result.raw_output；container_list/inspect/image_list/
+            db_query/batch_execute/run_diagnosis/run_inspection 取
+            JSON.stringify(result)（契约 7.8 的表）。tool_calls.result 已受
+            ToolResultBytes 64KB 截断：整包被换成
+            {"truncated":true,"original_bytes":N,"preview":"…"} 时 output=preview
+            且 result_truncated=true（不得渲染为空）。
+            八期第二道预算：响应序列化超 8 MiB 时从最旧步起把 output 置空串并
+            置 result_truncated=true（契约 2.12 约定 6）——空串 + result_truncated
+            =true 表示「有输出但为控体积未下发」，与 null（非 execution 步）区分。
         error_code:
           type: [string, 'null']
           description: |
@@ -4384,7 +4486,49 @@ components:
         duration_ms:
           type: [integer, 'null']
           minimum: 0
-          description: 执行耗时毫秒（execution）。
+          description: |
+            执行耗时毫秒（execution，八期起恒非 null）：优先取 result.duration_ms
+            （ssh_exec/container_action/db_query 等带耗时字段的工具），否则取
+            tool_calls 的 finished_at - started_at（契约 7.8）。非 execution 步为 null。
+        result_summary:
+          type: [string, 'null']
+          description: |
+            工具结果的一句话摘要（八期，契约 7.8）。**tool_call 步恒非 null**
+            （失败调用为 `error=<error_code>`，无结果为「无结果」；7 个本地查询/
+            交互工具只有 tool_call 步，摘要即其唯一结果呈现）；**execution 步
+            恒非 null**（11 个动作类工具的一句话结论，如 `<n> 个容器`、
+            `<row_count> 行 · 12ms`、`3 台 · 均分 72 · 2 异常`）。总长 ≤200
+            rune，超出截断补 `…`（此时 result_truncated=true）。其余 kind 为 null。
+        result_truncated:
+          type: [boolean, 'null']
+          description: |
+            该步输出是否被截断（八期，仅 execution 步）。来源：命令类/容器日志/
+            db_query 取 `result.truncated`；run_inspection 取任一 item 的
+            `truncated`；result_summary 自身超长时为 true。null=非 execution 步。
+            **这是「输出是否完整」的唯一判据**——前端据此显示「输出已截断」。
+        affected_servers:
+          type: [array, 'null']
+          description: |
+            该动作实际触达的服务器名清单（八期，仅 execution 步；契约 7.8）。
+            单目标动作为 1 元素、batch_execute/run_inspection 为多元素（真实执行面：
+            batch_jobs.server_ids / inspection_report_items 的 server_id JOIN 名，
+            不只信模型参数）、db_query 为 null（外部数据库不是服务器资产）。
+            本地查询/交互工具不生成 execution 步，故该字段不出现在它们的步骤上；
+            其余 kind 为 null。已删除资产以 `<已删除>` 占位。
+          items:
+            type: string
+        diagnosis_id:
+          type: [string, 'null']
+          description: 诊断会话 ID（八期，仅 run_diagnosis 的 execution 步；播放器深链 `/alerts?diagnosis=`）。
+        inspection_report_id:
+          type: [string, 'null']
+          description: |
+            巡检报告 ID（八期，仅 run_inspection 的 execution 步）。get_inspection_report
+            是本系统库只读查询、不生成 execution 步——它的报告 ID 在 tool_call 步的
+            arguments.result_summary 里可见，不重复下发。
+        batch_job_id:
+          type: [string, 'null']
+          description: 批量任务 ID（八期，仅 batch_execute 的 execution 步；深链 `/batch?job=`）。
 
     ReplayResponse:
       type: object
@@ -4404,12 +4548,92 @@ components:
           description: 有步骤/审批被丢弃时为 true（11 节防 OOM）；原因见 truncated_reason。
         truncated_reason:
           type: string
-          enum: ['', steps, approvals]
+          enum: ['', steps, approvals, payload]
           description: |
-            截断原因（六期打磨 sprint 4）。`''`=未截断；`steps`=步数超 20000 丢弃最旧；
-            `approvals`=单状态审批满 200 条（approvals.List 无游标，4×200=800 上限），
-            更早审批未纳入回放。两种来源此前共用 truncated 标志，前端文案硬编码
-            「超出 20000 步上限」，给只有 200 步的会话显示 20000 上限。
+            截断原因（六期打磨 sprint 4；八期扩 payload）。`''`=未截断；
+            `steps`=步数超 20000 丢弃最旧；`approvals`=单状态审批满 200 条
+            （approvals.List 无游标，4×200=800 上限），更早审批未纳入回放；
+            `payload`=八期体积预算命中（arguments 装载超 6 MiB 或响应序列化超
+            8 MiB，部分 arguments/output 被清空，契约 2.12 约定 6）。
+            只报最高优先级的一个：`steps` > `payload` > `approvals`。四值各有
+            独立中文文案（8.7，逐字写死）：`steps`=「超出 20000 步上限，仅显示
+            最近 N 步」；`approvals`=「审批记录过多，仅显示最近 N 步（更早的审批
+            未纳入回放）」；`payload`=「会话内容过大，部分参数与输出未下发（仅保留
+            最近 N 步的摘要）」；`''`=不显示横幅。不得复用 steps 文案。
+
+    ReplayCatalogItem:
+      type: object
+      required:
+        - conversation_id
+        - title
+        - last_message_at
+        - tool_count
+        - action_count
+        - approval_count
+        - has_actions
+        - truncated
+      additionalProperties: false
+      description: |
+        回放目录单行（八期，契约 5.19.1）。计数由 tool_calls / approvals 聚合
+        派生（不是前端拼装）；`has_actions` = action_count > 0（该会话存在至少
+        一个动作类工具调用，契约 7.8 的 12 工具）；`truncated` 为步数上限预判。
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        last_message_at:
+          type: string
+          format: date-time
+        tool_count:
+          type: integer
+          minimum: 0
+          description: 会话内 tool_calls 总数（含纯本地查询工具）。
+        action_count:
+          type: integer
+          minimum: 0
+          description: 会话内动作类工具调用数（12 工具，含失败/被拒——它们也是动作事实）。
+        approval_count:
+          type: integer
+          minimum: 0
+          description: 会话内审批条数（含 pending/denied/expired）。
+        has_actions:
+          type: boolean
+          description: action_count > 0。
+        truncated:
+          type: boolean
+          description: |
+            步数上限预判：tool_count + approval_count > 20000。
+            仅预判步数上限（不预判 payload 预算——目录不应为此读 result）；
+            为 true 时目录行显示「仅显示最近步」标记，进入页面后以真实
+            ReplayResponse.truncated_reason 为准。
+
+    ReplayCatalogPage:
+      type: object
+      required: [items, has_more, next_cursor]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReplayCatalogItem'
+          maxItems: 200
+        has_more:
+          type: boolean
+        next_cursor:
+          type: [object, 'null']
+          description: 下一页游标（本页末行排序键）；has_more=false 时为 null。
+          required: [last_message_at, id]
+          properties:
+            last_message_at:
+              type: string
+              format: date-time
+            id:
+              type: string
+              format: uuid
 
     ChatRequest:
       type: object
