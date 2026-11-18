@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 import { AUTH_STATE_FILE } from './helpers';
 
@@ -14,7 +14,7 @@ import { AUTH_STATE_FILE } from './helpers';
 test.describe('审计页按动作筛选支持关键词过滤', () => {
   test.use({ storageState: AUTH_STATE_FILE });
 
-  test('键入「审批」只剩 5 个审批动作；「删除」只剩 6 个删除动作；Enter 可选中', async ({
+  test('键入「审批」只剩 7 个审批动作；「删除」只剩 6 个删除动作；Enter 可选中', async ({
     page,
   }) => {
     await page.goto('/audit');
@@ -31,10 +31,19 @@ test.describe('审计页按动作筛选支持关键词过滤', () => {
     await expect(options.filter({ hasText: '登录成功' })).toBeVisible();
 
     await page.keyboard.type('审批');
-    // AUDIT_ACTIONS 中 label 含「审批」的恰好 5 项：创建审批/审批通过/
-    // 审批拒绝/审批过期/审批随流取消。
-    await expect(options).toHaveCount(5);
-    for (const label of ['创建审批', '审批通过', '审批拒绝', '审批过期', '审批随流取消']) {
+    // AUDIT_ACTIONS 中 label 含「审批」的恰好 7 项：创建审批/审批通过/
+    // 审批拒绝/审批过期/审批随流取消、00012 的「查看审批上下文」，以及
+    // RBAC 第 1 轮走查新增的「审批发起人已失效」。
+    await expect(options).toHaveCount(7);
+    for (const label of [
+      '创建审批',
+      '审批通过',
+      '审批拒绝',
+      '审批过期',
+      '审批随流取消',
+      '查看审批上下文',
+      '审批发起人已失效',
+    ]) {
       await expect(options.filter({ hasText: label })).toBeVisible();
     }
     // 不含「审批」的选项被过滤掉。

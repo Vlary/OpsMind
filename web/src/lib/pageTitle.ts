@@ -5,7 +5,10 @@
 // 路由前缀 → 页面名（与 AppShell navItems 的 label 保持一致）。
 const PAGE_TITLES: ReadonlyArray<readonly [prefix: string, title: string]> = [
   ['/login', '登录'],
+  // 00012：邀请/重置 token 落地页（公开页，无导航项）。
+  ['/invite', '接受邀请'],
   ['/chat', '对话'],
+  ['/approvals', '审批'],
   ['/servers', '服务器'],
   ['/databases', '数据库'],
   ['/providers', '模型'],
@@ -27,6 +30,8 @@ const PAGE_TITLES: ReadonlyArray<readonly [prefix: string, title: string]> = [
   ['/replays', '回放执行'],
   // 六期 FE-P1：设置页（全局审批门限）。
   ['/settings', '设置'],
+  // 00012：用户管理（仅管理员；label 与导航「用户」逐字一致）。
+  ['/users', '用户'],
 ];
 
 const SITE_NAME = '云枢 OpsMind';

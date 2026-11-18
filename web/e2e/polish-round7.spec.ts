@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 import { AUTH_STATE_FILE, DEFAULT_FINAL, SCENARIO_SLOW, sendMessage } from './helpers';
 

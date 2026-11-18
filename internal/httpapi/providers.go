@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"aiops/internal/authz"
 	"aiops/internal/llm"
 	"aiops/internal/store"
 )
@@ -39,6 +40,34 @@ type providerUpdateRequest struct {
 	Models       *[]string `json:"models"`
 }
 
+// providerSummary 是契约 12.3 第 17 条的最小披露 DTO：不含 base_url/preset，
+// 供无 provider:manage 的用户（如运维/审批者）选择模型。
+type providerSummary struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Kind         string   `json:"kind"`
+	DefaultModel string   `json:"default_model"`
+	Models       []string `json:"models"`
+}
+
+// providerView 按权限返回完整（密钥已掩码）或最小 DTO。
+func providerView(c *gin.Context, p store.Provider) any {
+	if authz.Allowed(c, authz.PermProviders) {
+		return maskProvider(p)
+	}
+	models := p.Models
+	if models == nil {
+		models = []string{}
+	}
+	return providerSummary{
+		ID:           p.ID,
+		Name:         p.Name,
+		Kind:         string(p.Kind),
+		DefaultModel: p.DefaultModel,
+		Models:       models,
+	}
+}
+
 // handleProviderPresets 返回内置预设。
 func (d *Deps) handleProviderPresets(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": llm.Presets()})
@@ -55,9 +84,9 @@ func (d *Deps) handleListProviders(c *gin.Context) {
 		writeError(c, "INTERNAL", "failed to list providers")
 		return
 	}
-	items := make([]store.Provider, 0, len(providers))
+	items := make([]any, 0, len(providers))
 	for _, p := range providers {
-		items = append(items, maskProvider(p))
+		items = append(items, providerView(c, p))
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
@@ -157,7 +186,7 @@ func (d *Deps) handleGetProvider(c *gin.Context) {
 		d.writeProviderStoreError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, maskProvider(provider))
+	c.JSON(http.StatusOK, providerView(c, provider))
 }
 
 // handleUpdateProvider 更新供应商；省略字段表示不变。

@@ -9,6 +9,7 @@ import {
   normalizeApprovalMode,
 } from '../../components/approvalMode';
 import { describeError, toApiErrorInfo } from '../chat/useChatStream';
+import { describeFailure, failureFromError } from '../../components/admin/apiError';
 import { useGlobalApprovalMode, useUpdateGlobalApprovalMode } from './useApprovalSettings';
 
 // 设置页（六期 FE-P1，契约 8.1：/settings——全局审批门限选择与说明）。
@@ -60,8 +61,9 @@ export default function SettingsPage() {
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
             <Typography.Text type="secondary">
               决定模型与控制台命令「是否需要人工批准」的全局档位；各会话可在对话页头部
-              单独覆盖（会话覆盖优先于全局，2.11 约定 1）。变更对之后新建的审批即时生效，
-              已等待中的审批不受影响。
+              单独覆盖，但只能与全局同档或更严格（更宽需走双人策略审批）。收紧立即生效； 放宽会创建
+              policy 审批，需第二位审批者批准（可承担审批职责的启用账号——管理员 + 审批者 合计——不足
+              2 个时直接拒绝）。
             </Typography.Text>
 
             {APPROVAL_MODES.map((value) => {
@@ -96,7 +98,11 @@ export default function SettingsPage() {
             ) : null}
 
             {updateMutation.isError ? (
-              <Alert type="error" showIcon message="全局审批门限保存失败，请重试。" />
+              <Alert
+                type="error"
+                showIcon
+                message={describeFailure(failureFromError(updateMutation.error))}
+              />
             ) : null}
           </Space>
         </Card>

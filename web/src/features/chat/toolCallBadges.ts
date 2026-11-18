@@ -80,3 +80,35 @@ export function badgeInputOf(
     approvalCount: approvals.length,
   };
 }
+
+/** 工具卡「回答流已中断，审批已取消」提示的输入投影。 */
+export interface ApprovalCancelledNoticeInput {
+  /** tool_calls.status。 */
+  status: string;
+  /** tool_calls.error_code。 */
+  errorCode: string;
+  /** 本工具调用关联的审批条数。 */
+  approvalCount: number;
+}
+
+/**
+ * 是否在工具卡上展示「回答流已中断，本轮审批已取消，请重新发起」
+ *（RBAC 走查 sprint 3）。
+ *
+ * 刷新/断开页面会中断回答流：服务端把 pending 审批 Cancel 为
+ * expired/stream_cancelled，并把 tool_call 收敛为
+ * expired/APPROVAL_CANCELLED（internal/agent/runner.go
+ * cancelApprovalAndConverge）。无 approvals:read 的角色（运维工程师）
+ * 在会话页不拉审批列表，刷新后审批卡不存在——只有工具卡能说明发生了什么
+ * 与下一步动作，否则只剩一个「已过期」标签。
+ *
+ * approvals 非空时不重复展示：ApprovalCard 已有「本轮已取消（回答流已
+ * 中断，审批未生效）」提示。
+ */
+export function shouldShowApprovalCancelledNotice(input: ApprovalCancelledNoticeInput): boolean {
+  return (
+    input.status === 'expired' &&
+    input.errorCode === 'APPROVAL_CANCELLED' &&
+    input.approvalCount === 0
+  );
+}

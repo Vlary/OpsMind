@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"aiops/internal/audit"
 	"aiops/internal/store"
 )
 
@@ -40,6 +41,9 @@ type Config struct {
 	// 仅供测试注入更短周期。
 	SessionCleanupInterval time.Duration
 	Clock                  func() time.Time
+	// Deliverer 是 invite/reset token 的独立投递通道；nil 表示不可用
+	// （创建用户/重置密码返回 ErrDeliveryUnavailable）。
+	Deliverer Deliverer
 }
 
 // LoginResult 是登录成功结果。
@@ -53,6 +57,9 @@ type LoginResult struct {
 type Service struct {
 	st  store.Store
 	cfg Config
+
+	deliverMu sync.RWMutex
+	deliverer Deliverer
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -68,14 +75,15 @@ func NewService(st store.Store, cfg Config) *Service {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
-	return &Service{st: st, cfg: cfg, stop: make(chan struct{})}
+	return &Service{st: st, cfg: cfg, deliverer: cfg.Deliverer, stop: make(chan struct{})}
 }
 
-// EnsureAdmin 在用户表为空时创建 admin 账号，并在同一事务写入
-// settings["bootstrap.admin_created_at"]。
+// EnsureAdmin 在用户表为空时创建 admin 账号（role=admin、enabled=true、
+// created_by=NULL），并在同一事务写入 settings["bootstrap.admin_created_at"]。
 //
 // adminPassword 为空时生成 24 字符 URL-safe 随机密码，并把
-// "admin password: <明文>" 写到 out（仅此一次）。已有用户时直接返回。
+// "admin password: <明文>" 写到 out（仅此一次）。已有用户时直接返回，
+// 不改动任何既有用户——升级部署中的 admin 由迁移 00012 回填 role='admin'。
 func (s *Service) EnsureAdmin(ctx context.Context, adminPassword string, out io.Writer) error {
 	count, err := s.st.Users().Count(ctx)
 	if err != nil {
@@ -117,6 +125,8 @@ func (s *Service) EnsureAdmin(ctx context.Context, adminPassword string, out io.
 		if _, err := tx.Users().Create(ctx, store.CreateUserParams{
 			Username:     adminUsername,
 			PasswordHash: hash,
+			Role:         store.RoleAdmin,
+			Enabled:      true,
 		}); err != nil {
 			return err
 		}
@@ -141,11 +151,13 @@ func (s *Service) EnsureAdmin(ctx context.Context, adminPassword string, out io.
 // errAdminExists 在事务内发现并发创建时用于回滚。
 var errAdminExists = errors.New("auth: admin already exists")
 
-// Login 校验密码并创建会话。
+// Login 按用户名校验密码并创建会话。
 //
-// 用户不存在时仍对固定 dummy hash 执行一次 bcrypt，避免时间侧信道。
-func (s *Service) Login(ctx context.Context, password, ip, userAgent string) (LoginResult, error) {
-	user, err := s.st.Users().ByUsername(ctx, adminUsername)
+// 未知用户名、停用用户与错误密码统一返回 ErrInvalidCredentials，且都执行
+// 恰好一次 bcrypt（未知用户对固定 dummy hash），避免用户名枚举与时间侧信道
+// （契约 12.4 第 7 条）。
+func (s *Service) Login(ctx context.Context, username, password, ip, userAgent string) (LoginResult, error) {
+	user, err := s.st.Users().ByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			verifyDummy(password)
@@ -154,6 +166,10 @@ func (s *Service) Login(ctx context.Context, password, ip, userAgent string) (Lo
 		return LoginResult{}, err
 	}
 	if !VerifyPassword(user.PasswordHash, password) {
+		return LoginResult{}, ErrInvalidCredentials
+	}
+	// 停用用户：仍在上方做了一次 bcrypt，响应与错密码完全一致。
+	if !user.Enabled {
 		return LoginResult{}, ErrInvalidCredentials
 	}
 
@@ -172,6 +188,10 @@ func (s *Service) Login(ctx context.Context, password, ip, userAgent string) (Lo
 	})
 	if err != nil {
 		return LoginResult{}, err
+	}
+	// last_login_at 只用于观测，写失败不阻断登录。
+	if err := s.st.Users().UpdateLastLogin(ctx, user.ID, now); err == nil {
+		user.LastLoginAt = &now
 	}
 	return LoginResult{Token: raw, ExpiresAt: session.ExpiresAt, User: user}, nil
 }
@@ -218,15 +238,23 @@ func (s *Service) Stop() {
 //
 // token 为空/无效/过期一律返回 ErrAuthRequired；过期会话顺带删除。
 func (s *Service) Authenticate(ctx context.Context, rawToken string) (store.User, error) {
+	user, _, err := s.AuthenticateSession(ctx, rawToken)
+	return user, err
+}
+
+// AuthenticateSession 是 Authenticate 的会话可见版本（契约 12.5）：
+// 返回命中的 auth session 供 WS 每 30 秒复检（session id 仍存在/未过期），
+// 以及停用用户立即失效的同一判定。过期会话顺带删除。
+func (s *Service) AuthenticateSession(ctx context.Context, rawToken string) (store.User, store.Session, error) {
 	if rawToken == "" {
-		return store.User{}, ErrAuthRequired
+		return store.User{}, store.Session{}, ErrAuthRequired
 	}
 	session, err := s.st.Sessions().ByTokenHash(ctx, HashToken(rawToken))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return store.User{}, ErrAuthRequired
+			return store.User{}, store.Session{}, ErrAuthRequired
 		}
-		return store.User{}, err
+		return store.User{}, store.Session{}, err
 	}
 	now := s.cfg.Clock().UTC()
 	if !session.ExpiresAt.After(now) {
@@ -234,18 +262,39 @@ func (s *Service) Authenticate(ctx context.Context, rawToken string) (store.User
 			// 删除失败不改变对客户端的结论。
 			_ = delErr
 		}
-		return store.User{}, ErrAuthRequired
+		return store.User{}, store.Session{}, ErrAuthRequired
 	}
 	user, err := s.st.Users().ByID(ctx, session.UserID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return store.User{}, ErrAuthRequired
+			return store.User{}, store.Session{}, ErrAuthRequired
 		}
-		return store.User{}, err
+		return store.User{}, store.Session{}, err
+	}
+	// 停用用户：登录被拒，存量会话也必须立即失效（契约 12.3 第 2 条）。
+	if !user.Enabled {
+		return store.User{}, store.Session{}, ErrAuthRequired
 	}
 	// 刷新 last_seen_at 供观测（登录时间、活跃度）；失败不影响鉴权。
 	_ = s.st.Sessions().Touch(ctx, session.ID, now)
-	return user, nil
+	return user, session, nil
+}
+
+// SessionByToken 按原始 token 返回会话行（不校验过期/用户状态）：logout
+// 需要先拿到 auth session id 才能关闭该会话名下的 WS/SSE（契约 12.3 第 13 条）。
+// token 为空/不存在返回 ErrAuthRequired。
+func (s *Service) SessionByToken(ctx context.Context, rawToken string) (store.Session, error) {
+	if rawToken == "" {
+		return store.Session{}, ErrAuthRequired
+	}
+	session, err := s.st.Sessions().ByTokenHash(ctx, HashToken(rawToken))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return store.Session{}, ErrAuthRequired
+		}
+		return store.Session{}, err
+	}
+	return session, nil
 }
 
 // Logout 删除当前会话；不存在时视为成功（幂等）。
@@ -269,36 +318,68 @@ func (s *Service) Logout(ctx context.Context, rawToken string) error {
 // ChangePassword 校验旧密码后把用户密码更新为新密码，并在同一事务内吊销
 // 该用户的全部会话（含当前会话）——凭据轮换后旧会话必须立即失效。
 //
+// 保留给离线工具/单测等无 HTTP 上下文的调用方；HTTP 路径必须使用
+// ChangePasswordAudited，让审计与密码/会话变更同事务提交。
+//
 // 旧密码错误返回 ErrInvalidCredentials；新密码为空或超过 72 字节返回
 // ErrPasswordInvalid（bcrypt 超限的密码此后无法通过校验，须在此拒绝）。
 func (s *Service) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
+	_, err := s.ChangePasswordAudited(ctx, userID, oldPassword, newPassword, nil)
+	return err
+}
+
+// ChangePasswordAudited 与 ChangePassword 相同，并在改密/吊销会话的同一
+// 事务内写审计 outbox（契约 12.3 第 19 条）。
+//
+// auditEvent 由调用方构造（HTTP 层补齐 request_id/IP）；返回
+// auditInTx=false 表示存储未实现 outbox（内存 fake），调用方需在事务
+// 提交后回落到进程内 audit.Enqueue。
+func (s *Service) ChangePasswordAudited(ctx context.Context, userID, oldPassword, newPassword string, auditEvent func() audit.Event) (bool, error) {
 	if len(newPassword) == 0 || len(newPassword) > maxPasswordBytes {
-		return ErrPasswordInvalid
+		return false, ErrPasswordInvalid
 	}
 	user, err := s.st.Users().ByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return ErrInvalidCredentials
+			return false, ErrInvalidCredentials
 		}
-		return err
+		return false, err
+	}
+	if !user.Enabled {
+		return false, ErrInvalidCredentials
 	}
 	if !VerifyPassword(user.PasswordHash, oldPassword) {
-		return ErrInvalidCredentials
+		return false, ErrInvalidCredentials
 	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {
-		return err
+		return false, err
 	}
 	now := s.cfg.Clock().UTC()
-	return s.st.WithTx(ctx, func(tx store.Store) error {
+	mustChange := false
+	auditInTx := false
+	err = s.st.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.Users().UpdatePassword(ctx, userID, store.UpdatePasswordParams{
-			PasswordHash: hash,
-			UpdatedAt:    now,
+			PasswordHash:       hash,
+			MustChangePassword: &mustChange,
+			UpdatedAt:          now,
 		}); err != nil {
 			return err
 		}
-		return tx.Sessions().DeleteByUser(ctx, userID)
+		if err := tx.Sessions().DeleteByUser(ctx, userID); err != nil {
+			return err
+		}
+		if auditEvent != nil {
+			used, aerr := emitAuditTx(ctx, tx, auditEvent(), now)
+			auditInTx = used
+			return aerr
+		}
+		return nil
 	})
+	if err != nil {
+		return false, err
+	}
+	return auditInTx, nil
 }
 
 var (

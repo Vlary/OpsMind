@@ -155,6 +155,52 @@ func (b *batchFakeState) FinishResult(_ context.Context, p store.FinishBatchResu
 	return store.BatchResult{}, store.ErrNotFound
 }
 
+// CancelAwaitingByUser 实现 store.BatchRevokeStore（账号吊销时的批量收敛）。
+func (b *batchFakeState) CancelAwaitingByUser(_ context.Context, userID string, at time.Time) (int64, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var n int64
+	for jobID, job := range b.jobs {
+		if job.CreatedBy == nil || *job.CreatedBy != userID {
+			continue
+		}
+		for i := range b.results[jobID] {
+			r := &b.results[jobID][i]
+			if r.Status != store.BatchResultAwaitingApproval {
+				continue
+			}
+			r.Status = store.BatchResultCancelled
+			r.UpdatedAt = at
+			n++
+		}
+		hasNonTerminal, hasBad := false, false
+		for _, r := range b.results[jobID] {
+			switch r.Status {
+			case store.BatchResultPending, store.BatchResultAwaitingApproval:
+				hasNonTerminal = true
+			case store.BatchResultFailed, store.BatchResultDenied,
+				store.BatchResultExpired, store.BatchResultSkipped, store.BatchResultCancelled:
+				hasBad = true
+			}
+		}
+		switch {
+		case hasNonTerminal:
+			job.Status = store.BatchRunning
+		case hasBad:
+			job.Status = store.BatchPartial
+			fin := at
+			job.FinishedAt = &fin
+		default:
+			job.Status = store.BatchDone
+			fin := at
+			job.FinishedAt = &fin
+		}
+		job.UpdatedAt = at
+		b.jobs[jobID] = job
+	}
+	return n, nil
+}
+
 func (b *batchFakeState) ByApproval(_ context.Context, approvalID string) (store.BatchResult, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -180,6 +226,13 @@ func newBatchTestEnv(t *testing.T) (*gin.Engine, *Deps, *memStore, *fakeSSHExec)
 	gin.SetMode(gin.TestMode)
 	resetBatchState()
 	st := newMemStore()
+	// 批量审批的发起人（handler 取 user_id 写 batch_jobs.created_by）必须
+	// 在 store 中存在且 enabled，decide 前的 recheck 才能通过。
+	st.users["admin"] = store.User{
+		ID: "user-1", Username: "admin", Role: store.RoleAdmin, Enabled: true,
+		CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
+	}
+	seedSecondAdmin(st)
 	cipher := testCipherForMonitor(t)
 	ssh := &fakeSSHExec{}
 	log := logx.New(slog.LevelError)
@@ -191,6 +244,7 @@ func newBatchTestEnv(t *testing.T) (*gin.Engine, *Deps, *memStore, *fakeSSHExec)
 	}
 	r := gin.New()
 	protected := r.Group("/api")
+	protected.Use(withTestAdminIdentity())
 	d.RegisterBatchRoutes(protected)
 	return r, d, st, ssh
 }
@@ -216,6 +270,18 @@ func postJSON(r *gin.Engine, path string, body any) *httptest.ResponseRecorder {
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// postJSONAsApprover 以 approver 身份提交（审批职责分离：发起人不能
+// 批准自己的批量任务）。
+func postJSONAsApprover(r *gin.Engine, path string, body any) *httptest.ResponseRecorder {
+	raw, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(testIdentityHeader, string(store.RoleApprover))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
@@ -306,8 +372,9 @@ func TestBatchJobLifecycle(t *testing.T) {
 		t.Fatalf("no awaiting_approval result: %+v", detail.Results)
 	}
 
-	// decide approve（batch 分支）：执行并回填该台。
-	ap, err := d.Approvals.Decide(context.Background(), approvals.DecideRequest{ApprovalID: *awaiting.ApprovalID, Approve: true, DecidedBy: "user-1", Note: "", RequestID: "req"})
+	// decide approve（batch 分支）：执行并回填该台。发起人是 user-1，
+	// 职责分离要求由另一用户决定。
+	ap, err := d.Approvals.Decide(context.Background(), approvals.DecideRequest{ApprovalID: *awaiting.ApprovalID, Approve: true, DecidedBy: "reviewer", Note: "", RequestID: "req"})
 	if err != nil {
 		t.Fatalf("decide: %v", err)
 	}
@@ -410,7 +477,11 @@ func TestBatchApprovalExecutionExitCode(t *testing.T) {
 		r, d, st, ssh := newBatchTestEnv(t)
 		addBatchServer(t, st, "web-1", false) // 未开 auto_exec → 审批
 		ssh.execFn = execFn
-		r.POST("/api/approvals/:id/decide", d.handleDecideApproval)
+		// decide 路由也必须在测试身份中间件之下（00012：Service.Decide 要求
+		// decided_by 非空；生产路由由 requireAuth 注入）。
+		approvalsGroup := r.Group("/api")
+		approvalsGroup.Use(withTestAdminIdentity())
+		approvalsGroup.POST("/approvals/:id/decide", d.handleDecideApproval)
 
 		w := postJSON(r, "/api/batch/jobs", createBatchJobRequest{
 			Command: "ls -la", ServerIDs: []string{"web-1"},
@@ -440,7 +511,7 @@ func TestBatchApprovalExecutionExitCode(t *testing.T) {
 			t.Fatalf("5s 内未回填 awaiting_approval result")
 		}
 
-		w = postJSON(r, "/api/approvals/"+approvalID+"/decide", map[string]string{"decision": "approve"})
+		w = postJSONAsApprover(r, "/api/approvals/"+approvalID+"/decide", map[string]string{"decision": "approve"})
 		if w.Code != http.StatusOK {
 			t.Fatalf("decide = %d: %s", w.Code, w.Body.String())
 		}

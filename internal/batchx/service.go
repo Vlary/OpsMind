@@ -262,6 +262,20 @@ func (s *Service) Dispatch(ctx context.Context, p store.CreateBatchJobParams) (s
 		}
 	}
 
+	// 契约 12.3 第 5 条：批量审批的 requested_by = batch_jobs.created_by。
+	// 批量发起人由入口（console = 当前用户 / chat = 会话 owner）写入
+	// p.CreatedBy；缺失时回落到会话 owner，仍为空则 Service.Create 失败关闭
+	//（不会产出无发起人的审批）。
+	requester := ""
+	if p.CreatedBy != nil {
+		requester = *p.CreatedBy
+	}
+	if requester == "" && p.ConversationID != nil && *p.ConversationID != "" {
+		if conv, err := s.st.Conversations().Get(ctx, *p.ConversationID); err == nil {
+			requester = conv.UserID
+		}
+	}
+
 	var wg sync.WaitGroup
 	createFail := 0
 	for _, sid := range targets {
@@ -329,6 +343,7 @@ func (s *Service) Dispatch(ctx context.Context, p store.CreateBatchJobParams) (s
 				RuleID:       decision.RuleID,
 				Reason:       s.approvalReason(p.Description, decision.Reason),
 				ApprovalMode: string(approvalMode),
+				RequestedBy:  requester,
 			})
 			if err != nil {
 				createFail++

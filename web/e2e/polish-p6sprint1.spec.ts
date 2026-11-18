@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import { NAV_ITEMS } from '../src/components/navItems';
 import {
   AUTH_STATE_FILE,

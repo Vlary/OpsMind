@@ -47,6 +47,7 @@ func TestRunPhase6NoneOverrideExecutesDirectly(t *testing.T) {
 	// none 档直执行的合法格：safe+auto=false。
 	conv := st.conversations["c1"]
 	none := store.ApprovalModeNone
+	st.globalMode = store.ApprovalModeNone
 	conv.ApprovalMode = &none
 	st.conversations["c1"] = conv
 
@@ -103,6 +104,7 @@ func TestRunPhase6HardProtectionStillApproves(t *testing.T) {
 	// none 档此格为「审批」（服务器级硬保护：非只读命令无论门限一律审批）。
 	conv := st.conversations["c1"]
 	none := store.ApprovalModeNone
+	st.globalMode = store.ApprovalModeNone
 	conv.ApprovalMode = &none
 	st.conversations["c1"] = conv
 
@@ -125,10 +127,12 @@ func TestRunPhase6HardProtectionStillApproves(t *testing.T) {
 	}
 }
 
-func TestRunPhase6EditedCommandExecution(t *testing.T) {
+func TestRunPhase6IgnoresEditedCommand(t *testing.T) {
 	st := seed(false)
 	// 无覆盖 + settings 未接线（GlobalMode 兜底 standard）+ auto_exec=false
-	// + needs_approval 命令 → 审批；批准且携带改写 → 执行改写后命令。
+	// + needs_approval 命令 → 审批。即使等待方收到的 decision 仍携带
+	// edited_command（历史兼容字段），00012 执行层也只执行持久化的
+	// approval.command（契约 12.3 第 7 条）。
 	client := &fakeLLM{steps: []scriptStep{
 		{events: toolCallEvents(ToolSSHExec, `{"server_id":"s1","command":"systemctl restart nginx"}`)},
 		{events: finalEvents("done", llm.Usage{})},
@@ -136,14 +140,7 @@ func TestRunPhase6EditedCommandExecution(t *testing.T) {
 	ap := &fakeApprovals{waitStatus: store.ApprovalApproved, waitEdited: "systemctl restart nginx --no-block"}
 	r, ssh, w := newPhase6Runner(t, st, client, ap)
 
-	var resolved *ApprovalResolvedPayload
-	err := r.Run(context.Background(), runInput(), func(ev Event) error {
-		if ev.Type == EventApprovalResolved && ev.ApprovalResolved != nil {
-			res := *ev.ApprovalResolved
-			resolved = &res
-		}
-		return nil
-	})
+	err := r.Run(context.Background(), runInput(), func(Event) error { return nil })
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -155,15 +152,11 @@ func TestRunPhase6EditedCommandExecution(t *testing.T) {
 	}
 	// 工具调用行同样冻结门限快照（用 tool_result/审计之外的第三条持久化路径）。
 	assertToolCallApprovalMode(t, st, ToolSSHExec, string(store.ApprovalModeStandard))
-	// 执行的是改写后命令（逐字节）。
-	if len(ssh.calls) != 1 || ssh.calls[0].Command != "systemctl restart nginx --no-block" {
-		t.Fatalf("ssh commands = %v, want edited", ssh.calls)
+	// 执行的是持久化审批命令，edited_command 被忽略。
+	if len(ssh.calls) != 1 || ssh.calls[0].Command != "systemctl restart nginx" {
+		t.Fatalf("ssh commands = %v, want approval.command", ssh.calls)
 	}
-	// SSE approval_resolved 携带改写命令。
-	if resolved == nil || resolved.EditedCommand != "systemctl restart nginx --no-block" {
-		t.Fatalf("approval_resolved = %+v", resolved)
-	}
-	// tool_calls.result 记录实际执行（command=改写后）。
+	// tool_calls.result 记录实际执行（command=approval.command）。
 	var resultJSON json.RawMessage
 	st.mu.Lock()
 	for _, tc := range st.toolCalls {
@@ -178,26 +171,25 @@ func TestRunPhase6EditedCommandExecution(t *testing.T) {
 	if err := json.Unmarshal(resultJSON, &result); err != nil {
 		t.Fatalf("result json: %v (%s)", err, resultJSON)
 	}
-	if result.Command != "systemctl restart nginx --no-block" {
-		t.Fatalf("result.command = %q, want edited", result.Command)
+	if result.Command != "systemctl restart nginx" {
+		t.Fatalf("result.command = %q, want approval.command", result.Command)
 	}
-	// 审计 command.executed 带 original_command（改写时）与 approval_mode，
-	// 以及实际执行的命令文本（六期打磨 sprint 1：免审批档事后从审计复原
-	// 「跑的是什么」）。
+	// 审计 command.executed 带 approval_mode 与实际执行命令；不得出现
+	// edited_command 的改写痕迹。
 	flushCtx2, flushCancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer flushCancel2()
 	if err := w.Flush(flushCtx2); err != nil {
 		t.Fatalf("flush audit: %v", err)
 	}
 	assertAuditDetail(t, st, "command.executed", func(detail map[string]any) error {
-		if detail["original_command"] != "systemctl restart nginx" {
-			return fmt.Errorf("original_command = %v", detail["original_command"])
-		}
 		if detail["approval_mode"] != string(store.ApprovalModeStandard) {
 			return fmt.Errorf("audit approval_mode = %v", detail["approval_mode"])
 		}
-		if detail["command"] != "systemctl restart nginx --no-block" {
+		if detail["command"] != "systemctl restart nginx" {
 			return fmt.Errorf("audit command = %v", detail["command"])
+		}
+		if _, ok := detail["edited_command"]; ok {
+			return fmt.Errorf("audit must not carry edited_command")
 		}
 		return nil
 	})
@@ -249,6 +241,7 @@ func TestRunPhase6ContainerActionHighStillApproves(t *testing.T) {
 	st := seed(false)
 	conv := st.conversations["c1"]
 	high := store.ApprovalModeHigh
+	st.globalMode = store.ApprovalModeHigh
 	conv.ApprovalMode = &high
 	st.conversations["c1"] = conv
 	srv := st.servers["s1"]

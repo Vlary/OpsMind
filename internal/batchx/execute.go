@@ -62,13 +62,10 @@ func (s *Service) OnApprovalDecided(ctx context.Context, approval store.Approval
 		return err
 	}
 
-	// approve：逐字节执行改写后命令（契约 2.11 约定 3：decide 携带
-	// edited_command 时经 Service.Decide 重分类并落库，执行取该值；为空
-	// 回退原始 command——六期评审发现批量路径曾忽略用户改写）。
+	// 00012：执行层无条件使用 approval.command，永不读取 edited_command
+	//（契约 12.3 第 7 条）。审批时改写会让审批人成为动作作者、绕过
+	// requested_by != decided_by；内部调用方即使填充该字段也不得影响执行。
 	execCommand := approval.Command
-	if approval.EditedCommand != "" {
-		execCommand = approval.EditedCommand
-	}
 	// 契约 9.7：批量审批复用 command.approved（detail 加 batch_job_id）。
 	// 该行由本包写而非 approvals.Service——只有这里知道 batch_job_id；
 	// approvals 对 source=batch 已跳过同名动作，一次批准只落一行。
@@ -77,12 +74,6 @@ func (s *Service) OnApprovalDecided(ctx context.Context, approval store.Approval
 		"approval_id": approval.ID, "batch_job_id": result.BatchJobID,
 		"source": "batch", "risk_level": approval.RiskLevel,
 		"approval_mode": string(approval.ApprovalMode), "command": approval.Command,
-	}
-	if approval.EditedCommand != "" {
-		approvedDetail["edited_command"] = approval.EditedCommand
-		approvedDetail["original_command"] = approval.Command
-		approvedDetail["original_risk_level"] = approval.RiskLevel
-		approvedDetail["edited_risk_level"] = approval.EditedRiskLevel
 	}
 	s.emitAudit(ctx, audit.Event{ActorType: "user", ActorID: approvalDecidedBy(approval)}, audit.Event{
 		Action: actionCmdApproved, ResourceType: "server", ResourceID: sid,

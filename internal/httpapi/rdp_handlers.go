@@ -25,6 +25,7 @@ import (
 
 	"aiops/internal/apierr"
 	"aiops/internal/auth"
+	"aiops/internal/authz"
 	"aiops/internal/rdpx"
 	"aiops/internal/store"
 )
@@ -46,10 +47,16 @@ const (
 // REST 端点挂 protected（requireAuth）；WS 端点挂裸 api 组——升级前的
 // Origin→Cookie→业务校验由 handler 自行完成（契约 6.5 写死顺序）。
 func (d *Deps) RegisterRdpRoutes(protected, api *gin.RouterGroup) {
-	protected.POST("/rdp/sessions", d.handleCreateRdpSession)
-	protected.GET("/rdp/sessions", d.handleListRdpSessions)
-	protected.GET("/rdp/recordings", d.handleListRdpRecordings)
-	protected.GET("/rdp/recordings/:id", d.handleDownloadRdpRecording)
+	// 00012：JIT grant 申请（source=terminal、grant_kind=rdp）。
+	d.guard(protected, http.MethodPost, "/rdp/grants", authz.PermTerminal, d.handleCreateRdpGrant)
+	// 第 2 轮走查（low）：发起人可见的「已批准、待消费」授权列表（只返回本人）。
+	d.guard(protected, http.MethodGet, "/rdp/grants", authz.PermTerminal, d.handleListRdpGrants)
+	d.guard(protected, http.MethodPost, "/rdp/sessions", authz.PermTerminal, d.handleCreateRdpSession)
+	// 列表/录制对 auditor 跨用户只读（audit:read），owner 只看自己。
+	d.guardAny(protected, http.MethodGet, "/rdp/sessions", []authz.Permission{authz.PermTerminal, authz.PermAudit}, d.handleListRdpSessions)
+	d.guardAny(protected, http.MethodGet, "/rdp/recordings", []authz.Permission{authz.PermTerminal, authz.PermAudit}, d.handleListRdpRecordings)
+	d.guardAny(protected, http.MethodGet, "/rdp/recordings/:id", []authz.Permission{authz.PermTerminal, authz.PermAudit}, d.handleDownloadRdpRecording)
+	// WS 端点挂裸 api 组：归属由 rdpx.Attach 的注册表校验（同 userID 才能接入）。
 	api.GET("/rdp/sessions/:id/ws", d.handleRdpSessionWS)
 }
 
@@ -59,9 +66,11 @@ func (d *Deps) RegisterRdpRoutes(protected, api *gin.RouterGroup) {
 
 type rdpSessionCreateRequest struct {
 	ServerID string `json:"server_id"`
-	Width    *int   `json:"width"`
-	Height   *int   `json:"height"`
-	DPI      *int   `json:"dpi"`
+	// GrantID 是已批准、未消费的 source=terminal/grant_kind=rdp 审批 id。
+	GrantID string `json:"grant_id"`
+	Width   *int   `json:"width"`
+	Height  *int   `json:"height"`
+	DPI     *int   `json:"dpi"`
 }
 
 func (d *Deps) handleCreateRdpSession(c *gin.Context) {
@@ -113,9 +122,38 @@ func (d *Deps) handleCreateRdpSession(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.ServerNotFound)
 		return
 	}
+	// 目标能力先于 grant 消费判定（不可用目标不应烧掉已批准的 grant）。
+	if server.OS != store.ServerOSWindows {
+		writeAPIError(c, http.StatusBadRequest, apierr.RdpUnsupported, "server os is not windows")
+		return
+	}
+	if server.AuthMethod == store.AuthMethodPrivateKey || server.PasswordEncrypted == "" {
+		writeAPIError(c, http.StatusBadRequest, apierr.RdpNoCredentials, "server has no password credential")
+		return
+	}
+	// 00012：RDP 会话同样必须叠加他人批准的单次 rdp grant。
+	// 契约 12.3 第 11 条：单管理员降级模式不得开 RDP（fail-closed）。
+	if !d.requireSecondApprover(c, authz.PermTerminal, "rdp.session") {
+		return
+	}
+	// 第 4 轮走查 medium：同终端路径，先预检同服务器活动会话，再消费 grant；
+	// Open 失败时回滚 consumed_at 保留可重试。
+	if active, cerr := d.Store.RdpSessions().CountActiveByServer(c.Request.Context(), server.ID); cerr != nil {
+		d.logHandlerError(c, "rdp session precheck failed", cerr)
+		writeError(c, apierr.Internal, "internal server error")
+		return
+	} else if active > 0 {
+		writeAPIError(c, http.StatusConflict, apierr.RdpSessionExists, "server already has an active rdp session")
+		return
+	}
+	grant, ok := d.consumeTerminalGrant(c, req.GrantID, server.ID, "rdp")
+	if !ok {
+		return
+	}
 
 	session, err := d.RDP.Open(c.Request.Context(), server, user.ID, width, height, dpi)
 	if err != nil {
+		d.releaseTerminalGrant(c, grant, "rdp")
 		d.writeRdpOpenError(c, err)
 		return
 	}
@@ -173,6 +211,17 @@ func (d *Deps) handleListRdpSessions(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.RdpSessionNotFound)
 		return
 	}
+	// 契约 12.3 第 4 条：非 audit:read 强制只看自己的会话。
+	if !authz.Allowed(c, authz.PermAudit) {
+		me := c.GetString("user_id")
+		own := make([]store.RdpSession, 0, len(items))
+		for _, it := range items {
+			if it.UserID == me {
+				own = append(own, it)
+			}
+		}
+		items = own
+	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
@@ -208,9 +257,14 @@ func (d *Deps) handleListRdpRecordings(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.RdpSessionNotFound)
 		return
 	}
+	auditor := authz.Allowed(c, authz.PermAudit)
+	me := c.GetString("user_id")
 	out := make([]rdpRecordingItem, 0, len(items))
 	for _, s := range items {
 		if !s.HasRecording {
+			continue
+		}
+		if !auditor && s.UserID != me {
 			continue
 		}
 		out = append(out, rdpRecordingItem{
@@ -243,6 +297,17 @@ func (d *Deps) handleDownloadRdpRecording(c *gin.Context) {
 	if !session.HasRecording {
 		writeAPIError(c, http.StatusNotFound, apierr.RecordingNotFound, "session has no recording")
 		return
+	}
+	// 契约 12.3 第 4 条：owner 或 auditor；其他用户一律 404（不泄露存在性）。
+	me := c.GetString("user_id")
+	if session.UserID != me {
+		if !authz.Allowed(c, authz.PermAudit) {
+			writeAPIError(c, http.StatusNotFound, apierr.RecordingNotFound, "recording not found")
+			return
+		}
+		d.auditEvent(c, "session.recording_download", "rdp_session", session.ID, map[string]any{
+			"owner_id": session.UserID, "server_id": session.ServerID,
+		})
 	}
 	dir := d.rdpRecordingsDir()
 	// 文件名即会话 UUID（DB 行校验过的 <uuid>.guac，无用户可控拼接）。
@@ -350,7 +415,7 @@ func (d *Deps) handleRdpSessionWS(c *gin.Context) {
 		writeError(c, apierr.AuthRequired, "authentication required")
 		return
 	}
-	user, err := d.Auth.Authenticate(c.Request.Context(), raw)
+	user, authSession, err := d.Auth.AuthenticateSession(c.Request.Context(), raw)
 	if err != nil {
 		if errors.Is(err, auth.ErrAuthRequired) {
 			writeError(c, apierr.AuthRequired, "authentication required")
@@ -360,9 +425,19 @@ func (d *Deps) handleRdpSessionWS(c *gin.Context) {
 		writeError(c, apierr.Internal, "internal server error")
 		return
 	}
-	// 3. 业务校验：网关可用 + 会话存在且 active。
-	// 归属校验在 Attach 内完成（rdp_sessions 行不输出 user 字段；v1 单
-	// 用户，非归属 Attach 直接 ErrNotActive 断开，契约 5.14）。
+	// must_change 门在 WS 手工鉴权路径同样生效（契约 12.3 第 2 条三处共用）。
+	if user.MustChangePassword {
+		writeErrorStatus(c, http.StatusForbidden, "PASSWORD_CHANGE_REQUIRED", "password change required")
+		return
+	}
+	// 3. 权限：JIT 终端/RDP 需要 terminal:use；auditor 不能升级 WS。
+	if !authz.Has(user.Role, authz.PermTerminal) {
+		d.writeForbidden(c, user, authz.PermTerminal)
+		return
+	}
+	// 业务校验：网关可用 + 会话存在且 active。
+	// 归属校验在 Attach 内完成（rdpx 网关按会话注册表校验 userID，不匹配
+	// 直接 ErrNotActive 断开，契约 5.14）。
 	if d.RDP == nil || !d.requireStore(c) {
 		writeAPIError(c, http.StatusServiceUnavailable, apierr.GuacdUnavailable, "rdp gateway is not configured")
 		return
@@ -381,6 +456,12 @@ func (d *Deps) handleRdpSessionWS(c *gin.Context) {
 		writeAPIError(c, http.StatusConflict, apierr.Conflict, "session is not active")
 		return
 	}
+	// 契约 12.3 第 4 条：非 owner 一律 404（不泄露会话存在性）。此前只在
+	// Attach 注册表校验，HTTP 层缺归属检查（评审发现）。
+	if session.UserID != user.ID {
+		writeAPIError(c, http.StatusNotFound, apierr.RdpSessionNotFound, "session not found")
+		return
+	}
 	// 4. 升级 101（协商 guacamole 子协议）。
 	ws, err := rdpWSUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -393,7 +474,7 @@ func (d *Deps) handleRdpSessionWS(c *gin.Context) {
 	// Attach 内部完成 guacd 拨号、握手（凭据注入）与完整生命周期收尾；
 	// 失败时无应用层错误帧（契约 6.5），直接关连接由前端
 	// guacamole-common-js 的 onerror/onstatechange 感知。
-	if err := d.RDP.Attach(conn, id, user.ID, requestIDOf(c), d.requestIP(c)); err != nil {
+	if err := d.RDP.AttachForAuthSession(conn, id, user.ID, authSession.ID, requestIDOf(c), d.requestIP(c)); err != nil {
 		d.logHandlerError(c, "rdp attach failed", err)
 		_ = conn.Close()
 	}

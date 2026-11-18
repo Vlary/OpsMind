@@ -161,6 +161,23 @@ describe('actionLabel 审计动作中文映射', () => {
     }
   });
 
+  // RBAC 走查 sprint 2：受邀者兑换 invite token 由后端写
+  // user.invite_accepted（internal/httpapi accept invite handler），此前
+  // 不在清单内——审计页动作列直出英文码、筛选下拉搜不到「接受邀请」。
+  it('接受邀请动作映射中文且在筛选清单内（RBAC sprint 2）', () => {
+    expect(actionLabel('user.invite_accepted')).toBe('接受邀请');
+    expect(AUDIT_ACTIONS.some((option) => option.value === 'user.invite_accepted')).toBe(true);
+    expect(AUDIT_ACTIONS.filter((option) => option.label.includes('接受邀请'))).toEqual([
+      { value: 'user.invite_accepted', label: '接受邀请' },
+    ]);
+  });
+
+  // 第 5 轮走查：同名未激活账号重发邀请写 user.invite_resent。
+  it('重发邀请动作映射中文且在筛选清单内（第 5 轮）', () => {
+    expect(actionLabel('user.invite_resent')).toBe('重发邀请');
+    expect(AUDIT_ACTIONS.some((option) => option.value === 'user.invite_resent')).toBe(true);
+  });
+
   // 六期打磨 sprint 4（走查 medium）：五期/六期 18 个动作后端确实在写
   // （CONTRACT 9.7 五期段 + 六期 settings.update；逐条 grep `Action:` 核对），
   // 但此前不在 AUDIT_ACTIONS 里——审计页动作列回落原码、筛选下拉搜不到
@@ -218,6 +235,8 @@ describe('actionLabel 审计动作中文映射', () => {
       ['diagnosis_session', '诊断会话'],
       ['inspection_report', '巡检报告'],
       ['batch_job', '批量任务'],
+      // RBAC 第 3 轮：回放目录审计合并后新增的 resource_type。
+      ['replay_catalog', '回放目录'],
     ];
     for (const [value, label] of cases) {
       expect(resourceTypeLabel(value)).toBe(label);
@@ -246,8 +265,8 @@ describe('resourceTypeLabel / actorTypeLabel / engineLabel / providerKindLabel',
     expect(resourceTypeLabel('mystery')).toBe('mystery');
   });
 
-  it('操作者类型映射：user 是管理员（单管理员系统）', () => {
-    expect(actorTypeLabel('user')).toBe('管理员');
+  it('操作者类型映射：user 是用户（多用户 RBAC）', () => {
+    expect(actorTypeLabel('user')).toBe('用户');
     expect(actorTypeLabel('model')).toBe('模型');
     expect(actorTypeLabel('system')).toBe('系统');
     expect(actorTypeLabel('unknown')).toBe('unknown');
@@ -300,5 +319,33 @@ describe('默认端口与 Base URL 常量', () => {
 
   it('ACTOR_TYPE_LABELS 键集合与后端契约一致', () => {
     expect(Object.keys(ACTOR_TYPE_LABELS).sort()).toEqual(['model', 'system', 'user']);
+  });
+});
+
+describe('00012 RBAC 审计动作名（契约 9.7）', () => {
+  it('用户管理使用契约动作名而非 user.created/user.role_changed', () => {
+    expect(actionLabel('user.create')).toBe('创建用户');
+    expect(actionLabel('user.update')).toBe('更新用户');
+    expect(actionLabel('user.disable')).toBe('停用用户');
+    expect(actionLabel('user.credential_reset')).toBe('重置用户凭据');
+  });
+
+  it('终端 grant / 策略变更 / 审计校验动作可检索', () => {
+    for (const action of [
+      'terminal.grant_requested',
+      'terminal.grant_approved',
+      'terminal.grant_consumed',
+      'terminal.grant_released',
+      'policy.change_requested',
+      'policy.change_applied',
+      'audit.verify',
+      'authz.denied',
+    ]) {
+      expect(
+        AUDIT_ACTIONS.some((option) => option.value === action),
+        action,
+      ).toBe(true);
+      expect(actionLabel(action)).not.toBe(action);
+    }
   });
 });

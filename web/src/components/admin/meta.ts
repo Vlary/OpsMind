@@ -126,9 +126,9 @@ export const KIND_DEFAULT_BASE_URL: Record<ProviderKind, string> = {
   anthropic: 'https://api.anthropic.com',
 };
 
-// 单管理员系统：actor_type=user 的操作者即管理员，标签直接写「管理员」。
+// 多用户 RBAC：actor_type=user 是普通用户操作，具体身份看 actor_name/role。
 export const ACTOR_TYPE_LABELS: Record<string, string> = {
-  user: '管理员',
+  user: '用户',
   model: '模型',
   system: '系统',
 };
@@ -156,6 +156,10 @@ export const RESOURCE_TYPE_OPTIONS: SelectOption[] = [
   { value: 'diagnosis_session', label: '诊断会话' },
   { value: 'inspection_report', label: '巡检报告' },
   { value: 'batch_job', label: '批量任务' },
+  // RBAC 走查第 3 轮：回放目录的跨用户读取合并为一条 replay.viewed，
+  // resource_type=replay_catalog（不属于单一会话）。不登记会让审计表
+  // 「目标」列回落显示英文原码。
+  { value: 'replay_catalog', label: '回放目录' },
 ];
 
 export const RESOURCE_TYPE_LABELS: Record<string, string> = Object.fromEntries(
@@ -250,6 +254,37 @@ export const AUDIT_ACTIONS: SelectOption[] = [
   { value: 'inspection.completed', label: '巡检完成' },
   { value: 'batch.created', label: '创建批量任务' },
   { value: 'batch.cancelled', label: '取消批量任务' },
+  // 00012 RBAC：用户管理 / 终端 grant / 策略变更 / 治理读取 / 审计校验。
+  // 动作名与 CONTRACT 9.7 逐字一致（评审发现：旧代码写 user.created 等
+  // 非契约名，按契约动作检索会漏）。
+  { value: 'user.create', label: '创建用户' },
+  { value: 'user.update', label: '更新用户' },
+  { value: 'user.enable', label: '启用用户' },
+  { value: 'user.disable', label: '停用用户' },
+  { value: 'user.credential_reset', label: '重置用户凭据' },
+  // RBAC 走查 sprint 2：受邀者兑换 invite token（internal/httpapi 写入
+  // user.invite_accepted）此前不在清单内，审计页动作列直出英文码、动作
+  // 筛选也搜不到「接受邀请」。
+  { value: 'user.invite_accepted', label: '接受邀请' },
+  // 第 5 轮走查：同名未激活账号重发邀请（旧链接作废 + 新 token 签发）。
+  { value: 'user.invite_resent', label: '重发邀请' },
+  { value: 'user.sessions_revoked', label: '吊销用户会话' },
+  { value: 'authz.denied', label: '权限拒绝' },
+  { value: 'approval.requester_denied', label: '审批发起人已失效' },
+  { value: 'rbac_single_admin_warning', label: '单管理员降级告警' },
+  { value: 'terminal.grant_requested', label: '申请终端授权' },
+  { value: 'terminal.grant_approved', label: '批准终端授权' },
+  { value: 'terminal.grant_consumed', label: '消费终端授权' },
+  { value: 'terminal.grant_released', label: '授权使用落空已回滚' },
+  { value: 'terminal.grant_expired', label: '终端授权过期' },
+  { value: 'policy.change_requested', label: '申请策略变更' },
+  { value: 'policy.change_applied', label: '策略变更生效' },
+  { value: 'audit.verify', label: '审计链校验' },
+  { value: 'replay.viewed', label: '查看他人回放' },
+  { value: 'approval.context_viewed', label: '查看审批上下文' },
+  { value: 'session.recording_download', label: '下载跨用户录制' },
+  { value: 'admin.offline_reset', label: '离线重置管理员' },
+  { value: 'admin.break_glass', label: '主机侧破窗批准' },
 ];
 
 const AUDIT_ACTION_LABELS: Record<string, string> = Object.fromEntries(

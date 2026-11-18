@@ -17,6 +17,7 @@ import (
 
 	"aiops/internal/approvals"
 	"aiops/internal/llm"
+	"aiops/internal/sshx"
 	"aiops/internal/store"
 )
 
@@ -197,6 +198,113 @@ func TestRunApprovalResolvedEmitFailureConvergesToolCall(t *testing.T) {
 	}
 	if tc.ErrorCode != codeClientDisconnected {
 		t.Fatalf("tool call error_code = %q, want CLIENT_DISCONNECTED", tc.ErrorCode)
+	}
+}
+
+// ctxCancelSSH 的 Execute 阻塞到 ctx 取消后返回 ctx.Err——模拟「审批已
+// 批准、命令执行中客户端关闭页面」：执行通道随请求 ctx 取消而失败。
+type ctxCancelSSH struct {
+	sshx.Executor
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *ctxCancelSSH) Execute(ctx context.Context, _ sshx.Target, _ sshx.RunRequest) (sshx.RunResult, error) {
+	c.once.Do(func() { close(c.entered) })
+	<-ctx.Done()
+	return sshx.RunResult{}, ctx.Err()
+}
+
+// TestRunApprovedExecCancelConvergesToolCall 第 6 轮走查 medium 回归：
+// 审批者批准的同时发起人关闭/刷新页面，命令尚未执行完就被 ctx 取消，
+// runSSHExec 返回 Fatal、executeToolCall 跳过 Finish——tool_call 永久停在
+// awaiting_approval，而审批已是 approved 并从审批队列消失，发起人无法再
+// 推进只能重发。断流必须把仍处于等待态的行收敛为 expired；审批已决策
+// （approved）时错误码是 CLIENT_DISCONNECTED，且不得再 Cancel 审批。
+func TestRunApprovedExecCancelConvergesToolCall(t *testing.T) {
+	st := seed(false)
+	ap := &fakeApprovals{waitStatus: store.ApprovalApproved}
+	client := &fakeLLM{steps: []scriptStep{
+		{events: toolCallEvents(ToolSSHExec, `{"server_id":"s1","command":"systemctl restart nginx"}`)},
+	}}
+	ssh := &ctxCancelSSH{entered: make(chan struct{})}
+	r := newRunner(st, ssh, nil, ap, client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-ssh.entered
+		cancel()
+	}()
+	if err := r.Run(ctx, runInput(), func(Event) error { return nil }); err == nil {
+		t.Fatal("expected run error after cancel")
+	}
+	// 审批已 approved（已从审批队列消失）：收敛不得把它改成 expired。
+	if len(ap.cancelled) != 0 {
+		t.Fatalf("cancelled = %v, want none（审批已批准）", ap.cancelled)
+	}
+	if left := awaitingToolCalls(st); len(left) != 0 {
+		t.Fatalf("tool calls still awaiting_approval: %+v", left)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.toolCalls) != 1 {
+		t.Fatalf("tool calls = %+v, want 1", st.toolCalls)
+	}
+	tc := st.toolCalls[0]
+	if tc.Status != store.ToolExpired || tc.ErrorCode != codeClientDisconnected {
+		t.Fatalf("tool call = %+v, want expired/CLIENT_DISCONNECTED", tc)
+	}
+}
+
+// racingApprovals 模拟「审批者 decide 与发起人断流同时发生」：Wait 因 ctx
+// 取消返回，Cancel 发现审批已被另一请求决策（store.ErrConflict），审批已是
+// approved/denied 并从审批队列消失。
+type racingApprovals struct {
+	*fakeApprovals
+	waitEntered sync.WaitGroup
+}
+
+func (f *racingApprovals) Wait(ctx context.Context, _ string) (approvals.Decision, error) {
+	f.waitEntered.Done()
+	<-ctx.Done()
+	return approvals.Decision{}, ctx.Err()
+}
+
+func (f *racingApprovals) Cancel(context.Context, string, string, string) (store.Approval, error) {
+	return store.Approval{}, store.ErrConflict
+}
+
+// TestRunWaitCancelRacingDecisionUsesClientDisconnected 竞态回归：审批者在
+// 断流同一瞬间完成 decide 时 Cancel 会失败（ErrConflict）。审批已不在队列，
+// 不能按「流取消连带作废」写 APPROVAL_CANCELLED；命令未执行，tool_call 按
+// 断流口径收敛为 expired/CLIENT_DISCONNECTED。
+func TestRunWaitCancelRacingDecisionUsesClientDisconnected(t *testing.T) {
+	st := seed(false)
+	ap := &racingApprovals{fakeApprovals: &fakeApprovals{}}
+	ap.waitEntered.Add(1)
+	client := &fakeLLM{steps: []scriptStep{
+		{events: toolCallEvents(ToolSSHExec, `{"server_id":"s1","command":"systemctl restart nginx"}`)},
+	}}
+	r := newRunner(st, &hostKeySSH{}, nil, ap, client)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		ap.waitEntered.Wait()
+		cancel()
+	}()
+	if err := r.Run(ctx, runInput(), func(Event) error { return nil }); err == nil {
+		t.Fatal("expected run error after cancel")
+	}
+	if left := awaitingToolCalls(st); len(left) != 0 {
+		t.Fatalf("tool calls still awaiting_approval: %+v", left)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	tc := st.toolCalls[0]
+	if tc.Status != store.ToolExpired || tc.ErrorCode != codeClientDisconnected {
+		t.Fatalf("tool call = %+v, want expired/CLIENT_DISCONNECTED", tc)
 	}
 }
 

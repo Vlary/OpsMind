@@ -34,6 +34,9 @@ type testStore struct {
 	servers       map[string]store.Server
 	databases     map[string]store.Database
 	auditLogs     []store.CreateAuditParams
+	// globalMode 是 settings['approval.mode'] 的测试值（空=键缺失，兜底
+	// standard）。会话覆盖不得比它更宽（契约 12.3 第 9 条）。
+	globalMode store.ApprovalMode
 }
 
 func newTestStore() *testStore {
@@ -58,7 +61,7 @@ func (s *testStore) Servers() store.ServerStore             { return &serverRepo
 func (s *testStore) Databases() store.DatabaseStore         { return &databaseRepo{s: s} }
 func (s *testStore) Approvals() store.ApprovalStore         { return nil }
 func (s *testStore) AuditLogs() store.AuditStore            { return s }
-func (s *testStore) Settings() store.SettingStore           { return nil }
+func (s *testStore) Settings() store.SettingStore           { return &settingRepo{s: s} }
 func (s *testStore) Users() store.UserStore                 { return nil }
 func (s *testStore) Sessions() store.SessionStore           { return nil }
 
@@ -450,7 +453,7 @@ func seed(unbound bool) *testStore {
 		Kind: store.ProviderOpenAICompatible, BaseURL: "http://127.0.0.1",
 		DefaultModel: "m1", Models: []string{"m1"},
 	}
-	st.conversations["c1"] = store.Conversation{ID: "c1", Title: "t"}
+	st.conversations["c1"] = store.Conversation{ID: "c1", Title: "t", UserID: "u1"}
 	if !unbound {
 		pid := "p1"
 		c := st.conversations["c1"]
@@ -489,7 +492,7 @@ func indexOf(types []string, want string) int {
 
 func runInput() RunInput {
 	return RunInput{
-		UserID: "u1", ConversationID: "c1", ProviderID: "p1", Model: "m1",
+		UserID: "u1", Role: store.RoleAdmin, ConversationID: "c1", ProviderID: "p1", Model: "m1",
 		Content: "check servers", RequestID: "req-1",
 	}
 }
@@ -1068,3 +1071,32 @@ func TestRunSSHExecFailureSurfacesUnderlyingError(t *testing.T) {
 		t.Errorf("persisted error code = %q, want %q", st.toolCalls[0].ErrorCode, codeSSHExecFailed)
 	}
 }
+
+// settingRepo 是 settings 仓储的最小内存实现（approval.mode 单键）。
+type settingRepo struct{ s *testStore }
+
+func (r *settingRepo) Get(_ context.Context, key string) (store.Setting, error) {
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	if key != "approval.mode" || r.s.globalMode == "" {
+		return store.Setting{}, store.ErrNotFound
+	}
+	raw, err := json.Marshal(string(r.s.globalMode))
+	if err != nil {
+		return store.Setting{}, err
+	}
+	return store.Setting{Key: key, Value: raw}, nil
+}
+
+func (r *settingRepo) Set(_ context.Context, key string, value json.RawMessage, at time.Time) (store.Setting, error) {
+	var mode string
+	if err := json.Unmarshal(value, &mode); err != nil {
+		return store.Setting{}, store.ErrInvalid
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	r.s.globalMode = store.ApprovalMode(mode)
+	return store.Setting{Key: key, Value: value, UpdatedAt: at}, nil
+}
+
+func (r *settingRepo) List(context.Context) ([]store.Setting, error) { return nil, nil }

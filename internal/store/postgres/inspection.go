@@ -19,16 +19,18 @@ import (
 type inspectionJobStore struct{ q querier }
 
 const inspectionJobColumns = `id, name, cron, target_tags, template, notify_enabled,
-	notify_channel_id, enabled, last_run_at, next_run_at, created_at, updated_at`
+	notify_channel_id, enabled, last_run_at, next_run_at, created_at, updated_at, created_by::text`
 
 func scanInspectionJob(row interface{ Scan(dest ...any) error }) (store.InspectionJob, error) {
 	var j store.InspectionJob
+	var createdBy *string
 	err := row.Scan(&j.ID, &j.Name, &j.Cron, &j.TargetTags, &j.Template,
 		&j.NotifyEnabled, &j.NotifyChannelID, &j.Enabled,
-		&j.LastRunAt, &j.NextRunAt, &j.CreatedAt, &j.UpdatedAt)
+		&j.LastRunAt, &j.NextRunAt, &j.CreatedAt, &j.UpdatedAt, &createdBy)
 	if err != nil {
 		return store.InspectionJob{}, mapError(err)
 	}
+	j.CreatedBy = createdBy
 	if j.TargetTags == nil {
 		j.TargetTags = []string{}
 	}
@@ -66,11 +68,12 @@ func (s inspectionJobStore) Get(ctx context.Context, id string) (store.Inspectio
 func (s inspectionJobStore) Create(ctx context.Context, p store.CreateInspectionJobParams) (store.InspectionJob, error) {
 	return scanInspectionJob(s.q.QueryRow(ctx, `
 		INSERT INTO inspection_jobs (name, cron, target_tags, template,
-			notify_enabled, notify_channel_id, enabled, next_run_at)
-		VALUES ($1, $2, $3, $4, $5, $6::uuid, $7, $8)
+			notify_enabled, notify_channel_id, enabled, next_run_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6::uuid, $7, $8, $9::uuid)
 		RETURNING `+inspectionJobColumns,
 		p.Name, p.Cron, nonNil(p.TargetTags), string(p.Template),
-		p.NotifyEnabled, ptrOrNil(p.NotifyChannelID), p.Enabled, p.NextRunAt))
+		p.NotifyEnabled, ptrOrNil(p.NotifyChannelID), p.Enabled, p.NextRunAt,
+		ptrOrNil(p.CreatedBy)))
 }
 
 func (s inspectionJobStore) Update(ctx context.Context, id string, p store.UpdateInspectionJobParams) (store.InspectionJob, error) {

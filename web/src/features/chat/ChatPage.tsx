@@ -23,6 +23,7 @@ import type { components } from '../../api/schema';
 import ApprovalModeSelect from '../../components/ApprovalModeSelect';
 import { effectiveModeText } from '../../components/approvalMode';
 import ErrorBanner from '../../components/ErrorBanner';
+import { hasAnyPermission, PERMS, type Permission } from '../../lib/rbacPermissions';
 import { useComposerStore } from '../../stores/composerStore';
 // 三期 p3 sprint 3：服务器上下文下拉与终端页共用选项文案口径。
 import { termServerOptionLabel } from '../term/serverOptions';
@@ -30,12 +31,14 @@ import {
   useGlobalApprovalMode,
   useUpdateConversationApprovalMode,
 } from '../settings/useApprovalSettings';
+import { usePermissions } from '../auth/useMe';
 import Composer from './Composer';
 import ConversationSidebar from './ConversationSidebar';
 import { stripContextPrefix } from './markdownBlocks';
 import {
   computeLiveSettled,
   describeError,
+  isStreamActive,
   isUnauthorizedError,
   toApiErrorInfo,
   useChatStream,
@@ -101,6 +104,46 @@ export function buildContextContent(
   return `${lines.join('\n')}\n${text}`;
 }
 
+/**
+ * 会话页是否应拉取 GET /api/approvals（RBAC 走查 sprint 3）。
+ *
+ * `/api/approvals` 的权限矩阵要求 `approvals:read`（internal/httpapi/
+ * rbac_enforcement_test.go:37：运维工程师 GET 403），这是有意的职责分离；
+ * 因此无权限的角色（运维工程师/审计员）在会话页不得发这个请求——否则每次
+ * 进入/刷新会话都会产生 403 与 authz.denied 审计噪音，并把 403 渲染成
+ * 页面级错误横幅。无权限时审批信息来自 SSE live.approvals 与 tool_calls
+ * 的 awaiting_approval 状态（ToolCallCard 显示等待提示）。
+ *
+ * 权限未加载完成时 permissions 为空 → 不发请求；me 返回后自动启用。
+ * export 仅作单测钩子（__tests__/chatApprovalsAccess.test.ts）。
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- 测试钩子导出
+export function approvalsQueryEnabled(
+  conversationId: string | undefined,
+  permissions: readonly Permission[],
+): boolean {
+  return Boolean(conversationId) && hasAnyPermission(permissions, [PERMS.approvalsRead]);
+}
+
+/**
+ * 模型供应商空态是否渲染「配置模型 / 去模型管理」入口（RBAC 第 12 轮
+ * 走查 medium）。
+ *
+ * `/providers` 页由 PermissionGate 按 provider:manage 收敛（navItems.ts
+ * 的「模型」项）。运维工程师没有该权限：此前会话页三处空态都无条件渲染
+ * 指向 /providers 的链接/按钮，点进去只看到 403「无权访问「模型」」，
+ * 主工作流没有可执行的下一步。无权限时改为纯文案
+ * 「请联系管理员配置模型供应商」，不渲染任何 /providers 入口。
+ *
+ * 只影响前端入口，服务端权限矩阵不变：GET /api/providers 仍对登录用户
+ * 返回最小 DTO（12.3 第 17 条），写操作仍要求 provider:manage。
+ * export 仅作单测钩子（__tests__/chatProviderCta.test.ts）。
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- 测试钩子导出
+export function canManageProviders(permissions: readonly Permission[]): boolean {
+  return hasAnyPermission(permissions, [PERMS.providers]);
+}
+
 function providerName(providers: Provider[], id: string | null | undefined): string {
   if (!id) {
     return '';
@@ -115,6 +158,11 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
+  // 会话页审批查询按 approvals:read 收敛（见 approvalsQueryEnabled）。
+  const permissions = usePermissions();
+  // 供应商空态入口按 provider:manage 收敛（见 canManageProviders）：
+  // 无权限角色只看到「请联系管理员配置模型供应商」，不渲染 /providers 链接。
+  const canConfigureProviders = canManageProviders(permissions);
 
   // 消息列表 chunk 预取：组件挂载时触发（而非模块顶层副作用）——顶层
   // void import 会随任何单测导入 ChatPage 的纯函数钩子一起执行，惰性
@@ -253,6 +301,10 @@ export default function ChatPage() {
     enabled: Boolean(conversationId),
   });
 
+  // RBAC 走查 sprint 3：`/api/approvals` 需要 approvals:read（运维工程师/
+  // 审计员 403）。无权限时不发请求，避免刷新即 403 + authz.denied 审计
+  // 噪音；审批卡仍由 SSE live.approvals 实时出现，刷新后的工具卡由
+  // tool_calls 的 awaiting_approval/expired 状态兜底展示。
   const approvalsQuery = useQuery({
     queryKey: qk.approvals(conversationId ?? 'none'),
     queryFn: async () => {
@@ -267,7 +319,7 @@ export default function ChatPage() {
       }
       return data;
     },
-    enabled: Boolean(conversationId),
+    enabled: approvalsQueryEnabled(conversationId, permissions),
   });
 
   const stream = useChatStream(conversationId, {
@@ -326,7 +378,9 @@ export default function ChatPage() {
   const toolCalls = useMemo(() => toolCallsQuery.data?.items ?? [], [toolCallsQuery.data]);
   const approvals = approvalsQuery.data?.items ?? [];
 
-  const streaming = stream.phase === 'connecting' || stream.phase === 'streaming';
+  // 走查第 3 轮 medium：done/error/stopped 帧到达即视为回答结束，不等
+  // phase 在 finally 里回落 idle（渲染间隙内点「新建会话」会被误拦）。
+  const streaming = isStreamActive(stream.phase, stream.live);
   const live = stream.live;
   // 停止含 pending 审批的流会作废审批（不可恢复），仅此场景二次确认；
   // 纯流式停止单击直停（有重新生成与悬挂轮重发兜底）。SSE 实时审批
@@ -644,9 +698,17 @@ export default function ChatPage() {
   const serversError = serversQuery.error ? toApiErrorInfo(serversQuery.error) : null;
   const databasesError = databasesQuery.error ? toApiErrorInfo(databasesQuery.error) : null;
   // 历史工具调用与审批卡片同样需要显式错误提示；静默回退空数组会让卡片
-  // “消失”且无从重试，与同页其他查询的处理不一致。
+  // “消失”且无从重试，与同页其他查询的处理不一致。审批查询仅在
+  // approvals:read 下启用，无权限时绝不把（必然的）403 放进页面横幅。
   const toolCallsError = toolCallsQuery.error ? toApiErrorInfo(toolCallsQuery.error) : null;
-  const approvalsError = approvalsQuery.error ? toApiErrorInfo(approvalsQuery.error) : null;
+  const approvalsErrorInfo = approvalsQuery.error ? toApiErrorInfo(approvalsQuery.error) : null;
+  const approvalsError =
+    approvalsQueryEnabled(conversationId, permissions) &&
+    approvalsErrorInfo !== null &&
+    // 403 属于权限矩阵（无 approvals:read），不是页面故障：不渲染横幅。
+    approvalsErrorInfo.code !== 'FORBIDDEN'
+      ? approvalsErrorInfo
+      : null;
   const createError = createMutation.error ? toApiErrorInfo(createMutation.error) : null;
 
   // 上下文类查询（服务器/数据库/工具调用/审批卡片）失败聚合成一条横幅：
@@ -671,15 +733,23 @@ export default function ChatPage() {
     conversationQuery.isLoading ||
     createMutation.isPending;
   const composerHint = providersQuery.isError ? (
-    <span>模型供应商加载失败，请重试或前往模型管理。</span>
+    canConfigureProviders ? (
+      <span>模型供应商加载失败，请重试或前往模型管理。</span>
+    ) : (
+      <span>模型供应商加载失败，请重试；若持续失败请联系管理员。</span>
+    )
   ) : providersQuery.isLoading && !bound ? (
     <span>正在加载模型供应商…</span>
   ) : !bound && providers.length === 0 ? (
-    <span>
-      尚未配置模型供应商，请先前往
-      <Link to="/providers">模型管理</Link>
-      添加。
-    </span>
+    canConfigureProviders ? (
+      <span>
+        尚未配置模型供应商，请先前往
+        <Link to="/providers">模型管理</Link>
+        添加。
+      </span>
+    ) : (
+      <span>请联系管理员配置模型供应商。</span>
+    )
   ) : conversationQuery.isLoading ? (
     <span>正在加载会话…</span>
   ) : conversationError ? (
@@ -782,11 +852,17 @@ export default function ChatPage() {
             ) : providersQuery.isLoading ? (
               <Spin size="small" />
             ) : providers.length === 0 ? (
-              <Link to="/providers">
-                <Button size="small" type="primary" ghost>
-                  配置模型
-                </Button>
-              </Link>
+              canConfigureProviders ? (
+                <Link to="/providers">
+                  <Button size="small" type="primary" ghost>
+                    配置模型
+                  </Button>
+                </Link>
+              ) : (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  请联系管理员配置模型供应商。
+                </Typography.Text>
+              )
             ) : (
               <>
                 <Select
@@ -897,6 +973,21 @@ export default function ChatPage() {
           </div>
         ) : null}
 
+        {/* RBAC 走查 sprint 3：刷新/离开会中断回答流并连带取消 pending
+            审批（internal/agent/runner.go cancelApprovalAndConverge）。
+            原生 beforeunload 只在真正离开时弹窗，这里在等待审批期间给出
+            常驻可见提示，让用户在选择刷新前就知道代价。 */}
+        {hasPendingApproval && streaming ? (
+          <div className="chat-stream-error">
+            <Alert
+              type="info"
+              showIcon
+              data-testid="pending-approval-leave-hint"
+              message="本轮审批等待中：刷新或离开页面会中断回答流并取消审批。"
+            />
+          </div>
+        ) : null}
+
         {conversationId ? (
           conversationQuery.isLoading ? (
             <div className="chat-messages chat-messages--center">
@@ -995,13 +1086,19 @@ export default function ChatPage() {
                   type="warning"
                   showIcon
                   message="尚未配置模型供应商"
-                  description="请先在模型管理中添加供应商与模型，再开始对话。"
+                  description={
+                    canConfigureProviders
+                      ? '请先在模型管理中添加供应商与模型，再开始对话。'
+                      : '请联系管理员配置模型供应商。'
+                  }
                   action={
-                    <Link to="/providers">
-                      <Button size="small" type="primary">
-                        去模型管理
-                      </Button>
-                    </Link>
+                    canConfigureProviders ? (
+                      <Link to="/providers">
+                        <Button size="small" type="primary">
+                          去模型管理
+                        </Button>
+                      </Link>
+                    ) : undefined
                   }
                 />
               ) : null}

@@ -166,6 +166,54 @@ func TestTerminalSessionsCRUDAndLifecycle(t *testing.T) {
 	}
 }
 
+// TestTerminalSessionPersistsGrantID 覆盖第 10 轮走查 medium：会话行必须
+// 保存创建时消费的 terminal grant（approvals.id），WS 拨号失败时 handler
+// 才能精确回滚对应审批；无 grant 的历史/单测路径读出空串。
+func TestTerminalSessionPersistsGrantID(t *testing.T) {
+	cleanTermTables(t)
+	ctx := context.Background()
+	user := mustUser(t)
+	server := mustTermServer(t, "term-grant-host")
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	kind := "term"
+	expires := now.Add(30 * time.Minute)
+	grant, err := testDB.Approvals().Create(ctx, store.CreateApprovalParams{
+		Source: "terminal", ServerID: &server.ID, ServerName: server.Name,
+		Command: "", RiskLevel: "safe", GrantKind: &kind, GrantExpiresAt: &expires,
+		ExpiresAt: expires, CreatedAt: now, RequestedBy: user.ID,
+	})
+	if err != nil {
+		t.Fatalf("create grant: %v", err)
+	}
+
+	withGrant, err := testDB.TerminalSessions().Create(ctx, store.CreateTerminalSessionParams{
+		ServerID: server.ID, UserID: user.ID, GrantID: grant.ID,
+		Cols: 120, Rows: 40, StartedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create with grant: %v", err)
+	}
+	if withGrant.GrantID != grant.ID {
+		t.Fatalf("created grant_id = %q, want %q", withGrant.GrantID, grant.ID)
+	}
+	got, err := testDB.TerminalSessions().Get(ctx, withGrant.ID)
+	if err != nil || got.GrantID != grant.ID {
+		t.Fatalf("Get grant_id = %q, err=%v; want %q", got.GrantID, err, grant.ID)
+	}
+
+	// 空 GrantID → NULL 落库，读回空串（00015 前历史行/单测直接建行兼容）。
+	withoutGrant, err := testDB.TerminalSessions().Create(ctx, store.CreateTerminalSessionParams{
+		ServerID: server.ID, UserID: user.ID, Cols: 120, Rows: 40, StartedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("create without grant: %v", err)
+	}
+	if withoutGrant.GrantID != "" {
+		t.Fatalf("empty grant_id = %q, want empty", withoutGrant.GrantID)
+	}
+}
+
 func TestTerminalSessionsZeroBytesKeepsRecordingEmpty(t *testing.T) {
 	cleanTermTables(t)
 	ctx := context.Background()

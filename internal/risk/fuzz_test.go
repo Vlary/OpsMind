@@ -674,6 +674,9 @@ func FuzzWinClassify(f *testing.F) {
 		// 混淆/畸形形态。
 		"echo 'oops",
 		`echo "unclosed`,
+		// fuzz 回归：反斜杠在 PowerShell 里不是转义符，`\"` 不应让引号
+		// 配对错位、把成对引号误判成未闭合子表达式。
+		"\\\"\"\\\"\"'g'C",
 		"Get-Process $((Get-Date).Year)",
 		"cat " + strings.Repeat("a", 2000),
 		"Remove-Item -Recurse -Force C:\\Windows\\" + strings.Repeat("*?", 40),
@@ -735,11 +738,13 @@ func FuzzWinClassify(f *testing.F) {
 
 // hasWinSubexpression 报告未括在单引号内的 $( 子表达式（safe 不变式检测器，
 // 与被测实现独立）。
+//
+// 反斜杠按 PowerShell 语义视为普通字符（PS 的转义符是反引号，不是 `\`）：
+// 不能把它当作「转义下一个字符」，否则 `\"` 序列会让引号配对与
+// parseWinCommand 错位，把合法的成对引号误报成未闭合。
 func hasWinSubexpression(s string) bool {
 	for i := 0; i < len(s); {
 		switch s[i] {
-		case '\\':
-			i += 2
 		case '\'':
 			j := strings.IndexByte(s[i+1:], '\'')
 			if j < 0 {

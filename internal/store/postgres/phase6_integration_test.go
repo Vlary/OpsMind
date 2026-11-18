@@ -5,6 +5,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ func TestPhase6ApprovalModeAndEditedColumns(t *testing.T) {
 		Command: "systemctl restart nginx", RiskLevel: "needs_approval",
 		RuleID: "SERVICE_CHANGE", Reason: "r",
 		ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +45,7 @@ func TestPhase6ApprovalModeAndEditedColumns(t *testing.T) {
 		Command: "docker stop 9f2c", RiskLevel: "needs_approval",
 		RuleID: "CONTAINER_CHANGE", Reason: "r", ApprovalMode: string(high),
 		ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +54,23 @@ func TestPhase6ApprovalModeAndEditedColumns(t *testing.T) {
 		t.Fatalf("approval_mode = %q, want high", ap2.ApprovalMode)
 	}
 
-	// Decide 同 UPDATE 落库 edited_*；原命令不动。
+	// 00012（契约 12.3 第 7/8 条）：新行禁止改写命令——
+	// CHECK (edited_command='' OR legacy) 使带 edited_* 的 Decide 失败。
+	if _, err := testDB.Approvals().Decide(ctx, store.DecideApprovalParams{
+		ID: ap.ID, Status: store.ApprovalApproved, DecidedBy: "", Note: "ok",
+		EditedCommand:   "systemctl restart nginx --no-block",
+		EditedRiskLevel: "needs_approval",
+		EditedRuleID:    "SERVICE_CHANGE",
+		DecidedAt:       time.Now(),
+	}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("edited non-legacy approval = %v, want ErrInvalid", err)
+	}
+
+	// 历史行（legacy=true，应用不得写；测试直接置位）仍可落库 edited_*，
+	// 仅用于回放/审计只读展示，执行层永不读取。
+	if _, err := testDB.pool.Exec(ctx, `UPDATE approvals SET legacy = true WHERE id = $1::uuid`, ap.ID); err != nil {
+		t.Fatal(err)
+	}
 	decided, err := testDB.Approvals().Decide(ctx, store.DecideApprovalParams{
 		ID: ap.ID, Status: store.ApprovalApproved, DecidedBy: "", Note: "ok",
 		EditedCommand:   "systemctl restart nginx --no-block",
@@ -83,7 +102,7 @@ func TestPhase6ApprovalModeAndEditedColumns(t *testing.T) {
 func TestPhase6ConversationApprovalMode(t *testing.T) {
 	cleanDB(t)
 	ctx := context.Background()
-	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: "p6"})
+	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: "p6", UserID: rbacUserID(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

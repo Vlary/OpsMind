@@ -34,6 +34,8 @@ import {
 } from '../../components/admin/apiError';
 import { engineLabel } from '../../components/admin/meta';
 import { formatDateTime, shortId } from '../../components/admin/format';
+import { hasAnyPermission, PERMS } from '../../lib/rbacPermissions';
+import { usePermissions } from '../auth/useMe';
 import '../../styles/admin.css';
 import DatabaseFormModal from './DatabaseFormDrawer';
 import SqlConsole from './SqlConsole';
@@ -82,6 +84,14 @@ export function databaseAddress(database: Database): { main: string; sub: string
 
 export default function DatabasesPage() {
   const queryClient = useQueryClient();
+  // RBAC 走查 sprint 1（medium）：页面内入口按权限收敛，避免只读角色看到
+  // 新增/编辑/删除/测试/查询后点击才 403。
+  // assets:write 控制新增/编辑/删除，connection:test 控制测试，
+  // execute:read 控制只读查询（与 internal/httpapi/servers.go 的守卫一致）。
+  const permissions = usePermissions();
+  const canWrite = hasAnyPermission(permissions, [PERMS.assetsWrite]);
+  const canTest = hasAnyPermission(permissions, [PERMS.connectionTest]);
+  const canQuery = hasAnyPermission(permissions, [PERMS.execRead]);
   const [keyword, setKeyword] = useState('');
   const [actionError, setActionError] = useState<ApiFailure | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -262,47 +272,58 @@ export default function DatabasesPage() {
       key: 'actions',
       width: 290,
       fixed: 'right',
-      render: (_value, record) => (
-        <div className="opsmind-admin-actions">
-          <Button
-            type="link"
-            size="small"
-            icon={<CodeOutlined />}
-            onClick={() => setSqlTarget(record)}
-          >
-            查询
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            icon={<ApiOutlined />}
-            loading={testMutation.isPending && testMutation.variables?.id === record.id}
-            onClick={() => testMutation.mutate(record)}
-          >
-            测试
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => {
-              setEditing(record);
-              setFormOpen(true);
-            }}
-          >
-            编辑
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            danger
-            icon={<DeleteOutlined />}
-            onClick={() => setDeleting(record)}
-          >
-            删除
-          </Button>
-        </div>
-      ),
+      render: (_value, record) =>
+        canQuery || canTest || canWrite ? (
+          <div className="opsmind-admin-actions">
+            {canQuery ? (
+              <Button
+                type="link"
+                size="small"
+                icon={<CodeOutlined />}
+                onClick={() => setSqlTarget(record)}
+              >
+                查询
+              </Button>
+            ) : null}
+            {canTest ? (
+              <Button
+                type="link"
+                size="small"
+                icon={<ApiOutlined />}
+                loading={testMutation.isPending && testMutation.variables?.id === record.id}
+                onClick={() => testMutation.mutate(record)}
+              >
+                测试
+              </Button>
+            ) : null}
+            {canWrite ? (
+              <>
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<EditOutlined />}
+                  onClick={() => {
+                    setEditing(record);
+                    setFormOpen(true);
+                  }}
+                >
+                  编辑
+                </Button>
+                <Button
+                  type="link"
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={() => setDeleting(record)}
+                >
+                  删除
+                </Button>
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <Typography.Text type="secondary">只读</Typography.Text>
+        ),
     },
   ];
 
@@ -320,16 +341,18 @@ export default function DatabasesPage() {
             >
               刷新
             </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => {
-                setEditing(null);
-                setFormOpen(true);
-              }}
-            >
-              新增数据库
-            </Button>
+            {canWrite ? (
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => {
+                  setEditing(null);
+                  setFormOpen(true);
+                }}
+              >
+                新增数据库
+              </Button>
+            ) : null}
           </Space>
         }
       />
@@ -365,7 +388,15 @@ export default function DatabasesPage() {
           size="middle"
           scroll={{ x: 1220 }}
           locale={{
-            emptyText: <EmptyState description="还没有数据库，点击右上角“新增数据库”开始配置" />,
+            emptyText: (
+              <EmptyState
+                description={
+                  canWrite
+                    ? '还没有数据库，点击右上角“新增数据库”开始配置'
+                    : '还没有数据库；当前角色只读，无法新增资产'
+                }
+              />
+            ),
           }}
           pagination={{
             pageSize: 10,

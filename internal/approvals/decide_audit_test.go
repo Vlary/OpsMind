@@ -183,12 +183,13 @@ func TestDecideBatchSourceSkipsCommandApproved(t *testing.T) {
 	svc, _, rec := newAuditService(t)
 	ctx := context.Background()
 	ap, err := svc.Create(ctx, CreateRequest{
-		Source:    "batch",
-		ServerID:  ptr("srv-batch"),
-		Command:   "rm -rf /tmp/x",
-		RiskLevel: "needs_approval",
-		RuleID:    "RM_ANY",
-		Reason:    "dangerous",
+		Source:      "batch",
+		ServerID:    ptr("srv-batch"),
+		Command:     "rm -rf /tmp/x",
+		RiskLevel:   "needs_approval",
+		RuleID:      "RM_ANY",
+		Reason:      "dangerous",
+		RequestedBy: "requester-1",
 	})
 	if err != nil {
 		t.Fatalf("Create batch approval: %v", err)

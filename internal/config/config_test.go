@@ -179,3 +179,57 @@ func TestLoadValidatesMasterKey(t *testing.T) {
 		t.Fatalf("Load() rejected a 32-byte master key: %v", err)
 	}
 }
+
+// TestLoadSMTPDefaultsAndImplicitTLS 锁定 SMTP 的默认口径（走查第 3 轮
+// high）：默认端口 587 + UseTLS=true，实际走 STARTTLS；只有显式
+// AIOPS_SMTP_IMPLICIT_TLS=true 才强制 implicit TLS。
+func TestLoadSMTPDefaultsAndImplicitTLS(t *testing.T) {
+	base := func(t *testing.T) {
+		t.Helper()
+		t.Setenv("AIOPS_DATABASE_URL", "postgres://aiops:aiops@127.0.0.1:65432/aiops?sslmode=disable")
+		t.Setenv("AIOPS_SMTP_HOST", "smtp.example.com")
+		t.Setenv("AIOPS_SMTP_FROM", "ops@example.com")
+		t.Setenv("AIOPS_SMTP_PORT", "")
+		t.Setenv("AIOPS_SMTP_USE_TLS", "")
+		t.Setenv("AIOPS_SMTP_IMPLICIT_TLS", "")
+		t.Setenv("AIOPS_BOOTSTRAP_APPROVER_EMAIL", "")
+	}
+
+	base(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.SmtpPort != 587 || !c.SmtpUseTLS || c.SmtpImplicitTLS {
+		t.Fatalf("smtp defaults = port %d useTLS %v implicit %v, want 587/true/false",
+			c.SmtpPort, c.SmtpUseTLS, c.SmtpImplicitTLS)
+	}
+
+	base(t)
+	t.Setenv("AIOPS_SMTP_IMPLICIT_TLS", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load with implicit TLS: %v", err)
+	}
+	if !c.SmtpImplicitTLS {
+		t.Fatal("SmtpImplicitTLS = false, want true")
+	}
+
+	base(t)
+	t.Setenv("AIOPS_SMTP_USE_TLS", "false")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("Load with TLS off: %v", err)
+	}
+	if c.SmtpUseTLS {
+		t.Fatal("SmtpUseTLS = true, want false")
+	}
+
+	// AIOPS_BOOTSTRAP_APPROVER_EMAIL 需要 SMTP host（启动失败而不是静默降级）。
+	base(t)
+	t.Setenv("AIOPS_SMTP_HOST", "")
+	t.Setenv("AIOPS_BOOTSTRAP_APPROVER_EMAIL", "approver@example.com")
+	if _, err := Load(); err == nil {
+		t.Fatal("bootstrap approver email without SMTP host must fail at startup")
+	}
+}

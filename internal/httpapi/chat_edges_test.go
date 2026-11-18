@@ -225,7 +225,7 @@ func TestAuthHandlersMissingDependencies(t *testing.T) {
 	// 登录：Auth nil → 500。
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptestPost("/x", `{"password":"x"}`)
+	c.Request = httptestPost("/x", `{"username":"admin","password":"x"}`)
 	d := &Deps{}
 	d.handleLogin(c)
 	if rec.Code != http.StatusInternalServerError {
@@ -265,7 +265,7 @@ func TestAuthHandlersMissingDependencies(t *testing.T) {
 func TestLoginCookieMaxAgeFloor(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	st := newMemStore()
-	st.users["admin"] = store.User{ID: "user-1", Username: "admin", PasswordHash: getAdminHash()}
+	st.users["admin"] = store.User{ID: "user-1", Username: "admin", PasswordHash: getAdminHash(), Role: store.RoleAdmin, Enabled: true}
 
 	base := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
 	authSvc := auth.NewService(st, auth.Config{
@@ -278,7 +278,7 @@ func TestLoginCookieMaxAgeFloor(t *testing.T) {
 		Clock:  func() time.Time { return base.Add(2 * time.Hour) }, // 时钟已越过过期时间
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"`+testPassword+`"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"`+testPassword+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", testOrigin)
 	rec := httptest.NewRecorder()

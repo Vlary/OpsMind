@@ -31,6 +31,8 @@ import { QueryErrorState } from '../../components/admin/AdminStates';
 import CopyButton from '../../components/CopyButton';
 import EmptyState from '../../components/EmptyState';
 import PageHeader from '../../components/PageHeader';
+import { hasAnyPermission, PERMS, type Permission } from '../../lib/rbacPermissions';
+import { usePermissions } from '../auth/useMe';
 import '../../styles/admin.css';
 
 import CollectorCard from './CollectorCard';
@@ -111,7 +113,29 @@ const METRIC_CARDS: readonly MetricCardSpec[] = [
   },
 ];
 
+/**
+ * 监控页「无服务器指标」空态文案（RBAC 第 12 轮走查 medium）。
+ *
+ * 添加资产要求 asset:write、开启采集要求 monitor:manage（CollectorCard
+ * 的 canConfigure 同源）。运维工程师两项都没有：此前空态无条件让他去
+ * 「服务器」页添加资产并开启采集，而同页采集卡又显示只读，主工作流没有
+ * 可执行的下一步。无任一权限时改为「请联系管理员配置资产与采集」；
+ * 管理员保留原文案。export 仅作单测钩子。
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- 测试钩子导出
+export function monitorEmptyDescription(permissions: readonly Permission[]): string {
+  // 两个动作各有独立权限：添加资产要 asset:write，开启采集要 monitor:manage。
+  // 只有两者都在手时才给出「添加资产并开启采集」的完整下一步；任一缺失
+  // 都只能联系管理员，否则仍是把用户引向必然 403 的操作。
+  const canAddAssets = hasAnyPermission(permissions, [PERMS.assetsWrite]);
+  const canManageCollector = hasAnyPermission(permissions, [PERMS.alertsWrite]);
+  return canAddAssets && canManageCollector
+    ? '暂无服务器指标：请先在「服务器」页添加资产并开启采集'
+    : '暂无服务器指标：请联系管理员配置资产与采集';
+}
+
 export default function MonitorPage() {
+  const permissions = usePermissions();
   const [serverId, setServerId] = useState<string | null>(null);
   const [minutes, setMinutes] = useState(60);
 
@@ -306,7 +330,7 @@ export default function MonitorPage() {
       </Flex>
 
       {effectiveServerId === null && !overviewQuery.isLoading ? (
-        <EmptyState description="暂无服务器指标：请先在「服务器」页添加资产并开启采集" />
+        <EmptyState description={monitorEmptyDescription(permissions)} />
       ) : metricsQuery.isError ? (
         <QueryErrorState
           error={metricsQuery.error}

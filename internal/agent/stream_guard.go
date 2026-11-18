@@ -18,7 +18,17 @@ type StreamGuard struct {
 	max     int
 	active  map[string]struct{}
 	cancels map[string]func()
-	closed  bool
+	// owners 记录每个活跃流的发起人身份（userID / authSessionID），供
+	// 登出（按 auth session）与停用/降级/吊销（按用户）取消对应流。
+	// 与 cancels 同键，release/Shutdown 时一并清理。
+	owners map[string]streamOwner
+	closed bool
+}
+
+// streamOwner 是活跃流的归属身份（空串表示未追踪）。
+type streamOwner struct {
+	userID        string
+	authSessionID string
 }
 
 // NewStreamGuard 构造流守卫。
@@ -30,6 +40,7 @@ func NewStreamGuard(max int) *StreamGuard {
 		max:     max,
 		active:  make(map[string]struct{}),
 		cancels: make(map[string]func()),
+		owners:  make(map[string]streamOwner),
 	}
 }
 
@@ -50,6 +61,7 @@ func (g *StreamGuard) TryAcquire(conversationID string) (release func(), err err
 			g.mu.Lock()
 			delete(g.active, conversationID)
 			delete(g.cancels, conversationID)
+			delete(g.owners, conversationID)
 			g.mu.Unlock()
 		})
 	}, nil
@@ -59,6 +71,12 @@ func (g *StreamGuard) TryAcquire(conversationID string) (release func(), err err
 // 主动取消活跃流。守卫已关闭时立即执行 cancel（新流不允许在关闭后继续）。
 // cancel 会在流结束（release）或 ShutdownActive 时被调用/清除，无需手动注销。
 func (g *StreamGuard) Watch(conversationID string, cancel func()) {
+	g.WatchOwned(conversationID, "", "", cancel)
+}
+
+// WatchOwned 登记取消函数并记录发起人身份（logout 按 auth session、
+// 停用/降级/吊销按用户取消对应流；契约 12.4 第 5 条）。
+func (g *StreamGuard) WatchOwned(conversationID, userID, authSessionID string, cancel func()) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
@@ -66,6 +84,40 @@ func (g *StreamGuard) Watch(conversationID string, cancel func()) {
 		return
 	}
 	g.cancels[conversationID] = cancel
+	g.owners[conversationID] = streamOwner{userID: userID, authSessionID: authSessionID}
+}
+
+// CancelByUser 取消该用户发起的全部活跃流（停用/降级/吊销会话）。
+func (g *StreamGuard) CancelByUser(userID string) {
+	if userID == "" {
+		return
+	}
+	g.cancelMatching(func(o streamOwner) bool { return o.userID == userID })
+}
+
+// CancelByAuthSession 取消某个 auth session 发起的全部活跃流（登出）。
+func (g *StreamGuard) CancelByAuthSession(authSessionID string) {
+	if authSessionID == "" {
+		return
+	}
+	g.cancelMatching(func(o streamOwner) bool { return o.authSessionID == authSessionID })
+}
+
+// cancelMatching 收集匹配的取消函数后在锁外调用（取消可能触发落库）。
+func (g *StreamGuard) cancelMatching(match func(streamOwner) bool) {
+	g.mu.Lock()
+	cancels := make([]func(), 0, len(g.cancels))
+	for id, cancel := range g.cancels {
+		if match(g.owners[id]) {
+			cancels = append(cancels, cancel)
+			delete(g.cancels, id)
+			delete(g.owners, id)
+		}
+	}
+	g.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 }
 
 // ShutdownActive 取消全部活跃流，并让后续 Watch 立即取消。
@@ -81,6 +133,7 @@ func (g *StreamGuard) ShutdownActive() {
 	for id, cancel := range g.cancels {
 		cancel()
 		delete(g.cancels, id)
+		delete(g.owners, id)
 	}
 }
 

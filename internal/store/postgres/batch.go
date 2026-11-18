@@ -211,3 +211,62 @@ func (s batchJobStore) ByApproval(ctx context.Context, approvalID string) (store
 	return scanBatchResult(s.q.QueryRow(ctx,
 		`SELECT `+batchResultColumns+batchResultFrom+` WHERE r.approval_id = $1::uuid`, approvalID))
 }
+
+// CancelAwaitingByUser 把该用户创建的 job 中 awaiting_approval 的台置
+// cancelled 并重算 job 状态（账号停用/降级/吊销会话时收敛其批量审批，
+// 契约 12.3 第 22 条）。
+//
+// 只动 awaiting_approval：pending 台可能仍在分派中，由 batchx 正常流程
+// 处理。分两条语句执行：第一条更新 result，第二条在**新快照**上按终态
+// 归并 job 状态（单语句里 data-modifying CTE 的写入对同语句读取不可见，
+// 曾经导致 job 停留在 running）。
+func (s batchJobStore) CancelAwaitingByUser(ctx context.Context, userID string, now time.Time) (int64, error) {
+	at := utc(now)
+	tag, err := s.q.Exec(ctx, `
+		UPDATE batch_results r
+		SET status = 'cancelled', updated_at = $2
+		FROM batch_jobs j
+		WHERE j.id = r.batch_job_id
+		  AND j.created_by = $1::uuid
+		  AND r.status = 'awaiting_approval'`,
+		userID, at)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	n := tag.RowsAffected()
+	if n == 0 {
+		return 0, nil
+	}
+	// 重算该用户全部非终态 job（收敛后仍可能有 pending 台 → running）。
+	_, err = s.q.Exec(ctx, `
+		UPDATE batch_jobs j
+		SET status = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM batch_results r
+					WHERE r.batch_job_id = j.id
+					  AND r.status IN ('pending','awaiting_approval')
+				) THEN 'running'
+				WHEN EXISTS (
+					SELECT 1 FROM batch_results r
+					WHERE r.batch_job_id = j.id
+					  AND r.status IN ('failed','denied','expired','skipped','cancelled')
+				) THEN 'partial'
+				ELSE 'done'
+			END,
+			updated_at = $2,
+			finished_at = CASE
+				WHEN EXISTS (
+					SELECT 1 FROM batch_results r
+					WHERE r.batch_job_id = j.id
+					  AND r.status IN ('pending','awaiting_approval')
+				) THEN j.finished_at
+				ELSE COALESCE(j.finished_at, $2)
+			END
+		WHERE j.created_by = $1::uuid
+		  AND j.status NOT IN ('done','partial','failed','cancelled')`,
+		userID, at)
+	if err != nil {
+		return n, mapError(err)
+	}
+	return n, nil
+}

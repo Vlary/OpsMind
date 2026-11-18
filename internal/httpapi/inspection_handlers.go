@@ -12,23 +12,24 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"aiops/internal/apierr"
+	"aiops/internal/authz"
 	"aiops/internal/inspection"
 	"aiops/internal/store"
 )
 
 // RegisterInspectionRoutes 注册 M2 巡检路由（契约 2.5）。
 func (d *Deps) RegisterInspectionRoutes(api *gin.RouterGroup) {
-	api.GET("/inspection/jobs", d.handleListInspectionJobs)
-	api.POST("/inspection/jobs", d.handleCreateInspectionJob)
-	api.GET("/inspection/jobs/:id", d.handleGetInspectionJob)
-	api.PATCH("/inspection/jobs/:id", d.handleUpdateInspectionJob)
-	api.DELETE("/inspection/jobs/:id", d.handleDeleteInspectionJob)
-	api.POST("/inspection/jobs/:id/run", d.handleRunInspection)
+	d.guard(api, http.MethodGet, "/inspection/jobs", authz.PermInspection, d.handleListInspectionJobs)
+	d.guard(api, http.MethodPost, "/inspection/jobs", authz.PermInspection, d.handleCreateInspectionJob)
+	d.guard(api, http.MethodGet, "/inspection/jobs/:id", authz.PermInspection, d.handleGetInspectionJob)
+	d.guard(api, http.MethodPatch, "/inspection/jobs/:id", authz.PermInspection, d.handleUpdateInspectionJob)
+	d.guard(api, http.MethodDelete, "/inspection/jobs/:id", authz.PermInspection, d.handleDeleteInspectionJob)
+	d.guard(api, http.MethodPost, "/inspection/jobs/:id/run", authz.PermInspection, d.handleRunInspection)
 
-	api.GET("/inspection/reports", d.handleListInspectionReports)
-	api.GET("/inspection/reports/:id", d.handleGetInspectionReport)
+	d.guard(api, http.MethodGet, "/inspection/reports", authz.PermInspection, d.handleListInspectionReports)
+	d.guard(api, http.MethodGet, "/inspection/reports/:id", authz.PermInspection, d.handleGetInspectionReport)
 
-	api.POST("/inspection/run", d.handleRunInspectionNow)
+	d.guard(api, http.MethodPost, "/inspection/run", authz.PermInspection, d.handleRunInspectionNow)
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ func (d *Deps) handleCreateInspectionJob(c *gin.Context) {
 		}
 		template = t
 	}
+	userID := c.GetString("user_id")
 	job, err := d.Store.InspectionJobs().Create(c.Request.Context(), store.CreateInspectionJobParams{
 		Name:            *req.Name,
 		Cron:            *req.Cron,
@@ -95,6 +97,8 @@ func (d *Deps) handleCreateInspectionJob(c *gin.Context) {
 		NotifyChannelID: req.NotifyChannelID,
 		Enabled:         boolOr(req.Enabled, true),
 		NextRunAt:       &next,
+		// 00012：任务归属创建者（PATCH/DELETE/run 的 owner 规则依据）。
+		CreatedBy: &userID,
 	})
 	if err != nil {
 		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
@@ -112,6 +116,16 @@ func (d *Deps) handleListInspectionJobs(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
 		return
 	}
+	if !isAdmin(c) {
+		me := c.GetString("user_id")
+		own := make([]store.InspectionJob, 0, len(jobs))
+		for _, job := range jobs {
+			if job.CreatedBy != nil && *job.CreatedBy == me {
+				own = append(own, job)
+			}
+		}
+		jobs = own
+	}
 	if jobs == nil {
 		jobs = []store.InspectionJob{}
 	}
@@ -127,11 +141,25 @@ func (d *Deps) handleGetInspectionJob(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
 		return
 	}
+	if !ownerOrAdmin(c, job.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.InspectionJobNotFound, "inspection job not found")
+		return
+	}
 	c.JSON(http.StatusOK, job)
 }
 
 func (d *Deps) handleUpdateInspectionJob(c *gin.Context) {
 	if !d.requireStore(c) {
+		return
+	}
+	// 契约 12.4 第 2 条：PATCH/DELETE/run 仅 created_by=user 或 admin。
+	job, err := d.Store.InspectionJobs().Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
+		return
+	}
+	if !ownerOrAdmin(c, job.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.InspectionJobNotFound, "inspection job not found")
 		return
 	}
 	var req inspectionJobRequest
@@ -155,7 +183,7 @@ func (d *Deps) handleUpdateInspectionJob(c *gin.Context) {
 		writeAPIError(c, http.StatusBadRequest, apierr.ValidationFailed, "name must be 1..100 characters")
 		return
 	}
-	job, err := d.Store.InspectionJobs().Update(c.Request.Context(), c.Param("id"), store.UpdateInspectionJobParams{
+	job, err = d.Store.InspectionJobs().Update(c.Request.Context(), c.Param("id"), store.UpdateInspectionJobParams{
 		Name: req.Name, Cron: req.Cron, TargetTags: req.TargetTags,
 		Template: templatePtr(req.Template), NotifyEnabled: req.NotifyEnabled,
 		NotifyChannelID: req.NotifyChannelID, ClearNotifyChannel: boolOf(req.ClearNotifyChannel),
@@ -183,6 +211,15 @@ func (d *Deps) handleDeleteInspectionJob(c *gin.Context) {
 	if !d.requireStore(c) {
 		return
 	}
+	job, err := d.Store.InspectionJobs().Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
+		return
+	}
+	if !ownerOrAdmin(c, job.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.InspectionJobNotFound, "inspection job not found")
+		return
+	}
 	if err := d.Store.InspectionJobs().Delete(c.Request.Context(), c.Param("id")); err != nil {
 		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
 		return
@@ -203,6 +240,10 @@ func (d *Deps) handleRunInspection(c *gin.Context) {
 	job, err := d.Store.InspectionJobs().Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		d.handleStoreError(c, err, apierr.InspectionJobNotFound)
+		return
+	}
+	if !ownerOrAdmin(c, job.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.InspectionJobNotFound, "inspection job not found")
 		return
 	}
 	if !d.Inspect.DispatchJob(job, store.InspectionTriggerManual) {

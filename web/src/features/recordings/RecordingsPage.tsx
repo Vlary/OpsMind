@@ -21,6 +21,7 @@ import ErrorBanner from '../../components/ErrorBanner';
 import { AdminLoading } from '../../components/admin/AdminStates';
 import { ApiRequestError, failureFromError, toApiFailure } from '../../components/admin/apiError';
 import { formatDateTime } from '../../components/admin/format';
+import AuditorReadOnlyNotice from '../../components/AuditorReadOnlyNotice';
 import PageHeader from '../../components/PageHeader';
 import { formatBytes, formatDurationClock, recordingDurationMs } from '../term/format';
 import { describeTermFailure } from '../term/termCodes';
@@ -273,6 +274,11 @@ export default function RecordingsPage() {
           </Button>
         }
       />
+
+      {/* RBAC 走查 sprint 3：录制是审计员的只读读取面（契约 12.3 第 4/24
+          条），与 /audit、/replays 一致给出「审计员为只读角色」提示；
+          其他角色不渲染（组件内部按 role 收敛）。 */}
+      <AuditorReadOnlyNotice />
 
       {playing ? (
         <Card size="small" style={{ marginBottom: 16 }} styles={{ body: { padding: 12 } }}>

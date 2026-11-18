@@ -41,9 +41,11 @@ import CopyButton from '../../components/CopyButton';
 import RiskBadge from '../../components/RiskBadge';
 
 import { describeResultCode } from '../alerts/phase5Codes';
+import { useMe } from '../auth/useMe';
 import {
   BATCH_STATUS_LABELS,
   RESULT_STATUS_LABELS,
+  batchApprovalDecisionState,
   canCancelBatch,
   commandCellOf,
   failedServerIds,
@@ -118,18 +120,11 @@ export default function BatchDetailDrawer({
   }
 
   const decideMutation = useMutation({
-    mutationFn: async (input: {
-      approvalId: string;
-      decision: 'approve' | 'deny';
-      /** 六期打磨 sprint 3：编辑态提交的改写后命令（仅 approve 合法）。 */
-      editedCommand?: string;
-    }) => {
+    mutationFn: async (input: { approvalId: string; decision: 'approve' | 'deny' }) => {
       const { data, error, response } = await api.POST('/api/approvals/{id}/decide', {
         params: { header: writeHeaders(), path: { id: input.approvalId } },
-        body: {
-          decision: input.decision,
-          ...(input.editedCommand !== undefined ? { edited_command: input.editedCommand } : {}),
-        },
+        // 00012：decide 只允许 decision/note；审批时不得改写命令。
+        body: { decision: input.decision },
       });
       if (error) {
         throw new ApiRequestError(toApiFailure(error, response));
@@ -185,7 +180,24 @@ export default function BatchDetailDrawer({
   const results = detail?.results ?? [];
   const progress = progressSummary(results);
   const retryable = failedServerIds(results);
+  // RBAC 00012 / 第 7 轮走查 medium：批量审批 requested_by =
+  // batch_jobs.created_by（契约 12.3 第 5 条）。无 approval:decide 或本人
+  // 发起时不得渲染批准/拒绝——否则点击只能得到 403（无权访问/自审）。
+  const meQuery = useMe();
+  const approvalDecision = batchApprovalDecisionState({
+    createdBy: detail?.job.created_by ?? null,
+    permissions: meQuery.data?.permissions ?? [],
+    currentUserId: meQuery.data?.user.id ?? '',
+  });
+  const canApprove = approvalDecision === 'actions';
 
+  // 只让「正在决策的那一行」显示 loading。decideMutation 是单例，若所有行
+  // 共用 isPending，批准第一行会让其余待审批行也进入 loading（antd 的
+  // loading 按钮可访问名变成「loading 批准」），既误导用户也可能被 E2E
+  // 误判为按钮消失。
+  const decidingApprovalId = decideMutation.isPending
+    ? decideMutation.variables?.approvalId
+    : undefined;
   const columns: TableColumnsType<BatchResult> = [
     {
       title: '',
@@ -283,20 +295,22 @@ export default function BatchDetailDrawer({
       width: 210,
       render: (_, result) =>
         result.status === 'awaiting_approval' && result.approval_id ? (
-          <Space size={4}>
-            <Button
-              size="small"
-              type="primary"
-              loading={decideMutation.isPending}
-              onClick={() => {
-                decideMutation.mutate({
-                  approvalId: result.approval_id ?? '',
-                  decision: 'approve',
-                });
-              }}
-            >
-              批准
-            </Button>
+          <Space size={4} wrap>
+            {canApprove ? (
+              <Button
+                size="small"
+                type="primary"
+                loading={decidingApprovalId === result.approval_id}
+                onClick={() => {
+                  decideMutation.mutate({
+                    approvalId: result.approval_id ?? '',
+                    decision: 'approve',
+                  });
+                }}
+              >
+                批准
+              </Button>
+            ) : null}
             {/* 六期打磨 sprint 3（走查 medium）：批量审批此前只能批准/拒绝，
                 六期改写能力只在对话审批卡可用。编辑态复用
                 ApprovalCommandEditor（与 ApprovalCard 同一套校验/预览）。
@@ -305,24 +319,39 @@ export default function BatchDetailDrawer({
             <Button
               size="small"
               icon={<EditOutlined />}
-              disabled={decideMutation.isPending}
+              disabled={decidingApprovalId === result.approval_id}
               onClick={() => setEditingApprovalId(result.approval_id ?? '')}
             >
-              编辑
+              查看
             </Button>
-            <Button
-              size="small"
-              danger
-              loading={decideMutation.isPending}
-              onClick={() => {
-                decideMutation.mutate({
-                  approvalId: result.approval_id ?? '',
-                  decision: 'deny',
-                });
-              }}
-            >
-              拒绝
-            </Button>
+            {canApprove ? (
+              <Button
+                size="small"
+                danger
+                loading={decidingApprovalId === result.approval_id}
+                onClick={() => {
+                  decideMutation.mutate({
+                    approvalId: result.approval_id ?? '',
+                    decision: 'deny',
+                  });
+                }}
+              >
+                拒绝
+              </Button>
+            ) : null}
+            {canApprove ? null : (
+              <Tooltip
+                title={
+                  approvalDecision === 'self'
+                    ? '不能审批自己发起的请求（服务端会拒绝自审）'
+                    : '当前账号没有审批权限，审批将由具备权限的账号处理'
+                }
+              >
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  等待审批者处理
+                </Typography.Text>
+              </Tooltip>
+            )}
           </Space>
         ) : null,
     },
@@ -483,12 +512,10 @@ export default function BatchDetailDrawer({
         />
       ) : null}
 
-      {/* 六期打磨 sprint 3：批量审批行内「编辑」→ 编辑命令并保存批准。
-          与对话审批卡同一套校验（空草稿不可提交）/preview-risk 预览/请求体
-          构造（approvalEdit.buildDecideBody）。 */}
+      {/* 00012：批量审批行内「查看」→ 只读原命令并批准；审批时禁止改写。 */}
       <Modal
         open={editingApprovalId !== null}
-        title="编辑命令并批准"
+        title={canApprove ? '查看命令并批准' : '查看审批命令'}
         onCancel={() => setEditingApprovalId(null)}
         footer={null}
         destroyOnHidden
@@ -521,17 +548,12 @@ export default function BatchDetailDrawer({
               serverId={editingApprovalQuery.data.server_id}
               pending={decideMutation.isPending}
               disabled={editingApprovalQuery.data.status !== 'pending'}
-              onSubmit={(body) => {
+              canApprove={canApprove && editingApprovalQuery.data.status === 'pending'}
+              onSubmit={() => {
                 if (editingApprovalId === null) {
                   return;
                 }
-                decideMutation.mutate({
-                  approvalId: editingApprovalId,
-                  decision: 'approve',
-                  ...(body.edited_command !== undefined
-                    ? { editedCommand: body.edited_command }
-                    : {}),
-                });
+                decideMutation.mutate({ approvalId: editingApprovalId, decision: 'approve' });
               }}
             />
           </Space>

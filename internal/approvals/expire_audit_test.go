@@ -35,7 +35,7 @@ func TestExpireEmitsPerApprovalAudit(t *testing.T) {
 		ConversationID: &convID, ToolCallID: &toolID1, ServerID: &serverID,
 		ServerName: "web-1", Command: "systemctl restart nginx",
 		RiskLevel: "needs_approval", RuleID: "SERVICE_CHANGE", Reason: "service change",
-		ApprovalMode: "high",
+		ApprovalMode: "high", RequestedBy: "requester-1",
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -44,7 +44,7 @@ func TestExpireEmitsPerApprovalAudit(t *testing.T) {
 		ConversationID: &convID, ToolCallID: &toolID2, ServerID: &serverID,
 		ServerName: "web-1", Command: "df -h",
 		RiskLevel: "safe", RuleID: "READ_ONLY", Reason: "read only",
-		ApprovalMode: "high",
+		ApprovalMode: "high", RequestedBy: "requester-1",
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -125,7 +125,10 @@ func TestExpireEmitsPerApprovalAudit(t *testing.T) {
 	}
 }
 
-// 并发 decide 抢先：快照里的行被批准后，不得被误报成「已过期」。
+// 并发 decide 抢先：decide 在 TTL 边界前提交、sweeper 在边界后扫描时，
+// 已批准的行不得被误报成「已过期」。第 11 轮走查 high 后，过期行本身
+// 已不可决定（Service.Decide 先判 TTL），所以这里构造「Decide 时未过期、
+// Expire 的扫描时刻已过 TTL」的合法竞态。
 func TestExpireSkipsConcurrentlyDecidedApproval(t *testing.T) {
 	svc, repo, rec := newAuditService(t)
 	ctx := context.Background()
@@ -135,15 +138,20 @@ func TestExpireSkipsConcurrentlyDecidedApproval(t *testing.T) {
 	}
 	repo.mu.Lock()
 	row := repo.items[ap.ID]
-	row.ExpiresAt = time.Now().Add(-time.Minute)
+	expiresAt := time.Now().Add(time.Second)
+	row.ExpiresAt = expiresAt
 	repo.items[ap.ID] = row
 	repo.mu.Unlock()
 
-	// 模拟快照之后、UPDATE 之前的 decide 抢先（直接改 fake 行）。
-	if _, err := svc.Decide(ctx, DecideRequest{ApprovalID: ap.ID, Approve: true, DecidedBy: "u"}); err != nil {
+	// 模拟 decide 在 TTL 内抢先提交（直接改 fake 行）。
+	decided, err := svc.Decide(ctx, DecideRequest{ApprovalID: ap.ID, Approve: true, DecidedBy: "u"})
+	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
-	n, err := svc.Expire(ctx, time.Now())
+	if decided.Status != store.ApprovalApproved {
+		t.Fatalf("status = %s, want approved", decided.Status)
+	}
+	n, err := svc.Expire(ctx, expiresAt.Add(time.Second))
 	if err != nil {
 		t.Fatalf("Expire: %v", err)
 	}

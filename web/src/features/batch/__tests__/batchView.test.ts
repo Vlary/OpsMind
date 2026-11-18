@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { components } from '../../../api/schema';
-import { commandCellOf, executedCommandOf } from '../batchView';
+import { PERMS } from '../../../lib/rbacPermissions';
+import { batchApprovalDecisionState, commandCellOf, executedCommandOf } from '../batchView';
 
 type BatchResult = components['schemas']['BatchResult'];
 
@@ -45,5 +46,61 @@ describe('批量结果的实际执行命令（p6 sprint 5）', () => {
     // 服务端只在 hasEditedChange 为真时提交 edited_command；这里模拟旧数据/
     // 直接 PUT 的边界：非空即视为改写，展示以 edited_command 为准。
     expect(executedCommandOf('df -h', result({ edited_command: 'df -h' })).edited).toBe(true);
+  });
+});
+
+// 第 7 轮走查 medium：批量详情行内「批准/拒绝」必须与 decide 端点的两个
+// 前置条件一致——当前账号有 approval:decide 且不是审批发起人。批量审批
+// requested_by = batch_jobs.created_by（契约 12.3 第 5 条），详情抽屉据此
+// 判定；created_by 缺失时失败关闭为等待，不渲染必然 403 的按钮。
+describe('批量待审批行操作区收敛（第 7 轮走查）', () => {
+  const operatorPerms = [PERMS.chat, PERMS.execRead, PERMS.execWrite, PERMS.assetsRead];
+  const approverPerms = [PERMS.approvalsRead, PERMS.approvalsDecide];
+
+  it('运维工程师（无 approval:decide）：等待审批者处理', () => {
+    expect(
+      batchApprovalDecisionState({
+        createdBy: 'requester-1',
+        permissions: operatorPerms,
+        currentUserId: 'operator-1',
+      }),
+    ).toBe('waiting');
+  });
+
+  it('有审批权限且不是发起人：渲染批准/拒绝', () => {
+    expect(
+      batchApprovalDecisionState({
+        createdBy: 'requester-1',
+        permissions: approverPerms,
+        currentUserId: 'approver-1',
+      }),
+    ).toBe('actions');
+  });
+
+  it('有审批权限但是发起人：不能自审', () => {
+    expect(
+      batchApprovalDecisionState({
+        createdBy: 'admin-1',
+        permissions: [...approverPerms, PERMS.execWrite],
+        currentUserId: 'admin-1',
+      }),
+    ).toBe('self');
+  });
+
+  it('created_by 缺失（历史/system 行）：失败关闭为等待', () => {
+    expect(
+      batchApprovalDecisionState({
+        createdBy: null,
+        permissions: approverPerms,
+        currentUserId: 'approver-1',
+      }),
+    ).toBe('waiting');
+    expect(
+      batchApprovalDecisionState({
+        createdBy: '',
+        permissions: approverPerms,
+        currentUserId: 'approver-1',
+      }),
+    ).toBe('waiting');
   });
 });

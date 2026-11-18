@@ -243,7 +243,7 @@ func (e *Engine) StartDiagnosis() func(ctx context.Context, ev store.AlertEvent)
 func (e *Engine) backfillPending() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	sessions, err := e.st.DiagnosisSessions().List(ctx, store.DiagnosisPending, "", e.cfg.QueueSize)
+	sessions, err := e.st.DiagnosisSessions().List(ctx, store.DiagnosisPending, "", "", e.cfg.QueueSize)
 	if err != nil {
 		e.log.Warn("diagnosis_backfill_failed", "error", err.Error())
 		return
@@ -405,7 +405,7 @@ func (e *Engine) finishFailed(ctx context.Context, sess store.DiagnosisSession, 
 func (e *Engine) failDiagnosing(code string) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopBudget)
 	defer cancel()
-	sessions, err := e.st.DiagnosisSessions().List(ctx, store.DiagnosisDiagnosing, "", 200)
+	sessions, err := e.st.DiagnosisSessions().List(ctx, store.DiagnosisDiagnosing, "", "", 200)
 	if err != nil {
 		return
 	}

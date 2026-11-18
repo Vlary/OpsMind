@@ -49,6 +49,7 @@ func (f *fakeApprovals) Create(_ context.Context, p store.CreateApprovalParams) 
 		RuleID:       p.RuleID,
 		Reason:       p.Reason,
 		ApprovalMode: store.ApprovalMode(p.ApprovalMode),
+		RequestedBy:  p.RequestedBy,
 		Status:       store.ApprovalPending,
 		RequestedAt:  p.CreatedAt,
 		ExpiresAt:    p.ExpiresAt,
@@ -156,6 +157,7 @@ func createReq(toolCall string) CreateRequest {
 		RiskLevel:      "needs_approval",
 		Reason:         "service change",
 		RequestID:      "req-1",
+		RequestedBy:    "requester-1",
 	}
 }
 
@@ -211,6 +213,70 @@ func TestDecideApproveAndDeny(t *testing.T) {
 	}
 	if denied.Status != store.ApprovalDenied {
 		t.Fatalf("denied status = %q", denied.Status)
+	}
+}
+
+// TestDecideRejectsExpiredApproval 第 11 轮走查 high：sweeper 尚未把过期
+// 行置为 expired 的窗口内，Decide 必须按决策时刻判 TTL——返回冲突、把行
+// 收敛为 expired、不落 decided_by（也就不会进入 console/batch 执行或
+// policy 落库分支）。
+func TestDecideRejectsExpiredApproval(t *testing.T) {
+	// 显式 expires_at 在过去：模拟「倒计时归零、sweeper 尚未扫到」的窗口。
+	svc, fakes := newTestService(t, time.Minute)
+	ctx := context.Background()
+	req := createReq("tc-expired")
+	req.ExpiresAt = time.Now().Add(-time.Minute)
+	ap, err := svc.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if ap.ExpiresAt.After(time.Now()) {
+		t.Fatalf("test setup: expires_at = %s, want past", ap.ExpiresAt)
+	}
+
+	if _, err := svc.Decide(ctx, DecideRequest{
+		ApprovalID: ap.ID, Approve: true, DecidedBy: "approver-1", RequestID: "req-expired",
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("Decide expired = %v, want ErrConflict", err)
+	}
+	got, err := fakes.Get(ctx, ap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.ApprovalExpired {
+		t.Fatalf("status = %s, want expired", got.Status)
+	}
+	if got.DecidedBy != nil {
+		t.Fatalf("expired approval must not record decided_by: %v", *got.DecidedBy)
+	}
+}
+
+// TestDecideExpiredPolicyDoesNotApplySettings 第 11 轮走查 high 的 policy
+// 分支：过期后批准不得改写全局门限。fakeStore 未接线 Settings()，任何
+// 落库尝试都会 panic——本用例通过即证明 TTL 判定发生在 apply 之前。
+func TestDecideExpiredPolicyDoesNotApplySettings(t *testing.T) {
+	svc, fakes := newTestService(t, time.Minute)
+	ctx := context.Background()
+	from, to := string(store.ApprovalModeAll), string(store.ApprovalModeNone)
+	ap, err := svc.Create(ctx, CreateRequest{
+		Source: "policy", PolicyFrom: &from, PolicyTo: &to,
+		RequestedBy: "requester-1", RequestID: "req-policy-expired",
+		ExpiresAt: time.Now().Add(-time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Create policy: %v", err)
+	}
+	if _, err := svc.Decide(ctx, DecideRequest{
+		ApprovalID: ap.ID, Approve: true, DecidedBy: "approver-1", RequestID: "req-policy-decide",
+	}); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("Decide expired policy = %v, want ErrConflict", err)
+	}
+	got, err := fakes.Get(ctx, ap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.ApprovalExpired {
+		t.Fatalf("status = %s, want expired", got.Status)
 	}
 }
 

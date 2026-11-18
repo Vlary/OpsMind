@@ -261,10 +261,12 @@ func (testWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 type memStore struct {
 	store.Store
-	mu       sync.Mutex
-	rows     []store.AuditLog
-	nextID   int64
-	failNext int
+	mu        sync.Mutex
+	rows      []store.AuditLog
+	nextID    int64
+	failNext  int
+	outbox    []store.AuditOutboxEntry
+	outboxSeq int64
 }
 
 func newMemStore() *memStore { return &memStore{} }
@@ -320,4 +322,90 @@ func (a memAudit) LastHash(context.Context) (string, error) {
 
 func (a memAudit) List(context.Context, store.AuditFilter) ([]store.AuditLog, bool, error) {
 	return nil, false, nil
+}
+
+// ---- audit_outbox（事务内审计） -------------------------------------------
+
+func (m *memStore) EnqueueAuditOutbox(_ context.Context, payload []byte, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outboxSeq++
+	m.outbox = append(m.outbox, store.AuditOutboxEntry{
+		ID: m.outboxSeq, Payload: append([]byte(nil), payload...), CreatedAt: at,
+	})
+	return nil
+}
+
+func (m *memStore) PendingAuditOutbox(_ context.Context, limit int) ([]store.AuditOutboxEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	out := make([]store.AuditOutboxEntry, 0, limit)
+	for _, e := range m.outbox {
+		if e.Attempts > 0 {
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ProcessAuditOutbox(_ context.Context, ids []int64, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	for i := range m.outbox {
+		if _, ok := want[m.outbox[i].ID]; ok {
+			m.outbox[i].Attempts++
+		}
+	}
+	return nil
+}
+
+func (m *memStore) LockAuditChain(context.Context) error { return nil }
+
+// TestDrainOutboxAppendsTransactionalAudit 契约 12.3 第 19 条：业务事务写入
+// audit_outbox 的事件由 worker 串行追加到哈希链，且只处理一次。
+func TestDrainOutboxAppendsTransactionalAudit(t *testing.T) {
+	st := newMemStore()
+	w := NewWriter(st, testLogger(), fixedClock())
+	w.Start(context.Background())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = w.Close(ctx)
+	})
+
+	payload, err := OutboxPayload(Event{
+		ActorType: "user", ActorID: "u-1", Action: "user.create",
+		ResourceType: "user", ResourceID: "u-2", Detail: map[string]any{"role": "auditor"},
+	}, fixedClock()())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnqueueAuditOutbox(context.Background(), payload, fixedClock()()); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	rows := st.rowsSnapshot()
+	if len(rows) != 1 || rows[0].Action != "user.create" || rows[0].Hash == "" {
+		t.Fatalf("rows = %+v, want one user.create row with hash", rows)
+	}
+	// 已处理行不会重复追加。
+	if err := w.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(st.rowsSnapshot()); got != 1 {
+		t.Fatalf("rows after second flush = %d, want 1", got)
+	}
 }

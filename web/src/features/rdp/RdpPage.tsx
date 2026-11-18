@@ -36,6 +36,7 @@ import { api } from '../../api/client';
 import { qk } from '../../api/queryKeys';
 import type { components } from '../../api/schema';
 import { AdminLoading, QueryErrorState } from '../../components/admin/AdminStates';
+import { message } from '../../components/antdMessage';
 import {
   ApiRequestError,
   failureFromError,
@@ -75,13 +76,15 @@ const RDP_DPI = 96;
  * 时旧会话还在异步收尾（rdpx bridge 停止+封盘+关行，日志
  * "bridge goroutines did not stop in time"，实测约 2.3s），通用文案
  * 「该服务器已有活动 RDP 会话（server already has an active rdp
- * session）」会让刚断开的用户困惑——补充收尾时序的解释并引导稍候重试；
+ * session）」会让刚断开的用户困惑——补充收尾时序的解释；第 4 轮走查
+ * medium 起服务端 409 不再消耗 grant，文案明确「本次授权未被消耗、
+ * 无需重新申请」，避免运维误以为要再找审批人。
  * 其余错误码回落 describeTermFailure。
  */
 // eslint-disable-next-line react-refresh/only-export-components -- 纯函数导出供单测
 export function describeRdpCreateFailure(failure: ApiFailure): string {
   if (failure.code === 'RDP_SESSION_EXISTS') {
-    return '该服务器已有活动 RDP 会话；若您刚断开上一会话，通常数秒内完成收尾，请稍候重试。';
+    return '该服务器已有活动 RDP 会话；若您刚断开上一会话，通常数秒内完成收尾。本次授权未被消耗，关闭现有会话后可直接重试（无需重新申请）。';
   }
   return describeTermFailure(failure);
 }
@@ -134,6 +137,9 @@ export default function RdpPage() {
   const [active, setActive] = useState<RdpSession | null>(null);
   const [state, setState] = useState<RdpSessionState | null>(null);
   const [createError, setCreateError] = useState<ApiFailure | null>(null);
+  // 00012：JIT RDP grant（与终端同流程：申请 → 他人批准 → 单次消费）。
+  const [grantApprovalId, setGrantApprovalId] = useState<string | null>(null);
+  const [grantServerId, setGrantServerId] = useState<string | null>(null);
   const [clipboardOpen, setClipboardOpen] = useState(false);
   const [clipboardDraft, setClipboardDraft] = useState('');
   const stageRef = useRef<HTMLDivElement>(null);
@@ -171,8 +177,81 @@ export default function RdpPage() {
   // 未手动选择时默认第一台 Windows 服务器（render 期派生，不经 effect）。
   const effectiveServerId = serverId ?? windowsServers[0]?.id ?? null;
 
+  const grantMutation = useMutation({
+    mutationFn: async (targetServerId: string) => {
+      const { data, error, response } = await api.POST('/api/rdp/grants', {
+        params: { header: writeHeaders() },
+        body: { server_id: targetServerId },
+      });
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data;
+    },
+    onSuccess: (data, targetServerId) => {
+      setGrantApprovalId(data?.approval?.id ?? null);
+      setGrantServerId(targetServerId);
+      message.info('RDP 授权已提交，等待另一位审批者批准。');
+    },
+    onError: (error) => setCreateError(failureFromError(error)),
+  });
+
+  const grantQuery = useQuery({
+    queryKey: ['approvals', 'grant', 'rdp', grantApprovalId],
+    enabled: grantApprovalId !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'pending' ? 3000 : false;
+    },
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/api/approvals/{id}', {
+        params: { path: { id: grantApprovalId ?? '' } },
+      });
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data;
+    },
+  });
+
+  const grantApproved = grantQuery.data?.status === 'approved';
+  const grantRejected =
+    grantQuery.data?.status === 'denied' || grantQuery.data?.status === 'expired';
+
+  // 第 2 轮走查（low）：他人批准后审批队列里该行消失，发起人侧此前没有
+  // 「你有 1 条已批准、30 分钟内有效的授权」入口。这里读 GET /api/rdp/grants
+  // （只返回本人 approved + 未消费 + 未过期）。
+  const availableGrantsQuery = useQuery({
+    queryKey: ['rdp', 'available-grants'],
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/api/rdp/grants', {});
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data?.items ?? [];
+    },
+    refetchInterval: 15_000,
+  });
+  const availableGrants = availableGrantsQuery.data ?? [];
+  // 主「连接」按钮保持既有交互：只回传本页刚批准的那条（服务端在 id 为空
+  // 时消费该服务器上最新一条已批准 grant）。授权提示卡另带显式 grant_id。
+  const approvedGrantIdFor = (targetServerId: string | null): string | undefined =>
+    targetServerId && grantApproved && grantServerId === targetServerId && grantApprovalId
+      ? grantApprovalId
+      : undefined;
+  // 该服务器上最早到期的一条可用授权（后端已按 grant_expires_at 升序）。
+  const earliestGrantIdFor = (targetServerId: string | null): string | undefined =>
+    targetServerId
+      ? availableGrants.find((grant) => grant.server_id === targetServerId)?.id
+      : undefined;
+
   const createMutation = useMutation({
-    mutationFn: async (target: { serverId: string; width: number; height: number }) => {
+    mutationFn: async (target: {
+      serverId: string;
+      width: number;
+      height: number;
+      grantId?: string;
+    }) => {
       const { data, error, response } = await api.POST('/api/rdp/sessions', {
         params: { header: writeHeaders() },
         body: {
@@ -180,6 +259,7 @@ export default function RdpPage() {
           width: target.width,
           height: target.height,
           dpi: RDP_DPI,
+          grant_id: target.grantId ?? '',
         },
       });
       if (error) {
@@ -190,6 +270,7 @@ export default function RdpPage() {
     onSuccess: async (created) => {
       setCreateError(null);
       setState(null);
+      setGrantApprovalId(null);
       setActive(created.session);
       await queryClient.invalidateQueries({ queryKey: qk.rdpSessions({}) });
     },
@@ -265,12 +346,29 @@ export default function RdpPage() {
     }, SESSION_END_REFETCH_DELAY_MS);
   }, [ended, active, queryClient]);
 
+  const connectWith = (serverId: string, grantId: string | undefined) => {
+    const { width, height } = parseResolution(resolution);
+    createMutation.mutate({
+      serverId,
+      width,
+      height,
+      ...(grantId !== undefined ? { grantId } : {}),
+    });
+  };
+
   const handleConnect = () => {
     if (!effectiveServerId) {
       return;
     }
-    const { width, height } = parseResolution(resolution);
-    createMutation.mutate({ serverId: effectiveServerId, width, height });
+    connectWith(effectiveServerId, approvedGrantIdFor(effectiveServerId));
+  };
+
+  // 授权提示卡：显式消费该服务器上最早到期的那条 grant。
+  const handleConnectWithGrant = (grantId: string | undefined) => {
+    if (!effectiveServerId) {
+      return;
+    }
+    connectWith(effectiveServerId, grantId);
   };
 
   const handleFullscreen = useCallback(() => {
@@ -411,7 +509,53 @@ export default function RdpPage() {
             />
           ) : null}
           {createError ? (
-            <Alert type="error" showIcon message={describeRdpCreateFailure(createError)} />
+            <Alert
+              type="error"
+              showIcon
+              message={describeRdpCreateFailure(createError)}
+              action={
+                createError.code === 'TERMINAL_APPROVAL_REQUIRED' ? (
+                  <Button
+                    size="small"
+                    loading={grantMutation.isPending}
+                    disabled={!effectiveServerId}
+                    onClick={() => effectiveServerId && grantMutation.mutate(effectiveServerId)}
+                  >
+                    申请 RDP 授权
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : null}
+          {grantApprovalId && !grantApproved && !grantRejected ? (
+            <Alert type="info" showIcon message="RDP 授权审批中，批准后请点击「打开桌面」。" />
+          ) : null}
+          {grantRejected ? (
+            <Alert type="warning" showIcon message="RDP 授权未获批准，请重新申请。" />
+          ) : null}
+          {/* 第 2 轮走查（low）：已批准、待消费的 RDP 授权在审批队列里不再
+              可见，发起人侧需要明确入口。 */}
+          {availableGrants.length > 0 ? (
+            <Alert
+              type="success"
+              showIcon
+              data-testid="rdp-available-grants"
+              message={`你有 ${availableGrants.length} 条已批准、尚未使用的 RDP 授权`}
+              description={`最早一条 ${formatDateTime(availableGrants[0]?.grant_expires_at ?? '')} 到期；点「使用该授权」即单次消费该服务器上的授权，用后失效。`}
+              action={
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<DesktopOutlined />}
+                  disabled={!effectiveServerId || Boolean(active)}
+                  onClick={() =>
+                    effectiveServerId && handleConnectWithGrant(earliestGrantIdFor(effectiveServerId))
+                  }
+                >
+                  使用该授权
+                </Button>
+              }
+            />
           ) : null}
         </Flex>
       </Card>
@@ -466,7 +610,14 @@ export default function RdpPage() {
                     setState(null);
                     if (effectiveServerId) {
                       const { width, height } = parseResolution(resolution);
-                      createMutation.mutate({ serverId: effectiveServerId, width, height });
+                      createMutation.mutate({
+                        serverId: effectiveServerId,
+                        width,
+                        height,
+                        ...(grantApproved && grantServerId === effectiveServerId && grantApprovalId
+                          ? { grantId: grantApprovalId }
+                          : {}),
+                      });
                     }
                   }}
                 >

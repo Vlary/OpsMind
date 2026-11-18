@@ -25,6 +25,11 @@ var ErrInvalid = errors.New("approvals: invalid decide request")
 // COMMAND_FORBIDDEN，审批保持 pending（契约 2.11 约定 3）。
 var ErrForbidden = errors.New("approvals: edited command forbidden")
 
+// ErrLegacyEdit 表示 00012 之前的历史 pending 行仍带 edited_command。
+// 契约 12.3 第 7 条：decide 必须返回 409 APPROVAL_LEGACY_EDIT，审批保持
+// pending；发起人需 deny 后重新发起（禁止审批人改写成为动作作者）。
+var ErrLegacyEdit = errors.New("approvals: legacy edited approval cannot be decided")
+
 // EditedCommandMaxRunes 是 decide 改写命令的长度上限（契约 2.11 约定 3，
 // DB CHECK length 0..2000 双重校验）。
 const EditedCommandMaxRunes = 2000
@@ -91,6 +96,28 @@ func NeedsApproval(in PolicyInput) bool {
 	}
 }
 
+// RankOf 返回门限档位的严格度排名：all(4) > standard(3) > high(2) > none(1)。
+// 未知值按 standard 保守处理（与 NeedsApproval 一致）。
+func RankOf(mode store.ApprovalMode) int {
+	switch mode {
+	case store.ApprovalModeAll:
+		return 4
+	case store.ApprovalModeHigh:
+		return 2
+	case store.ApprovalModeNone:
+		return 1
+	default:
+		return 3
+	}
+}
+
+// IsWidening 报告 target 是否比 current 更宽（排名更低）。相等或更严格
+// 返回 false。契约 12.3 第 9 条：会话覆盖只能 rank >= 全局；更宽的覆盖
+// 一律拒绝/回落。
+func IsWidening(current, target store.ApprovalMode) bool {
+	return RankOf(target) < RankOf(current)
+}
+
 // GlobalMode 读取全局审批门限 settings["approval.mode"]（JSON 字符串）；
 // 键缺失/值非法一律兜底 standard（契约 2.11 约定 1——防手工删键/写坏值）。
 // 每 turn/每请求至多调用一次并透传（契约 11 节第 18 条）。
@@ -121,13 +148,19 @@ func GlobalMode(ctx context.Context, st store.Store) (store.ApprovalMode, error)
 // 否则取全局（契约 2.11 约定 1）。供 handler 装配
 // Conversation.EffectiveApprovalMode 时对一批会话复用一次全局读。
 func ResolveMode(conv store.Conversation, global store.ApprovalMode) store.ApprovalMode {
-	if conv.ApprovalMode != nil && *conv.ApprovalMode != "" {
-		if store.ValidApprovalMode(*conv.ApprovalMode) {
-			return *conv.ApprovalMode
-		}
-	}
 	if global == "" || !store.ValidApprovalMode(global) {
-		return store.ApprovalModeStandard
+		global = store.ApprovalModeStandard
+	}
+	if conv.ApprovalMode != nil && *conv.ApprovalMode != "" {
+		override := *conv.ApprovalMode
+		if store.ValidApprovalMode(override) {
+			// 契约 12.3 第 9 条：更宽的覆盖回落全局（历史数据/写入竞态
+			// 都不能让执行面绕过当前全局门限）。
+			if IsWidening(global, override) {
+				return global
+			}
+			return override
+		}
 	}
 	return global
 }
@@ -136,10 +169,15 @@ func ResolveMode(conv store.Conversation, global store.ApprovalMode) store.Appro
 // settings["approval.mode"]，键缺失/值非法一律兜底 standard。httpapi/
 // agent/batchx 在 turn/请求开始时调用一次并透传（契约 5.5）。
 func EffectiveMode(ctx context.Context, st store.Store, conv store.Conversation) (store.ApprovalMode, error) {
+	global, err := GlobalMode(ctx, st)
+	if err != nil {
+		return store.ApprovalModeStandard, err
+	}
 	if conv.ApprovalMode != nil && *conv.ApprovalMode != "" {
-		if store.ValidApprovalMode(*conv.ApprovalMode) {
-			return *conv.ApprovalMode, nil
+		override := *conv.ApprovalMode
+		if store.ValidApprovalMode(override) && !IsWidening(global, override) {
+			return override, nil
 		}
 	}
-	return GlobalMode(ctx, st)
+	return global, nil
 }

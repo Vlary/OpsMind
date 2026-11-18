@@ -19,11 +19,16 @@ const (
 
 // TerminalSession 是堡垒机式终端会话（SSH PTY + asciinema v2 录制）。
 type TerminalSession struct {
-	ID             string                   `json:"id"`
-	ServerID       string                   `json:"server_id"`
-	ServerName     string                   `json:"server_name"` // JOIN servers.name；删除后空串
-	ServerOS       ServerOS                 `json:"os"`
-	Username       string                   `json:"username"` // 发起者；v1 恒 admin
+	ID         string   `json:"id"`
+	ServerID   string   `json:"server_id"`
+	ServerName string   `json:"server_name"` // JOIN servers.name；删除后空串
+	ServerOS   ServerOS `json:"os"`
+	// UserID 是会话 owner（00012）；列表/WS 归属校验用，不进入 API 响应。
+	UserID string `json:"-"`
+	// GrantID 是创建会话时消费的 terminal grant（approvals.id，00015）；
+	// WS PTY 拨号失败时回滚 consumed_at 的依据，不进入 API 响应。
+	GrantID        string                   `json:"-"`
+	Username       string                   `json:"username"` // 发起者用户名（JOIN users.username）
 	Status         InteractiveSessionStatus `json:"status"`
 	Cols           int                      `json:"cols"`
 	Rows           int                      `json:"rows"`
@@ -40,8 +45,11 @@ type TerminalSession struct {
 
 // CreateTerminalSessionParams 创建终端会话。
 type CreateTerminalSessionParams struct {
-	ServerID  string
-	UserID    string
+	ServerID string
+	UserID   string
+	// GrantID 是本次创建消费的 terminal grant（approvals.id）；空串表示
+	// 无来源授权（00015 前历史行/单测直接建行）。
+	GrantID   string
 	Cols      int // 10..500，缺省 120
 	Rows      int // 4..200，缺省 40
 	StartedAt time.Time

@@ -20,7 +20,12 @@ export default function ApiErrorAlert({
   onClose,
   onRetry,
 }: ApiErrorAlertProps) {
-  const meta = [failure.code, failure.requestId ? `request_id: ${failure.requestId}` : null]
+  // 00012：通用 403 已在 api 层归一化为「无权访问」，不再展示 FORBIDDEN
+  // 错误码；专用 403 码（ORIGIN_FORBIDDEN 等）仍保留在 description。
+  const meta = [
+    failure.code !== 'FORBIDDEN' ? failure.code : null,
+    failure.requestId ? `request_id: ${failure.requestId}` : null,
+  ]
     .filter((part): part is string => part !== null)
     .join(' · ');
 
@@ -29,7 +34,7 @@ export default function ApiErrorAlert({
       type="error"
       showIcon
       message={describe(failure)}
-      description={<div className="opsmind-admin-meta">{meta}</div>}
+      {...(meta ? { description: <div className="opsmind-admin-meta">{meta}</div> } : {})}
       closable={closable}
       {...(onClose ? { onClose } : {})}
       action={

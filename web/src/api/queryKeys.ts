@@ -2,6 +2,8 @@
 export const qk = {
   auth: ['auth'] as const,
   me: () => [...qk.auth, 'me'] as const,
+  // 00012：用户管理列表（GET /api/users，仅管理员）。
+  users: ['users'] as const,
   conversations: ['conversations'] as const,
   conversation: (id: string) => ['conversation', id] as const,
   messages: (id: string) => ['messages', id] as const,
@@ -10,6 +12,9 @@ export const qk = {
   // 六期打磨 sprint 3：单条审批（批量详情「编辑命令」需要原命令/风险级别/
   // server_id；按钮点击时才取，不进轮询）。
   approval: (id: string) => ['approval', id] as const,
+  // RBAC 走查 sprint 2：审批上下文抽屉（GET /api/approvals/{id}/context，
+  // 有界只读；打开抽屉时才请求）。
+  approvalContext: (id: string) => ['approval-context', id] as const,
   batchRiskPreview: (command: string) => ['batch-risk-preview', command] as const,
   pendingApprovals: (filters: Record<string, string | number | undefined>) =>
     ['approvals', filters] as const,

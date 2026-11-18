@@ -2,6 +2,172 @@
 
 本项目的显著变更按时间倒序记录于此。条目附 git 提交号；未标提交号的综合工作（验证补齐、六轮打磨的自迭代评审）来自当日工作记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 2026-11-18 — RBAC 收口测试（12 轮走查）与终版文档
+
+本轮 RBAC 收口累计新增 2 类测试资产：
+
+- `web/e2e/rbac-roles.spec.ts`：四角色真实浏览器端到端，22 项断言，覆盖登录导航项、直达无权路由 403、审批者工作流、审计员只读、角色变更/停用后的会话失效。
+- `internal/httpapi/rbac_matrix_test.go`：全路由越权矩阵，16 项，覆盖 `routeRules` 与注册路由双向对账、4 角色 × 每条非公开路由、fail-closed、未认证全路由扫描、职责分离。
+
+12 轮走查得分与修复：第 1 轮 44/100（修复 11 项）、第 2 轮 78/100（修复 8 项）、第 3 轮 52/100（修复 9 项）、第 4 轮 80/100（修复 8 项）、第 5 轮 92/100（修复 2 项）、第 6 轮 95/100（修复 2 项）、第 7 轮 95/100（修复 2 项）、第 8 轮 94/100（修复 3 项）、第 9 轮 84/100（修复 4 项）、第 10 轮 95/100（修复 2 项）、第 11 轮 85/100（修复 3 项）、第 12 轮 95/100（修复 2 项）；每轮门禁全绿，累计修复 56 项，最高 95/100（通过线 99），剩余 2 项未清零。
+
+**终版复验**：门禁绿；浸泡 15 分钟 exit 0（PASS，SSE p95 32ms、RSS 峰 74MB，2026-11-18 14:48 产物）；模糊 0,0；镜像 0。
+
+## 2026-11-18 — RBAC 第 12 轮走查修复（2 项）
+
+第 12 轮验收走查采纳全部 2 项（1 medium / 1 low），均补单测与 E2E：
+
+- **未配置模型供应商/监控无数据时把无权限角色引向 403（medium）**：运维工程师权限集为 `[chat:use, asset:read, asset:test, exec:read, exec:write, monitor:read, inspection:manage, terminal:use]`，既无 `provider:manage` 也无 `asset:write`/`monitor:manage`。会话页三处供应商空态无条件渲染 `/providers` 链接/按钮（输入框提示、顶栏「配置模型」、空态卡「去模型管理」），点进去只有「无权访问「模型」」；监控页空态让他去「服务器」页添加资产并开启采集，而同页采集卡显示「当前角色只读」。修复：`ChatPage` 以 `canManageProviders`（provider:manage）分支——无权限只显示「请联系管理员配置模型供应商」，不渲染任何 `/providers` 入口（供应商加载失败文案也去掉「前往模型管理」）；`MonitorPage` 以 `monitorEmptyDescription` 分支——同时具备 `asset:write` 与 `monitor:manage` 才给原「添加资产并开启采集」CTA，否则「请联系管理员配置资产与采集」。管理员保留原入口。测试：`chatProviderCta.test.ts`、`monitorEmptyState.test.ts`（四角色权限夹具）、`TestFrontendGatePermissionContract`（服务端事实：GET /providers 200 / 写 403、POST /servers 与 PUT collector 403）、E2E `polish-rbac-round12.spec.ts`（运维工程师整页无 `/providers` 链接、监控空态文案 + 采集卡只读；管理员仍可见原 CTA）。
+- **审计员在回放页被深链带到 403（low）**：审计员只有 `audit:read`，可进 `/replays`（导航 permissions = `[chat, audit]`），但 execution 步无条件渲染 `/alerts`、`/inspections`、`/batch` 链接，空目录无条件渲染「去对话页」，点击均落到 403。修复：新增 `features/replay/replayLinks.ts`，用与 PermissionGate 同源的 `canAccessPath`（NAV_ITEMS 目标页权限）计算三个深链与对话入口是否可渲染；无权限时不渲染链接，但保留诊断/巡检/批量 ID 文本与复制按钮（审计交接句柄不丢）。「去对话页」同理按 `chat:use` 收敛。测试：`replayLinks.test.ts`（角色夹具 + 与 `canAccessPath` 逐一对照防漂移）、`TestFrontendGatePermissionContract`（审计员 replay 200，但 alert-events / inspection reports / batch jobs / POST chat 全 403）、E2E 断言审计员回放页无目标链接、ID 可见可复制、空目录无去对话页。
+
+**门禁复验（全部通过）**：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...`（`TEST_DATABASE_URL` 指向本地 65432）**30 包 ok、0 FAIL**；`go run ./cmd/smoke` `SMOKE_OK`（S02 p95 14.87ms）；前端 typecheck / lint（`--max-warnings=0`）/ Vitest **97 文件 1524 项** / build + 体积门禁 **126,405 B ≈ 123.4 KiB PASS** / `check:colors` PASS（164 文件，白名单 3，命中 0）；Playwright 全量 **299 passed（11.9m）**（含新增 `polish-rbac-round12.spec.ts` 5 项）；四目标 fuzz 各 10s 无崩溃（`FuzzClassify` / `FuzzWinClassify` / `FuzzNetClassify` / `FuzzCheck`）。`format:check` 全仓仍有既有告警（本轮改动文件已通过 Prettier）；浸泡与镜像沿用既有产物。
+
+## 2026-11-18 — RBAC 第 11 轮走查修复（3 项）
+
+第 11 轮验收走查采纳全部 3 项（1 high / 1 medium / 1 low），均补测试：
+
+- **审批过期后 sweeper 尚未收敛的窗口内仍可 decide（high）**：`POST /api/approvals/:id/decide` 在 `expires_at` 已过、DB 里仍是 `pending` 的窗口（实测可稳定命中约 ≤1s，DB/审计积压时更长）仍返回 200——console/batch 审批会立即执行命令，policy 审批会把全局门限改宽；用户看到倒计时归零后仍能点到批准。修复：`approvals.Service.Decide` 读到 `pending` 行后先判 `now >= stored.ExpiresAt`，过期即用独立 5s 超时调用 `Expire` 收敛为 `expired` 并返回 409 `APPROVAL_NOT_PENDING`，不进入 console/batch 同步执行、terminal 授权消费或 policy 落库；`postgres.approvalStore.Decide` 的 UPDATE 另加 `decideExpiryClause`（`expires_at > $5 OR $2='expired'`，$5=decided_at）做 DB 兜底，覆盖「读到未过期、写入已过期」的竞态，`Cancel`/重启收敛的 `expired` 迁移不受 TTL 限制。测试：`TestDecideRejectsExpiredApproval`、`TestDecideExpiredPolicyDoesNotApplySettings`（服务层）、`TestApprovalDecideRejectsExpiredAndDoesNotExecute` / `TestApprovalDecideRejectsExpiredPolicyWithoutApplying`（HTTP：409 + 无 SSH 调用 + `approval_mode` 保持 standard）、`TestDecideRejectsExpiredApproval`（真实 PG：批准被拒、行保持 pending、系统 expired 迁移仍可用）、`TestDecideSQLEnforcesExpiry`（SQL 守卫）与 E2E `polish-rbac-round11.spec.ts`（真实 HTTP 409 + DB 行为 expired/decided_by 空）。
+- **诊断会话列表未按 owner/admin 收敛（medium）**：任何有 `exec:read` 的账号都能通过 `GET /api/diagnosis/sessions` 看到他人会话（含 `created_by IS NULL` 的系统告警诊断）的完整 report，而同一行的 `GET /api/diagnosis/sessions/:id` 却对非 owner 返回 404——列表里出现他人摘要与「查看报告」按钮，点开才 404。修复：`DiagnosisSessionStore.List` 新增 `createdBy` 参数，非 admin 的 handler 传入当前用户并在 PostgreSQL `WHERE d.created_by = $n::uuid` 的 SQL 层过滤（先过滤后 LIMIT，他人较新会话不会挤掉自己的会话；`created_by IS NULL` 因等值比较不命中，system 行仅 admin 可见）；admin 与诊断引擎仍传空串看全量。前端列表返回的每一行因此都是当前账号可读的，详情抽屉的修复/完成入口也只来自同一 owner-or-admin 的 GET。测试：`TestDiagnosisListScopesToOwnerOrAdmin`（运维工程师列表只含自己、他人/系统详情 404、admin 全量可见）、`TestDiagnosisListOwnerFilterBeforeLimit`、PG 集成 `TestDiagnosisListCreatedByFilter`（SQL 归属过滤先于 LIMIT、NULL system 行仅全量查询可见）与 E2E（运维工程师的 AI 诊断 Tab 不出现 ADMIN/SYSTEM 摘要，自己的「查看报告」抽屉正常）。
+- **设置页降级文案与判定口径矛盾（low）**：文案写「仅一个启用管理员时直接拒绝」，实际判定是 `CountEnabledApprovers`（admin+approver 合计）≤1；「1 admin + 1 approver」的合规部署下放宽门限会正常创建 202 policy 审批，管理员会误判。修复：`SettingsPage` 文案改为「可承担审批职责的启用账号——管理员 + 审批者合计——不足 2 个时直接拒绝」，并同步 `admin/apiError.ts` 与 `chat/useChatStream.ts` 的 `NO_SECOND_APPROVER` 说明（改为同一口径）；后端判定与 README/契约不变。测试：`approvalCard.test.ts` 的 `NO_SECOND_APPROVER` 用例改为断言「管理员」「审批者」「不足 2 个」与 break-glass 恢复动作，E2E 读取 `/settings` 实文本断言新口径且不含旧句。
+
+**门禁复验（全部通过）**：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...`（`TEST_DATABASE_URL` 指向本地 65432）**30 包 ok、0 FAIL**；`go run ./cmd/smoke` `SMOKE_OK`（S02 p95 14.28ms）；前端 typecheck / lint（`--max-warnings=0`）/ 单测 **94 文件 1508 项** / build + 体积门禁 **126,402 B ≈ 123.4 KiB PASS** / `check:colors` PASS（163 文件，白名单 3，命中 0）；Playwright E2E **294 passed（11.9m）**（含新增 `polish-rbac-round11.spec.ts` 3 项）；四目标 fuzz 各 10s 无崩溃（`FuzzClassify` / `FuzzWinClassify` / `FuzzNetClassify` / `FuzzCheck`）；`loadgen -mode=selftest` verdict **PASS**（第二次运行：sse_p95=30ms、RSS +7.6%、goroutine +18.6%；首次运行 goroutine +27.8% 超 25% 阈值，复跑通过，属小基线下阈值抖动，与本次改动无关；chats/tokens 计数器仍为 0，属既有 loadgen 二轮对话/计数问题）；`docker build -t aiops:local .` 成功，`docker compose up -d --wait app` Healthy、`/healthz` 返回 `database=ok`。`format:check` 全仓仍有既有告警（本轮改动文件已通过 Prettier）。
+
+## 2026-11-18 — RBAC 第 10 轮走查修复（2 项）
+
+第 10 轮验收走查采纳全部 2 项（1 medium / 1 low），均补测试：
+
+- **WS 拨号失败仍烧掉已批准的一次性终端授权（medium）**：`POST /api/term/sessions` 消费 grant 后返回 201；WS 升级完成才拨 SSH，拨号失败时会话以 `ended_reason=error` 收尾，但审批的 `consumed_at` 保留且没有 `terminal.grant_released`，运维必须重新找审批人。修复：`terminal_sessions` 新增可空 `grant_id`（00015，FK `approvals(id) ON DELETE SET NULL`）持久化创建时消费的审批；`AttachForAuthSession` 拨号失败收尾后返回 `ErrConnectFailed`，handler 用独立超时 ctx 读回审批并走既有 `ReleaseGrant` 事务（`consumed_at → NULL` + `terminal.grant_released` 审计），授权保留可重试。测试：`TestTermWSDialFailureReleasesConsumedGrant`（会话 error 收尾、consumed_at 清空、审计落库、同一 grant 重试 201）、`TestAttachDialFailureReturnsErrConnectFailed`、PG 集成 `TestTerminalSessionPersistsGrantID`。
+- **终端会话 username 文档仍称「v1 恒 admin」（low）**：RBAC 后 `TerminalSession.username` 实际是发起人（`users.username` JOIN），审计导出/接口消费者按旧描述会误判终端操作者。修复：`docs/CONTRACT.md`（3.4 结构、4.13 表、12.3 第 12 条与迁移清单）与 `api/openapi.yaml` 描述改为「发起终端的用户（users.username；RBAC 后随实际发起人）」，重跑 `pnpm openapi` 更新 `web/src/api/schema.d.ts`；同步终端录制 E2E 注释。
+
+## 2026-11-18 — RBAC 第 9 轮走查修复（4 项）
+
+第 9 轮验收走查采纳全部 4 项（1 high / 1 medium / 2 low），每项均补单测/集成测试或 E2E：
+
+- **改角色/创建用户弹窗保留上一条草稿（high）**：`Form.useForm` 的 store 在弹窗关闭后不会清空，`initialValues` 又只在首次挂载生效——先打开 A 的「改角色」再打开 B，标题已是 B、下拉仍是 A 的角色，直接保存会把 B 静默改成 A 的角色（可把审计员/运维工程师提升为审批者甚至管理员）；创建用户弹窗取消后重开也保留用户名/邮箱/角色。修复：弹窗 open 或目标 user.id/role 变化时显式 `resetFields` + `setFieldsValue({role:user.role})`，创建弹窗每次 open 重置；创建表单提示同名重发使用本次邮箱。测试：`polish-rbac-round9.spec.ts`（A→取消→B 显示 B 当前角色；PATCH 请求体为 B 选择的角色；创建草稿重开为空）。
+- **同名未激活账号重发邀请仍投递旧邮箱（medium）**：`POST /api/users` 的 resend 分支只同步 role/display_name，界面承诺「发送到目标邮箱」但账号与投递仍用旧邮箱，且产品没有编辑邮箱入口。修复：`UpdateUserParams` 增加 `Email`，resend 在同一事务写入本次请求邮箱并按更新后的行投递（`user.invite_resent` detail 带 `email_changed`，不落邮箱明文）；成功 toast 显示实际收件地址。测试：`TestResendInviteUpdatesEmailAndDeliveryTarget`（响应/数据库/投递 RCPT 均为新邮箱）、PG 集成断言 `Update` 的 COALESCE 语义。
+- **重置密码漏写 user.sessions_revoked 审计（low）**：reset 会吊销目标全部会话，但审计只有 `user.credential_reset`，审计员按「吊销用户会话」筛选看不到这次踢下线（契约 9.7 要求 detail 含 action=reset/changes）。修复：在同一事务补写 `user.sessions_revoked`（`target_user_id/action=reset/changes.sessions=revoked`，不含 token/密码），outbox 与进程内通道同口径。测试：`TestResetPasswordWritesSessionsRevokedAudit`；投递失败回滚用例补「不得写 sessions_revoked」断言。
+- **未配置 SMTP 的错误块无操作指引（low）**：创建用户/重置密码 503 `DELIVERY_UNAVAILABLE` 时只显示通用中文 + 后端英文 detail，管理员不知道要配什么。修复：中文映射改为可操作指引（`AIOPS_SMTP_HOST` / `AIOPS_SMTP_PORT` / `AIOPS_SMTP_FROM` + README「主要环境变量」「生产部署」章节），该码抑制原始英文 detail。测试：apiError 单测 + E2E 断言错误块含 `AIOPS_SMTP_*` 且无 `no delivery channel available`。
+
+**门禁复验**：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...` 全部包 ok、0 FAIL；`go run ./cmd/smoke` `SMOKE_OK`（S02 p95 15.70ms）；前端 typecheck / lint（`--max-warnings=0`）/ Vitest **94 文件 1508 项** / build / `check:colors` / `check:bundle-size` PASS；Playwright 全量 **290 passed（11.8m）** + 第 9 轮定向 **3 passed**；`format:check` 仍有 15 个既有文件的 prettier 告警（均非本轮改动文件）。
+
+## 2026-11-18 — RBAC 收口测试（8 轮走查）与终版文档
+
+本轮 RBAC 收口累计新增 2 个测试文件：
+
+- `web/e2e/rbac-roles.spec.ts`：四角色真实浏览器端到端，22 项断言，覆盖登录导航项、直达无权路由 403、审批者工作流、审计员只读、角色变更/停用后的会话失效。
+- `internal/httpapi/rbac_matrix_test.go`：全路由越权矩阵，16 项，覆盖 `routeRules` 与注册路由双向对账、4 角色 × 每条非公开路由、fail-closed、未认证全路由扫描、职责分离。
+
+8 轮走查得分与修复：第 1 轮 44/100（修复 11 项）、第 2 轮 78/100（修复 8 项）、第 3 轮 52/100（修复 9 项）、第 4 轮 80/100（修复 8 项）、第 5 轮 92/100（修复 2 项）、第 6 轮 95/100（修复 2 项）、第 7 轮 95/100（修复 2 项）、第 8 轮 94/100（修复 3 项），每轮门禁全绿；累计修复 45 项，最高 95/100（通过线 99），剩余 3 项未清零。
+
+**终版复验**：门禁 **红（未通过）**；浸泡 15 分钟 exit 0（PASS，SSE p95 33ms、RSS 峰 76MB，2026-11-18 产物）；模糊 0,0；镜像 0。
+
+## 2026-11-18 — RBAC 第 8 轮走查修复（3 项）
+
+第 8 轮验收走查采纳全部 3 项（1 medium / 2 low），每项均补单测或 E2E：
+
+- **审批者在 /approvals 看不到服务端即时执行结果（medium）**：页头此前无条件写「批准/拒绝后由发起人执行」，而 source=console/batch 的审批在 decide handler 里立即执行、source=policy 批准即生效；`ApprovalCard` 的 onSuccess 又丢弃了 decide 响应的 `execution`，批准后只闪现「已批准」。修复：页头按来源说明执行时机（chat/terminal 由发起人执行；console/batch/诊断修复在批准时由服务端立即执行并回填结果；policy 批准即生效）；`ApprovalCard` 保存并展示 `execution`（复用容器页 `describeDecisionOutcome` 的人话文案 + `exit_code`/`error_code` 明细）；decide 成功后该审批随即离开 pending 队列、卡片会被卸载，因此 `/approvals` 顶部另保留最近一次决定的反馈（`approval-decision-feedback`），包含同样的失败码与执行明细。测试：`approvalOutcome.test.ts`（4 项，成功/通道失败 -1/非 0 退出码/无 execution）、`polish-rbac-round8.spec.ts`（真实 console 审批：直插 pending 行 → 审批者点击批准 → 断言 decide 响应 `execution.error_code=SSH_EXEC_FAILED` 且页面保留「执行失败 + exit_code/error_code」）。
+- **非 UUID 审批 id 的 decide 返回 503/500（low）**：`approve` 经 `recheckRequester` 把 Postgres 的 UUID 转换错误（22P02）映射成 503 `SERVICE_UNAVAILABLE`，`deny` 落 decide 兜底 500 `INTERNAL`，调用方会误判服务故障并触发 5xx 告警；同一 id 的 `GET /api/approvals/:id` 却是 400。修复：`handleDecideApproval` 入口 `uuid.Parse` 校验，approve/deny 统一 400 `VALIDATION_FAILED`；`approvalRequesterID` 另把 `store.ErrInvalid` 映射为 400（不再当存储故障），守卫层兜底。测试：`TestApprovalDecideRejectsNonUUIDID`（approve/deny 两条路径）与 `TestApprovalRequesterLookupMapsInvalidIDTo400`；原「decide missing → 404」与两个手工种子行改用合法 UUID。
+- **policy 审批卡显示「目标服务器：未知」（low）**：policy 审批没有目标服务器（`server_name` 按设计为空串），公共头此前对所有 source 无条件渲染「目标服务器：未知」，审批者会以为目标缺失/请求不完整。修复：`bodyKind==='policy'` 时改显示「全局审批门限变更」，policy 正文（策略 + 不含可执行命令）保持不变。测试：`polish-rbac-round2.spec.ts` 的 policy 卡片用例新增「不含目标服务器/未知」断言。
+
+**门禁复验（全部通过）**：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...`（`TEST_DATABASE_URL` 指向本地 65432）**30 包 ok、0 FAIL**；`go run ./cmd/smoke` `SMOKE_OK`（S02 p95 21.06ms）；前端 typecheck / lint（`--max-warnings=0`）/ 单测 **94 文件 1506 项** / build + 体积门禁 **126,294 B ≈ 123.3 KiB PASS** / `check:colors` PASS（163 文件，白名单 3，命中 0）；Playwright E2E **288 passed（12.0m）**。`format:check` 仍有 17 个既有文件的 prettier 告警（均非本轮改动文件，未在本轮顺手重排以避免无关 diff）。
+
+## 2026-11-17 — RBAC 收口测试与终版文档
+
+RBAC 收口累计新增 2 个测试文件：
+
+- `web/e2e/rbac-roles.spec.ts`：四角色真实浏览器端到端，22 项断言，覆盖登录导航项、直达无权路由 403、审批者工作流、审计员只读、角色变更/停用后的会话失效。
+- `internal/httpapi/rbac_matrix_test.go`：全路由越权矩阵，16 项，覆盖 `routeRules` 与注册路由双向对账、4 角色 × 每条非公开路由、fail-closed、未认证全路由扫描、职责分离。
+
+4 轮走查得分与修复：第 1 轮 44/100（修复 11 项）、第 2 轮 78/100（修复 8 项）、第 3 轮 52/100（修复 9 项）、第 4 轮 80/100（修复 8 项），每轮门禁全绿；累计修复 36 项，最高 80/100（通过线 99），剩余 8 项。
+
+**终版复验**：门禁绿；浸泡 15 分钟 exit 0（PASS，SSE p95 32ms、RSS 峰 76MB，2026-11-17 产物）；模糊 0,0；镜像 0。
+
+## 2026-11-17 — RBAC 第 4 轮走查修复（8 项）
+
+第 4 轮验收走查采纳全部 8 项（4 medium / 4 low），每项均补单测/集成测试或 E2E：
+
+- **JIT 授权在 Open 失败前被烧掉（medium）**：终端/RDP 创建会话先预检同服务器活动会话（`CountActiveByServer`），再消费 grant；Open 仍失败（并发/全局上限/网关不可用）时回滚 `consumed_at` 并写 `terminal.grant_released` 审计（`GrantStore.ReleaseGrant` 精确匹配本次消费时间，旧时间戳/他人不可释放），授权保留可重试。此前先消费再 Open，`TERM_SESSION_EXISTS`/`RDP_SESSION_EXISTS` 的 409 会烧掉一次已批准授权，重试注定 403 `TERMINAL_APPROVAL_REQUIRED`。前端 409 文案改为「本次授权未被消耗…无需重新申请」；契约 12.3 第 12 条与 9.7 动作清单补 `terminal.grant_released`。测试：handler（409 后 grant 未消费且关闭旧会话可重试、全局上限触发回滚 + 审计）、PG 集成（回滚/重消费/旧时间戳/他人释放）。
+- **audit:read 的会话目录仍只看自己的会话（medium）**：`GET /api/conversations` 改为 `AuthorizeAny(chat:use, audit:read)`，audit:read 传空 userID 拿全量（与 `GET /api/replays` 同源），auditor 不再 403；非 audit:read 仍在 SQL 内过滤本人。此前 admin（audit:read）只看到自己的会话、auditor 直接 403，与同页「回放执行」目录数量矛盾。`authz_guards.go` 规则说明与 `rbacInlinePermissions` 矩阵同步。测试：`TestConversationCatalogAuditRead`（operator 1/2 条、admin/auditor 3 条、auditor 详情仍 403）、全角色矩阵补 auditor 200、窗口翻页用例改用 audit:read 全量口径。
+- **审批 TTL 过期审计与状态不同事务（medium）**：`Service.Expire` 的 pending 过期改为 `WithTx` 内 `Expire` + 逐条/聚合 `audit_outbox`（与 `expireStaleGrants` 同口径），进程在两步之间崩溃不再留下「已过期但无审计」；内存 fake 的 `Expire` 补齐真实语义。测试：`TestApprovalExpireWritesOutbox`（per-row + aggregate 均进 outbox）与 PG 集成 `TestExpirePendingWritesOutboxInTx`（状态 expired + outbox 同时落库）。
+- **单管理员降级口径文档与横幅仍按「管理员人数」（medium）**：README、ARCHITECTURE 与 CONTRACT 的 3 处措辞统一为「可承担审批职责的启用账号（admin+approver）≤1」；审批页横幅改为「可审批账号不足降级模式」，并说明「1 admin + 1 approver 合规不降级、1 个可审批账号 + 若干 operator 仍降级」。E2E 断言同步。
+- **policy 申请审计挂错 resource_type（low）**：`approvals.Create` 对 `source=policy` 写 `policy.change_requested` 时改用 `resource_type=setting`、`resource_id=approval.mode`（detail 保留 policy_from/policy_to/requested_by），审计页按「目标类型=设置」过滤可见。`TestPolicyDecideWritesOutbox` 增断言。
+- **仅改展示名也落 changed=true（low）**：`user.update` 审计的 `changed` 只表示 role/enabled 权限类变更；展示名变化仅由 `display_name_changed` 表达，符合契约 9.7。新增 `TestUpdateUserDisplayNameOnlyAuditChangedFalse`。
+- **降级拒绝审计缺字段且未限速（low）**：`requireSecondApprover` 改走标准 `authzDenied`（detail 含 permission/method/path/ip + action/reason，resource_id=权限串），复用 actor+permission 限速；连续 5 次点「批准」只落 1 条审计。新增 `TestDegradedDenialAuditDetailAndRateLimit`。
+- **E2E 首轮 dispose 竞态（low）**：`web/e2e/fixtures.ts` 的 `/api/auth/me` 路由不再对已读过的 `route.fetch()` 响应二次回填，改为一次性读取 body 后显式 `status/headers/body` 返回，消除 `Response has been disposed` 偶发失败。
+
+**门禁复验（全部通过）**：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...`（`TEST_DATABASE_URL` 指向本地 65432）全部包 ok、0 FAIL；`go run ./cmd/smoke` `SMOKE_OK`（S02 p95 18.45ms）；前端 typecheck / lint（`--max-warnings=0`）/ 单测 **92 文件 1491 项** / build + 体积门禁 **126,238 B ≈ 123.3 KiB PASS** / `check:colors` PASS（160 文件，白名单 3，命中 0）；Playwright E2E **281 passed（11.4m）**；四目标 fuzz 各 10s 无崩溃（FuzzClassify / FuzzWinClassify / FuzzNetClassify / FuzzCheck）；`loadgen -mode=selftest` verdict **PASS**（sse_p95=30ms、RSS +6.3%、goroutine +6.7%；chats/tokens 计数器仍为 0，与第 3 轮记录一致，属既有 loadgen 二轮对话/计数问题，与本轮改动无关）。
+
+## 2026-11-14 — RBAC 第 3 轮走查修复（9 项）
+
+第 3 轮验收走查采纳全部 9 项（3 high / 4 medium / 2 low），每项均补单测/集成测试或 E2E：
+
+- **单管理员降级判定与 README/启动告警不同口径（high）**：`requireSecondApprover`、policy 放宽与 `singleAdminDegraded` 统一改用 `Users().CountEnabledApprovers`（admin + approver），与启动告警 `rbac_single_admin_warning`、README「创建第二个账号（admin 或 approver）」同源。此前只数 `CountEnabledAdmins`，导致「1 个启用管理员 + 1 个启用审批者」的合规部署下审批人批准任何业务审批、管理员开终端都被 409 `NO_SECOND_APPROVER` 拒绝且无任何告警。新增 `TestApproverCountsAsSecondApprover`（审批/终端 grant/policy 放宽全部放行）与 `TestDegradedModeWhenApproverDisabled`（停用审批者后降级门重新生效）。
+- **SMTP TLS 模式与端口无关（high）**：`auth.ResolveSMTPTLSMode` 成为唯一判定——`UseTLS=true` 时 465 走 implicit TLS、其余端口明文连接后强制 STARTTLS（服务器不宣告 STARTTLS 则明确报错），新增 `AIOPS_SMTP_IMPLICIT_TLS` 供非 465 的自建 SMTPS；启动日志打印 `tls_mode`。此前任意端口的 `UseTLS=true` 都直接 `tls.Dial`，默认 587 的提交服务器收到 TLS ClientHello 后断开，管理员永远建不了第二个账号。新增 `TestResolveSMTPTLSMode`、`TestDeliverTokenStartsWithEHLOOnSubmissionPort`（本地监听器断言首包是明文 `EHLO`）、`TestDeliverTokenImplicitTLSOn465`（首包为 TLS record `0x16`）与 config 默认值测试。
+- **系统收敛授权面不写审计（high）**：`rbacops.RevokePending` 与 `approvals.expirePendingAfterRestart` 改为按受影响行在同一事务写审计——`RevokeStore`/`GrantStore` 的收敛方法返回受影响行，审批类记 `approval.expired`（detail `reason=rbac:user_revoked|server_shutting_down` + command/risk_level/requested_by/server_name），终端/RDP 授权一律记 `terminal.grant_expired`。HTTP 路径走 `audit_outbox`；主机侧 `aiops admin reset` 无常驻 worker，走新增的 `rbacops.RevokePendingDirectAudit` 在事务内直接追加 `audit_logs` 哈希链（否则命令返回时审计仍不可查）。此前停用/改角色/吊销会话/重启把 pending 审批置 expired 后审计页只有 `approval.created`，审计员无法证明授权是被系统作废还是丢失。新增 store 集成断言（outbox 载荷按 resource_id 匹配、离线路径直接落链且不进 outbox）、`TestRestartExpiryWritesAudit` 与 `TestDisableUserAuditsExpiredApprovals`。
+- **已批准 grant 过期不落库、不审计（medium）**：`GrantExpiryStore.ExpireStaleGrants` + 每秒 sweeper 把 `approved AND consumed_at IS NULL AND grant_expires_at <= now` 收敛为 `expired`（`note=grant_expired`）并在同一事务写 `terminal.grant_expired`。此前库里状态永远是 approved，只有前端按时间戳临时推算「已过期」，审计页「终端授权过期」筛选恒空。新增 `TestExpireStaleGrantsIntegration`（真实 PG，含幂等与不可消费）与 `TestExpireStaleGrantsWritesAudit`。
+- **降级时审批人只看到英文 409（medium）**：`ERROR_TEXT` 补齐 `NO_SECOND_APPROVER`/`DELIVERY_UNAVAILABLE`/`APPROVAL_SELF_DECISION`/`LAST_ADMIN` 等 RBAC 码；`GET /api/settings` 新增只读 `single_admin_degraded` + `enabled_approvers`，审批页页顶渲染中文降级说明、审批卡在点按钮前把「批准」置灰（拒绝仍可用）。新增 `TestSettingsExposeDegradedState`、`approvalApproveBlockedByDegradedMode` 矩阵单测与错误码映射单测。
+- **主机侧 break-glass 批准不唤醒等待中的流（medium）**：`approvals.Wait` 在 channel 之外每 `approvalPollInterval`（1s）读一次审批状态，跨进程决策不再挂到 TTL。新增 `TestWaitSeesCrossProcessApproval`（直接改库模拟 break-glass，3s 内返回）与 `TestWaitKeepsWaitingWhilePending`。
+- **done 帧后「流式进行中」滞留（medium）**：新增 `isStreamActive(phase, live)` 作为 ChatPage blocker/Composer/离开守卫的共用判定，done/error/stopped 帧到达即视为回答结束，并在 `done`/`error` 帧处理里立即置 `phase='idle'`。此前正文已完整上屏后仍有 30–45ms（负载下秒级）的窗口，点「新建会话」被弹「当前回答仍在进行」。新增 `streamActiveRace.test.ts`（5 项矩阵）。
+- **部署引导断链（low）**：`.env.example` 补 6 个 `AIOPS_SMTP_*`/`AIOPS_SMTP_IMPLICIT_TLS` 与 `AIOPS_BOOTSTRAP_APPROVER_EMAIL`；`docker-compose.yml` 透传这些变量；README compose 段补「配置并验证 SMTP」步骤与 `tls_mode` 排查指引。
+- **回放目录审计被浏览行为淹没（low）**：`GET /api/replays` 的跨用户读取合并为**一条** `replay.viewed`（`resource_type=replay_catalog`，detail `{count,page_count,limit,has_more,query,has_actions,conversation_ids}`，ID 摘要上限 20 + `conversation_ids_truncated`）；打开单个他人回放仍逐条写。此前审计员每打开一次目录就按页内每个他人会话各写一行（实测 admin 201 条、au1 55 条，而会话仅 76 个）。新增 `TestReplayCatalogWritesSingleAudit` / `TestReplayCatalogAuditIDsBounded` / `TestOwnReplayCatalogNotAudited` / `TestSingleReplayViewStillAudited`。
+- **契约/文档**：CONTRACT 12.3 第 11/12/19/20/25 条按新口径重写（判定事实源、grant 到期收敛、系统收敛必须留痕、目录级审计合并、跨进程批准轮询），5.10 补 SMTP TLS 语义；README 环境变量表与 compose 段更新；openapi `SettingsResponse` 增两个只读字段并重新生成 `schema.d.ts`。
+
+## 2026-11-14 — RBAC 第 2 轮走查修复（8 项）
+
+第 2 轮验收走查采纳全部 8 项（2 high / 3 medium / 3 low），每项均补单测/集成测试或 E2E：
+
+- **会话列表归属过滤没有下沉 SQL（high）**：`ConversationStore.ListPage` 增加 `userID` 参数，`user_id` 条件下沉进 SQL（`AND ($n::uuid IS NULL OR user_id = $n::uuid)`），handler 传当前用户并删除 `filterOwnedConversations` 的 Go 侧逐行过滤。此前他人较新的 420 条会话占满 `limit` 窗口后，`GET /api/conversations?limit=200` 对 operator 返回 `items=[] + has_more=true + next_cursor=null`，侧栏「还没有会话」且没有「加载更早的会话」——自己的历史会话全部不可达。新增 `TestConversationListPageScopedByUser`（真实 PG，窗口 1 逐页翻完 3 条无空洞）与 `TestConversationListFiltersByOwnerInsideWindow`（handler，limit=1/200 + 游标推进 + 不泄露他人行）。
+- **回放目录同样中招（high）**：`ListReplayCatalogParams` 增加 `UserID` 并在 SQL `where` 拼 `AND c.user_id = $n::uuid`；handler 只在 `audit:read` 时传空串（全量只读），其余传当前用户，同时移除 Go 侧逐条 `Conversations().Get` 过滤（原实现每行一次额外查询）。新增 `TestReplayCatalogScopedByUser`（真实 PG）与 `TestReplayCatalogFiltersByOwnerInsideWindow`（handler，含 auditor 全量 11 条）。
+- **采集配置对无 monitor:manage 的角色仍渲染可提交表单（medium）**：`CollectorCard` 读 `usePermissions()`，无 `monitor:manage` 时只读回显 `enabled` / `interval_seconds` +「当前角色只读，不能修改采集配置」，不渲染开关/间隔/保存（与 `RulesTab`/`ChannelsTab` 的 `canConfigure` 同口径；服务端 403 不变）。E2E 断言 operator 看不到保存按钮、开关、间隔输入且零 PUT。
+- **用户 PATCH 按「字段存在」而非「值变化」吊销会话（medium）**：`handleUpdateUser` 改为 `roleChanged`/`enabledChanged` 决定是否 `DeleteByUser` + `revokePendingInTx` + `revokeAfterCommit`；仅展示名更新、或对已启用账号重复提交 `enabled=true`/同角色不再把对方踢下线。审计 detail 增加 `changed`（区分空操作）。新增 `TestUpdateUserNoopDoesNotRevokeSessions`（三次同值提交后目标 `/auth/me` 仍 200，真实改角色/停用仍 401，且审计 `changed` 正确）。
+- **policy 审批卡渲染空命令块（medium）**：`ApprovalCard` 新增 `approvalBodyKind(source)` 分区——`policy` 只渲染「策略：from → to」+「本审批只变更全局审批门限，不含可执行命令」，`terminal` 只渲染目标 +「单次授权，30 分钟内有效」+「不含可执行命令」，两者不再渲染「待执行命令」与空 `<pre>`；`edited` 双行也只在命令类审批出现。单测 `approvalBodyKind` 三态 + E2E 伪造 policy 审批断言无 `待执行命令`/`pre`。
+- **架构文档容量基线与 RBAC 自相矛盾（low）**：`docs/ARCHITECTURE.md` 8.1 把「管理员 1 / 1」改为「启用管理员 2 / 10」「总用户数 20 / 200」，并补一段说明单管理员是**降级态**（不能审批、不能开终端/RDP、不能放宽 policy），不是容量基线。
+- **哈希链校验窗口文案像全链通过（low）**：`auditVerifyResponse` 增加 `first_id`/`window`（并进 409 `error.details` 与 `audit.verify` 审计 detail）；`verifyResult.verifyOkText` 在有区间时输出「已校验 200 条（#300–#499）」，`first_id>1` 时追加「更早记录（#1–#299）未在本次校验范围内」；断链文案同样带校验范围。旧后端无 `first_id` 时保持原文案、不臆造区间。单测覆盖窗口截断 / 全量 / 旧后端 / 空区间；E2E 用真实接口断言两字段存在。
+- **已批准 JIT 授权无出口（low）**：新增 `GET /api/term/grants` 与 `GET /api/rdp/grants`（`terminal:use`，只返回本人 approved + 未消费 + 未过期，`grant_expires_at` 升序，`GrantStore.ListAvailableGrants`，limit 1..200），终端/桌面页轮询并显示「你有 N 条已批准、尚未使用的授权」+「打开终端/桌面」按钮，且「打开终端/连接」优先消费该服务器最早到期的那条；审批页新增「最近已决策」表（approved/denied/expired 合并 50 条），终端授权标注「待发起人使用 / 已于 X 消费 / 授权已过期」。新增 store 集成测试 `TestListAvailableGrantsScopedToUser`（未批准/已过期/他人均不可见、消费后消失、参数校验）、handler 测试 `TestAvailableGrantsEndpointScopedToCaller`（本人可见、admin 空、term/rdp 隔离、auditor/approver 403、未登录 401）与 E2E（真实申请-批准-两端取证）。
+- **契约/文档**：CONTRACT 12.3 第 3 条明确 `GET /api/conversations` 与 `/api/replays` 都在 SQL 强制 `user_id`（禁止 Go 侧后过滤）、第 24 条补校验窗口覆盖区间要求、12.5 补 grant 可见性、9.7 补 `user.update.changed` 与 `audit.verify` 的 `first_id/window`、5.19.1 补 `UserID` 参数与 SQL 片段、接口表登记 term/rdp grants 两个 GET、组件表补 `ApprovalCard` 分区、8.7 补采集卡权限收敛/终端授权提示/已决策回看；openapi 增 `TerminalGrantList` 与 `AuditVerifyResponse.first_id/window`（并重新生成 `schema.d.ts`）。
+
+## 2026-11-14 — RBAC 第 1 轮走查修复（11 项）
+
+对 RBAC 终版做验收走查后采纳全部 11 项（3 high / 6 medium / 2 low），每项均补单测/集成测试或 E2E：
+
+- **账号吊销收敛待处理审批（high）**：停用/降级/吊销会话/重置密码在同一事务内把该用户 pending 审批置 `expired`（`note=rbac:user_revoked`）、关联 `awaiting_approval` tool_call 置 `expired/APPROVAL_CANCELLED`、已批准未消费的 terminal grant 置 expired、`batch_results` awaiting_approval 置 cancelled 并重算 job；账号重新启用后旧审批不能再被批准执行。新增 `store.RevokeStore` / `store.BatchRevokeStore` / `internal/rbacops`。
+- **登出关闭交互连接（high）**：`POST /api/auth/logout` 按 `auth_session_id` 关闭终端/RDP WebSocket 与 SSE（`termx.Manager.CloseByAuthSession` / `rdpx.Gateway.CloseByAuthSession` / `StreamGuard.CancelByAuthSession`）；WS 每 30 秒除用户 enabled/权限外还用 `Sessions.Get(id)` 复检会话仍存在未过期。
+- **主机侧恢复 CLI（high）**：新增 `cmd/aiops` 子命令解析——`aiops admin reset`（置 must_change_password、吊销会话与授权面、写 `admin.offline_reset`）与 `aiops break-glass --action approve ...`（单次批准、置 break_glass、写 `admin.break_glass`）；此前二者会当成普通启动再起一个服务进程。另加 `aiops audit anchor --out <file>` 周期导出链头锚点。离线命令不走 outbox（CLI 无常驻 worker），改用 `audit.AppendOnce` 在同一事务内直接追加 `audit_logs` 哈希链，命令返回时 `admin.offline_reset`/`admin.break_glass` 已可查。
+- **单管理员降级模式（medium）**：`CountEnabledAdmins<=1` 时审批批准、终端/RDP grant 与会话、policy 放宽全部 409 `NO_SECOND_APPROVER`（fail-closed），启动写 `rbac_single_admin_warning`；新增 `AIOPS_BOOTSTRAP_APPROVER_EMAIL` 首次启动创建 approver 邀请。
+- **审批拒绝审计归属（medium）**：发起人复检失败时写 `approval.requester_denied`，actor 是调用者（审批人），detail 带 `requested_by` 与原因；不再复用被停用发起人的身份。
+- **状态变更审计走 outbox（medium）**：审批创建/决策/取消、`settings.update`、policy 应用、terminal grant 生命周期与 `command.approved` 全部与业务行同事务写 `audit_outbox`；新增 anchor 导出 CLI。
+- **投递失败可重试（medium）**：创建用户把 invite token 签发与 SMTP 投递放进同一事务（失败回滚用户行/token/审计，同名可重试）；重置密码改为先投递成功再吊销会话（失败不踢人下线），两种 503 文案区分。
+- **改角色弹窗职责说明（medium）**：`UserRoleModal` 复用 `ROLE_DESCRIPTIONS`（与创建弹窗同源），切换角色同步更新。
+- **用户管理审计补元数据（medium）**：事务内审计经 `auditInTxCtx` 填 `ip`/`request_id`；`user.credential_reset` 的 `expires_at` 在写 outbox 之前写入。
+- **must_change_password 页面（low）**：`useChatStream` 的 `ERROR_TEXT` 补 `PASSWORD_CHANGE_REQUIRED` 中文；`AppShell` 在强制改密时只渲染改密页，不再挂载业务页面（消除 403 英文横幅与「模型供应商加载失败」）。
+- **契约默认值（low）**：`docs/CONTRACT.md` 4.1 `users.role` 默认值改为 `'auditor'`（与 00013 迁移、实际库一致）。
+
+## 2026-11-12 — RBAC 多用户改造（终版）
+
+单管理员控制台升级为固定四角色、19 条权限的多用户系统；走查最高 93/100，终版复验全部通过。
+
+- **角色与权限**：固定 `admin`（管理员）、`operator`（运维工程师）、`approver`（审批者）、`auditor`（审计员）四类，每用户恰一个角色；权限全集 19 条（`resource:action`），各角色持有 19 / 8 / 3 / 1 条。`internal/authz` 的 `rolePermissions` 是唯一映射，角色与权限由服务端计算，客户端提交的 role/permissions 一律不采信；未知角色 fail-closed。
+- **路由覆盖**：`internal/httpapi/authz_guards.go` 的权限守卫表（`routeRules`，契约 12.4 称 `routeGuards`）是唯一事实来源；`TestRoutePermissions` 遍历 `gin.Engine.Routes()`，断言每条非静态 `/api` 路由恰好有一条 guard（`authenticated`、单权限或「权限+实例规则」），未列出路由测试/启动失败；`NoRoute` 对 `/api/*` 返回 404。
+- **鉴权与会话**：`AuthenticateSession` 返回 user 与 auth session；`SessionStore.Get` 供 WS 每 30 秒复检；`requireAuth` 注入 `user/user_id/auth_session_id`。邀请未接受（`invite_pending=true`，`status=invited`）或停用（`enabled=false`，`status=disabled`）登录 401，停用用户的存量会话在下一次 `Authenticate` 时 401。`must_change_password=` 为真时 REST、WS、pprof 共用同一道门，除 `me`/`logout`/`change-password` 外全部 403 `PASSWORD_CHANGE_REQUIRED`；改密、重置、吊销会话后旧会话立即失效。
+- **职责分离**：`requested_by == decided_by` 返回 403 `APPROVAL_SELF_DECISION`；审批者不能改写命令或策略目标，决定请求只接受 `decision`/`note`，`edited_command` 被 `bindJSONStrict` 拒绝。历史 `pending + edited_command<>''` 迁移时直接 `expired`；新请求需要改命令时先 deny 再重发。终端/RDP 走单次 grant，策略放宽需第二人批准；仅一个启用管理员时放宽返回 409 `NO_SECOND_APPROVER`。
+- **用户管理**：新增 `/users` 页面与 `/api/users*` 接口（仅管理员，`users:read` / `users:write` / `users:credential_reset`）。创建用户只签发一次性 invite token，重置只签发 reset token，均经 SMTP 独立通道投递、API 响应不含 token、只存 SHA-256、30 分钟单次；创建者 IP 兑换 403 `SELF_REDEEM_FORBIDDEN`，同 IP 立即登录写 warning。管理员永不设置或知道他人最终密码；改角色、停用、重置、吊销会话会立即吊销目标全部 auth session、关闭 live 终端/RDP、取消 pending 审批。最后管理员与自我操作由服务端 409 `LAST_ADMIN` / `SELF_OPERATION` 守卫，停用是唯一删除语义。
+- **单管理员降级**：仅一个启用管理员时不能执行 `needs_approval`、不能开终端/RDP、不能放宽 policy；只提供主机侧、受文件系统权限保护的一次性 break-glass CLI（强审计、单次、需 `reason`/`confirm`），不提供 HTTP break-glass。
+- **RBAC 真实边界**：不做 SSO/OIDC/LDAP/MFA/邮件之外的独立身份证明；密码认证 + 管理员创建账号无法在密码学上证明两个账号由两个独立自然人控制，独立通道投递 invite/reset token、创建者 IP 兑换拒绝、同 IP 告警用于降低红队第 3 条风险，但不宣传为强 SoD；需要强双人时上 SSO/MFA。不做自定义角色/继承/多角色，不做 per-server/per-database ACL；不做读审计全覆盖；不做多租户、服务账号/API token。
+- **前端**：`/users` 仅管理员可见；导航与入口按服务端下发的 permissions 收敛，审计员页面渲染只读提示，越权入口隐藏与 403 中文解释统一；登录页改为用户名 + 密码，邀请兑换页给出中文提示与错误分类。
+- **验证**：走查最高 93/100，终版复验全部通过：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...`（`TEST_DATABASE_URL` 指向本地 65432）**29 包 ok、0 FAIL**；`go run ./cmd/smoke` `SMOKE_OK`；前端 typecheck / lint（`--max-warnings=0`）/ 单测 **91 文件 1468 项** / build + 体积门禁 **125,984 B ≈ 123.0 KiB PASS** / `check:colors` PASS（160 文件，白名单 3，命中 0）；Playwright E2E **254 passed**；四目标 fuzz 各 10s 无崩溃；浸泡 15 分钟 PASS（SSE p95 32ms、RSS 峰 78MB，2026-11-12 产物）。
+- **文档**：契约 12 章（角色/权限矩阵/职责分离/用户管理接口/迁移 `00012_rbac.sql`）；README 补角色与权限表、职责分离执行点、`/users` 与已知限制；CHANGELOG 本条目。合入提交：`3fc3ab0` 契约、`c2e2f0f` 身份底座、`0d3f38f` 路由守卫与审批 SoD、`c5dfcb1` 用户管理页、`94f2294`..`91504c9` 四轮走查打磨。
+
+## 2026-11-12 — RBAC 打磨 sprint 4（审计哈希链校验修复与入口）
+
+走查第 4 轮采纳全部 2 项（1 high / 1 low），每项均补真实 Postgres 集成测试、单测或 E2E：
+
+- **审计哈希链校验在真实 Postgres 上必然误报（high）**：根因是两层输入不一致——① 写入侧用纳秒时间戳算哈希，而 `audit_logs.created_at` 是 `timestamptz`（PostgreSQL 仅微秒），校验侧用读回值复算必然不等，全新库稳定 409 `AUDIT_CHAIN_BROKEN`（`broken_at=1`）；② `detail` 是 `jsonb`，落库会重排对象键并规范空白（`{"i":1}` → `{"i": 1}`），写入侧对 `json.Marshal` 原始文本算哈希同样对不上。修复：`Prepare`/`computeHash` 前把 `CreatedAt` 截断到微秒；写入侧在算哈希前经 `SELECT $1::jsonb::text` 规范化明细（新增可选接口 `store.AuditDetailCanonicalizer`，内存 fake 不实现、行为不变），outbox 与直写两条路径都覆盖。历史行的纳秒输入已被数据库丢弃、不可恢复，迁移 `00014` 以 `legacy_hash` 标记存量行（加列默认 `true` 后改回 `false`，避开 append-only 触发器）：校验只核对 `prev_hash` 链接、跳过复算，并在响应 `legacy` 计数与页面提示中如实标注「仅校验链接」。409 的统一错误信封不变，`error.details` 增加 `broken_at/checked/head_id/head_hash/legacy`。
+- **审计页没有「校验哈希链」入口（low）**：`/audit` 页头新增只读「校验哈希链」按钮，GET `/api/audit/verify`；成功展示 checked/链头哈希（`legacy>0` 时注明历史行仅校验链接），409 展示断点 id；失败展示本地化错误。审计员只读提示与权限矩阵不变。
+- **新增测试**：`internal/httpapi/audit_verify_integration_test.go` 用真实 Postgres 覆盖全新库 3 条直写 + 1 条 outbox 事务审计 → 200、legacy 行 → 200/legacy=1、伪造链接 → 409 且 `details.broken_at` 正确（与 `internal/store/postgres` 包共用测试库 advisory lock，避免并行 TRUNCATE）；`internal/audit/hash_test.go` 覆盖微秒截断、子微秒不影响哈希、legacy 链接校验；`web/src/features/audit/verifyResult.test.ts` 覆盖成功/409 解析与文案；`web/e2e/polish-rbac-sprint4.spec.ts` 覆盖审计员点击校验 → 200/链完整/零写请求。修复前用旧 `hash.go` 跑真实 PG 集成测试实测稳定复现 `409 broken_at=1`，修复后转绿。
+- **门禁首跑发现并修复两个测试侧 oracle 偏差**（不改变产品判定逻辑）：① `sqlguard` 的独立 MySQL 骨架剥离把重叠 `--` 序列整体吞掉，`SELECT --- DROP`（第三个 `-` 才构成注释）被误报为放行写语句；② `risk` 的 Windows 子表达式 oracle 把反斜杠当转义符（PowerShell 用反引号），`\"` 序列导致引号配对错位。修正检测器并落两条 fuzz 回归语料/种子。
+- **门禁复验（全部通过）**：`gofmt -l .` 无输出；`go vet ./...` 退出码 0；`go test -count=1 ./...`（TEST_DATABASE_URL 指向本地 65432）**29 包 ok、0 FAIL**；`go run ./cmd/smoke` `SMOKE_OK`（S02 p95 35.55ms）；前端 typecheck / lint（`--max-warnings=0`）/ 单测 **91 文件 1468 项** / build + 体积门禁 **125,984 B ≈ 123.0 KiB PASS** / `check:colors` PASS（160 文件，白名单 3，命中 0）；E2E **254 passed（11.3m）**；四目标 fuzz 各 10s 无崩溃（`FuzzClassify` / `FuzzWinClassify` / `FuzzNetClassify` / `FuzzCheck`）。附：`loadgen -mode=selftest` verdict PASS（1m30s，RSS +4.0%、goroutine 0%），但其 chats/tokens 计数器为 0 且只发出一次 mock LLM 请求——在 HEAD 干净树同样复现，属既有 loadgen 二轮对话/计数问题，与本轮改动无关。
+- **文档**：CONTRACT 12.3 第 19/24 条与迁移清单；openapi `AuditVerifyResponse.legacy` 与 409 `error.details` 说明；README 验证表更新；CHANGELOG 本条目。
+
 ## 2026-11-09 — 七期打磨（6 项验收缺口修复）
 
 七期主题契约落地后的验收走查采纳全部 6 项（2 high / 3 medium / 1 low），每项均补单测或 E2E，七层门禁复验全绿后提交：

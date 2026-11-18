@@ -75,7 +75,7 @@ func TestLoginValidationAndFailures(t *testing.T) {
 		{"malformed json", `{`, "application/json", http.StatusBadRequest, "VALIDATION_FAILED"},
 		{"unknown field", `{"password":"x","extra":1}`, "application/json", http.StatusBadRequest, "VALIDATION_FAILED"},
 		{"wrong content type", `{"password":"x"}`, "text/plain", http.StatusUnsupportedMediaType, "VALIDATION_FAILED"},
-		{"wrong password", `{"password":"wrong-password"}`, "application/json", http.StatusUnauthorized, "AUTH_INVALID"},
+		{"wrong password", `{"username":"admin","password":"wrong-password"}`, "application/json", http.StatusUnauthorized, "AUTH_INVALID"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,6 +100,7 @@ func TestLoginRateLimited(t *testing.T) {
 	st := newMemStore()
 	st.users["admin"] = store.User{
 		ID: "user-1", Username: "admin", PasswordHash: getAdminHash(),
+		Role: store.RoleAdmin, Enabled: true,
 		CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
 	}
 	authSvc := auth.NewService(st, auth.Config{SessionTTL: time.Hour})
@@ -113,7 +114,7 @@ func TestLoginRateLimited(t *testing.T) {
 
 	do := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/auth/login",
-			strings.NewReader(`{"password":"whatever"}`))
+			strings.NewReader(`{"username":"admin","password":"whatever"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", testOrigin)
 		rec := httptest.NewRecorder()

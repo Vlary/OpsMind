@@ -1,6 +1,7 @@
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { ReloadOutlined, SafetyCertificateOutlined, SearchOutlined } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import {
+  Alert,
   Button,
   Descriptions,
   Flex,
@@ -24,9 +25,11 @@ import CodeBlock from '../../components/CodeBlock';
 import CopyButton from '../../components/CopyButton';
 import EmptyState from '../../components/EmptyState';
 import PageHeader from '../../components/PageHeader';
+import AuditorReadOnlyNotice from '../../components/AuditorReadOnlyNotice';
 import { AdminLoading, QueryErrorState } from '../../components/admin/AdminStates';
 import {
   ApiRequestError,
+  describeFailure,
   isRecord,
   makeFailure,
   toApiFailure,
@@ -50,8 +53,20 @@ import {
 } from '../../components/admin/meta';
 import '../../styles/admin.css';
 import { isValidUUID, normalizeUUID } from './uuidFilter';
+import {
+  parseVerifySummary,
+  verifyBrokenText,
+  verifyOkText,
+  type AuditVerifySummary,
+} from './verifyResult';
 
 type AuditLog = components['schemas']['AuditLog'];
+
+// 哈希链校验的界面结论（只读操作；409 时服务端把断点放进 error.details）。
+type VerifyView =
+  | { kind: 'ok'; summary: AuditVerifySummary }
+  | { kind: 'broken'; summary: AuditVerifySummary | null }
+  | { kind: 'error'; text: string };
 
 const PAGE_SIZES = [20, 50, 100, 200];
 
@@ -255,7 +270,33 @@ export default function AuditPage() {
   const [pageSize, setPageSize] = useState(50);
   const [cursors, setCursors] = useState<Array<number | undefined>>([undefined]);
   const [pageIndex, setPageIndex] = useState(0);
+  const [verifyView, setVerifyView] = useState<VerifyView | null>(null);
+  const [verifyLoading, setVerifyLoading] = useState(false);
   const navigate = useNavigate();
+
+  // 只读校验：GET /api/audit/verify（契约 12.1 审计员职责）。成功展示
+  // checked/head；409 AUDIT_CHAIN_BROKEN 时从 error.details 取断点 id。
+  const runVerifyChain = async () => {
+    setVerifyLoading(true);
+    try {
+      const { data, error, response } = await api.GET('/api/audit/verify');
+      if (data) {
+        const summary = parseVerifySummary(data);
+        setVerifyView(
+          summary === null ? { kind: 'error', text: '校验响应格式异常' } : { kind: 'ok', summary },
+        );
+        return;
+      }
+      const failure = toApiFailure(error, response);
+      if (failure.code === 'AUDIT_CHAIN_BROKEN') {
+        setVerifyView({ kind: 'broken', summary: parseVerifySummary(failure.details) });
+        return;
+      }
+      setVerifyView({ kind: 'error', text: describeFailure(failure) });
+    } finally {
+      setVerifyLoading(false);
+    }
+  };
 
   const beforeId = cursors[pageIndex];
 
@@ -443,15 +484,45 @@ export default function AuditPage() {
         title="审计"
         description="只追加审计日志，按 id 倒序游标分页"
         extra={
-          <Button
-            icon={<ReloadOutlined />}
-            loading={auditQuery.isFetching}
-            onClick={() => void auditQuery.refetch()}
-          >
-            刷新
-          </Button>
+          <Space>
+            <Button
+              icon={<SafetyCertificateOutlined />}
+              loading={verifyLoading}
+              onClick={() => void runVerifyChain()}
+            >
+              校验哈希链
+            </Button>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={auditQuery.isFetching}
+              onClick={() => void auditQuery.refetch()}
+            >
+              刷新
+            </Button>
+          </Space>
         }
       />
+
+      {verifyView ? (
+        <div data-testid="audit-verify-result" style={{ marginBottom: 16 }}>
+          {verifyView.kind === 'ok' ? (
+            <Alert
+              type="success"
+              showIcon
+              message={verifyOkText(verifyView.summary)}
+              description={
+                <span className="opsmind-admin-mono">链头哈希 {verifyView.summary.headHash}</span>
+              }
+            />
+          ) : verifyView.kind === 'broken' ? (
+            <Alert type="error" showIcon message={verifyBrokenText(verifyView.summary)} />
+          ) : (
+            <Alert type="warning" showIcon message={`哈希链校验未完成：${verifyView.text}`} />
+          )}
+        </div>
+      ) : null}
+
+      <AuditorReadOnlyNotice />
 
       <Flex wrap gap={12} align="center" className="opsmind-admin-toolbar">
         <Select

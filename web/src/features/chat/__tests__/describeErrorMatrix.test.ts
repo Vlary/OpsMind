@@ -43,7 +43,8 @@ const CHAT_ERROR_CODES: Array<[string, string]> = [
   ['APPROVAL_DENIED', '命令审批被拒绝。'],
   ['APPROVAL_TIMEOUT', '命令审批超时。'],
   // 六期打磨 sprint 3：与 APPROVAL_TIMEOUT 区分——后者是等满 TTL 的真超时。
-  ['APPROVAL_CANCELLED', '回答流已中断，本轮审批已取消。'],
+  // RBAC 走查 sprint 3：刷新/断开的同款终态补「请重新发起」恢复动作。
+  ['APPROVAL_CANCELLED', '回答流已中断，本轮审批已取消，请重新发起。'],
   ['COMMAND_FORBIDDEN', '该命令被风险规则禁止。'],
   ['COMMAND_INVALID', '命令不合法，未执行。'],
   ['TOOL_NOT_FOUND', '调用了不支持的工具。'],

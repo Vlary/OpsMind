@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 
 	"aiops/internal/agent"
@@ -49,7 +50,12 @@ type memStore struct {
 	messages      []store.Message
 	toolCalls     []store.ToolCall
 	approvals     map[string]store.Approval
+	diagnosis     map[string]store.DiagnosisSession
 	auditLogs     []store.AuditLog
+	// 一次性 invite/reset token（user_tokens）。放在 store 内而不是包级
+	// 全局变量，才能随 WithTx 快照回滚、不在测试间串味。
+	tokens      map[string]store.UserToken
+	tokenHashes map[string]string
 
 	// 错误注入（nil 表示成功路径）。
 	errPing             error
@@ -61,8 +67,13 @@ type memStore struct {
 	errServersList      error // 八期：回放 affected_servers 装配失败不阻断
 	errDatabasesGet     error
 	errProvidersCreate  error
+	errApprovalsGet     error
 	errApprovalsDecide  error
 	errAuditList        error
+
+	// audit_outbox 测试通道（EnqueueAuditOutbox/Pending/Process）。
+	outbox    []store.AuditOutboxEntry
+	outboxSeq int64
 }
 
 func newMemStore() *memStore {
@@ -75,14 +86,255 @@ func newMemStore() *memStore {
 		providers:     map[string]store.Provider{},
 		conversations: map[string]store.Conversation{},
 		approvals:     map[string]store.Approval{},
+		diagnosis:     map[string]store.DiagnosisSession{},
+		tokens:        map[string]store.UserToken{},
+		tokenHashes:   map[string]string{},
 	}
 }
 
 func (m *memStore) Ping(context.Context) error { return m.pingErr }
 func (m *memStore) Close()                     {}
 
+// ---- audit_outbox（store.AuditOutboxStore） ----
+
+func (m *memStore) EnqueueAuditOutbox(_ context.Context, payload []byte, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outboxSeq++
+	m.outbox = append(m.outbox, store.AuditOutboxEntry{
+		ID: m.outboxSeq, Payload: append([]byte(nil), payload...), CreatedAt: at,
+	})
+	return nil
+}
+
+func (m *memStore) PendingAuditOutbox(_ context.Context, limit int) ([]store.AuditOutboxEntry, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	out := make([]store.AuditOutboxEntry, 0, limit)
+	for _, e := range m.outbox {
+		if e.Attempts > 0 {
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) ProcessAuditOutbox(_ context.Context, ids []int64, _ time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	want := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	for i := range m.outbox {
+		if _, ok := want[m.outbox[i].ID]; ok {
+			m.outbox[i].Attempts++
+		}
+	}
+	return nil
+}
+
+func (m *memStore) LockAuditChain(context.Context) error { return nil }
+
+// memRevoke 实现 store.RevokeStore（stub）：把该用户 pending 审批收敛为
+// expired，并同步 awaiting_approval tool_call。测试用内存实现不做 SQL 联接。
+// 返回受影响的行（与 postgres 实现同契约，调用方逐行写审计）。
+func (r *memApprovals) ExpirePendingByUser(_ context.Context, userID, note string, now time.Time) ([]store.Approval, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	expired := make([]store.Approval, 0, len(m.approvals))
+	for id, ap := range m.approvals {
+		if ap.Status != store.ApprovalPending || ap.RequestedBy != userID {
+			continue
+		}
+		ap.Status = store.ApprovalExpired
+		ap.Note = note
+		at := now
+		ap.DecidedAt = &at
+		m.approvals[id] = ap
+		expired = append(expired, ap)
+		if ap.ToolCallID == nil {
+			continue
+		}
+		for i := range m.toolCalls {
+			tc := &m.toolCalls[i]
+			if tc.ID == *ap.ToolCallID && tc.Status == store.ToolAwaitingApproval {
+				tc.Status = store.ToolExpired
+				tc.ErrorCode = "APPROVAL_CANCELLED"
+				tc.ErrorMessage = "approval cancelled: requester account revoked"
+			}
+		}
+	}
+	return expired, nil
+}
+
+// ExpireApprovedGrantsByUser 收敛已批准未消费的 terminal grant（stub）。
+func (r *memApprovals) ExpireApprovedGrantsByUser(_ context.Context, userID, note string, _ time.Time) ([]store.Approval, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	expired := make([]store.Approval, 0, len(m.approvals))
+	for id, ap := range m.approvals {
+		if ap.Source == "terminal" && ap.Status == store.ApprovalApproved &&
+			ap.ConsumedAt == nil && ap.RequestedBy == userID {
+			ap.Status = store.ApprovalExpired
+			ap.Note = note
+			m.approvals[id] = ap
+			expired = append(expired, ap)
+		}
+	}
+	return expired, nil
+}
+
+// ExpireStaleGrants 收敛已批准但已过 grant_expires_at 的 grant（stub）。
+func (r *memApprovals) ExpireStaleGrants(_ context.Context, now time.Time, limit int) ([]store.Approval, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 200
+	}
+	expired := make([]store.Approval, 0, limit)
+	for id, ap := range m.approvals {
+		if len(expired) >= limit {
+			break
+		}
+		if ap.Source != "terminal" || ap.Status != store.ApprovalApproved || ap.ConsumedAt != nil {
+			continue
+		}
+		if ap.GrantExpiresAt == nil || ap.GrantExpiresAt.After(now) {
+			continue
+		}
+		ap.Status = store.ApprovalExpired
+		ap.Note = "grant_expired"
+		at := now
+		ap.DecidedAt = &at
+		m.approvals[id] = ap
+		expired = append(expired, ap)
+	}
+	return expired, nil
+}
+
+// WithTx 模拟事务：先在内存里做快照，fn 返回错误即整体回滚。测试用它
+// 覆盖「投递失败 → 用户行/token/审计一并撤销」这类真实事务语义（内存
+// fake 不做快照的话，回滚路径无处验证）。
 func (m *memStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
-	return fn(m)
+	m.mu.Lock()
+	snap := m.snapshotLocked()
+	m.mu.Unlock()
+	if err := fn(m); err != nil {
+		m.mu.Lock()
+		m.restoreLocked(snap)
+		m.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// memSnapshot 是 WithTx 的回滚快照（浅拷贝值类型 map/slice）。
+type memSnapshot struct {
+	users, sessions, settings, servers, databases, providers, conversations map[string]any
+	toolCalls                                                               []store.ToolCall
+	approvals                                                               map[string]store.Approval
+	auditLogs                                                               []store.AuditLog
+	tokens                                                                  map[string]store.UserToken
+	tokenHashes                                                             map[string]string
+	outbox                                                                  []store.AuditOutboxEntry
+	outboxSeq                                                               int64
+}
+
+func (m *memStore) snapshotLocked() memSnapshot {
+	snap := memSnapshot{outboxSeq: m.outboxSeq}
+	snap.users = make(map[string]any, len(m.users))
+	for k, v := range m.users {
+		snap.users[k] = v
+	}
+	snap.sessions = make(map[string]any, len(m.sessions))
+	for k, v := range m.sessions {
+		snap.sessions[k] = v
+	}
+	snap.settings = make(map[string]any, len(m.settings))
+	for k, v := range m.settings {
+		snap.settings[k] = v
+	}
+	snap.servers = make(map[string]any, len(m.servers))
+	for k, v := range m.servers {
+		snap.servers[k] = v
+	}
+	snap.databases = make(map[string]any, len(m.databases))
+	for k, v := range m.databases {
+		snap.databases[k] = v
+	}
+	snap.providers = make(map[string]any, len(m.providers))
+	for k, v := range m.providers {
+		snap.providers[k] = v
+	}
+	snap.conversations = make(map[string]any, len(m.conversations))
+	for k, v := range m.conversations {
+		snap.conversations[k] = v
+	}
+	snap.toolCalls = append([]store.ToolCall(nil), m.toolCalls...)
+	snap.approvals = make(map[string]store.Approval, len(m.approvals))
+	for k, v := range m.approvals {
+		snap.approvals[k] = v
+	}
+	snap.auditLogs = append([]store.AuditLog(nil), m.auditLogs...)
+	snap.tokens = make(map[string]store.UserToken, len(m.tokens))
+	for k, v := range m.tokens {
+		snap.tokens[k] = v
+	}
+	snap.tokenHashes = make(map[string]string, len(m.tokenHashes))
+	for k, v := range m.tokenHashes {
+		snap.tokenHashes[k] = v
+	}
+	snap.outbox = append([]store.AuditOutboxEntry(nil), m.outbox...)
+	return snap
+}
+
+func (m *memStore) restoreLocked(snap memSnapshot) {
+	m.users = make(map[string]store.User, len(snap.users))
+	for k, v := range snap.users {
+		m.users[k] = v.(store.User)
+	}
+	m.sessions = make(map[string]store.Session, len(snap.sessions))
+	for k, v := range snap.sessions {
+		m.sessions[k] = v.(store.Session)
+	}
+	m.settings = make(map[string]store.Setting, len(snap.settings))
+	for k, v := range snap.settings {
+		m.settings[k] = v.(store.Setting)
+	}
+	m.servers = make(map[string]store.Server, len(snap.servers))
+	for k, v := range snap.servers {
+		m.servers[k] = v.(store.Server)
+	}
+	m.databases = make(map[string]store.Database, len(snap.databases))
+	for k, v := range snap.databases {
+		m.databases[k] = v.(store.Database)
+	}
+	m.providers = make(map[string]store.Provider, len(snap.providers))
+	for k, v := range snap.providers {
+		m.providers[k] = v.(store.Provider)
+	}
+	m.conversations = make(map[string]store.Conversation, len(snap.conversations))
+	for k, v := range snap.conversations {
+		m.conversations[k] = v.(store.Conversation)
+	}
+	m.toolCalls = snap.toolCalls
+	m.approvals = snap.approvals
+	m.auditLogs = snap.auditLogs
+	m.tokens = snap.tokens
+	m.tokenHashes = snap.tokenHashes
+	m.outbox = snap.outbox
+	m.outboxSeq = snap.outboxSeq
 }
 
 func (m *memStore) nextID(prefix string) string {
@@ -104,16 +356,133 @@ func (m *memStore) Approvals() store.ApprovalStore { return (*memApprovals)(m) }
 func (m *memStore) AuditLogs() store.AuditStore    { return (*memAudit)(m) }
 func (m *memStore) Settings() store.SettingStore   { return (*memSettings)(m) }
 
-// 五期 M2（diagnosis/inspection）向 store.Store 增挂三个子接口后的最小
-// stub（embed nil：触达即 panic）——让 memStore 满足接口、既有测试可编译；
-// M2 落 diagnosis/inspection handler 测试时替换为真实 fake（同 M3 的
-// batchState 模式，见 batch_handlers_test.go）。inspection 的真实替换见
-// inspection_handlers_test.go（inspectionState）；diagnosis 尚为占位。
+// 五期 M2（diagnosis/inspection）向 store.Store 增挂子接口：inspection 的
+// 真实替换见 inspection_handlers_test.go（inspectionState）；diagnosis 在
+// 第 11 轮走查 medium 补成内存实现——列表归属过滤与 GET 的 owner-or-admin
+// 必须能在 handler 层用真实行验证（此前是触达即 panic 的占位）。
 func (m *memStore) DiagnosisSessions() store.DiagnosisSessionStore {
-	return stubDiagnosisSessions{}
+	return (*memDiagnosisSessions)(m)
 }
 
-type stubDiagnosisSessions struct{ store.DiagnosisSessionStore }
+type memDiagnosisSessions memStore
+
+func (r *memDiagnosisSessions) Create(_ context.Context, p store.CreateDiagnosisParams) (store.DiagnosisSession, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	if p.ExpiresAt.IsZero() {
+		return store.DiagnosisSession{}, store.ErrInvalid
+	}
+	name := ""
+	if srv, ok := m.servers[p.ServerID]; ok {
+		name = srv.Name
+	}
+	d := store.DiagnosisSession{
+		ID: m.nextID("diag"), AlertEventID: p.AlertEventID, ServerID: p.ServerID,
+		ServerName: name, ConversationID: p.ConversationID, Trigger: p.Trigger,
+		Status: store.DiagnosisPending, ExpiresAt: p.ExpiresAt.UTC(),
+		CreatedBy: p.CreatedBy, CreatedAt: now, UpdatedAt: now,
+	}
+	m.diagnosis[d.ID] = d
+	return d, nil
+}
+
+func (r *memDiagnosisSessions) Get(_ context.Context, id string) (store.DiagnosisSession, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.diagnosis[id]
+	if !ok {
+		return store.DiagnosisSession{}, store.ErrNotFound
+	}
+	return d, nil
+}
+
+func (r *memDiagnosisSessions) List(_ context.Context, status store.DiagnosisStatus, serverID, createdBy string, limit int) ([]store.DiagnosisSession, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]store.DiagnosisSession, 0, len(m.diagnosis))
+	for _, d := range m.diagnosis {
+		if status != "" && d.Status != status {
+			continue
+		}
+		if serverID != "" && d.ServerID != serverID {
+			continue
+		}
+		// 与 pgstore 同语义：created_by IS NULL 的 system 行不满足等值过滤。
+		if createdBy != "" && (d.CreatedBy == nil || *d.CreatedBy != createdBy) {
+			continue
+		}
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (r *memDiagnosisSessions) UpdateStatus(_ context.Context, p store.UpdateDiagnosisStatusParams) (store.DiagnosisSession, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.diagnosis[p.ID]
+	if !ok {
+		return store.DiagnosisSession{}, store.ErrNotFound
+	}
+	if p.From != "" && d.Status != p.From {
+		return store.DiagnosisSession{}, store.ErrConflict
+	}
+	d.Status = p.To
+	d.UpdatedAt = p.Timestamp.UTC()
+	if p.Report != nil {
+		d.Report = append(json.RawMessage(nil), p.Report...)
+	}
+	if p.ErrorCode != "" {
+		d.ErrorCode = p.ErrorCode
+	}
+	if p.To == store.DiagnosisDiagnosing {
+		at := p.Timestamp.UTC()
+		d.StartedAt = &at
+	}
+	if p.To == store.DiagnosisAwaitingFix {
+		// 与 postgres 同口径：进入 awaiting_fix 重置 expires_at=timestamp+30m。
+		d.ExpiresAt = p.Timestamp.UTC().Add(30 * time.Minute)
+	}
+	switch p.To {
+	case store.DiagnosisDone, store.DiagnosisExpired, store.DiagnosisFailed:
+		at := p.Timestamp.UTC()
+		d.FinishedAt = &at
+	}
+	m.diagnosis[p.ID] = d
+	return d, nil
+}
+
+func (r *memDiagnosisSessions) ExpireStale(_ context.Context, now time.Time) (int64, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, d := range m.diagnosis {
+		if d.Status != store.DiagnosisAwaitingFix || d.ExpiresAt.After(now) {
+			continue
+		}
+		d.Status = store.DiagnosisExpired
+		at := now.UTC()
+		d.FinishedAt = &at
+		d.UpdatedAt = at
+		m.diagnosis[id] = d
+		n++
+	}
+	return n, nil
+}
 
 type memUsers memStore
 
@@ -126,7 +495,16 @@ func (r *memUsers) Create(_ context.Context, p store.CreateUserParams) (store.Us
 		return store.User{}, store.ErrConflict
 	}
 	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
-	u := store.User{ID: m.nextID("user"), Username: p.Username, PasswordHash: p.PasswordHash, CreatedAt: now, UpdatedAt: now}
+	role := p.Role
+	if role == "" {
+		role = store.RoleOperator
+	}
+	u := store.User{
+		ID: m.nextID("user"), Username: p.Username, PasswordHash: p.PasswordHash,
+		Role: role, Enabled: p.Enabled, DisplayName: p.DisplayName, Email: p.Email,
+		MustChangePassword: p.MustChangePassword, CreatedBy: p.CreatedBy,
+		CreatedAt: now, UpdatedAt: now,
+	}
 	m.users[p.Username] = u
 	return u, nil
 }
@@ -217,6 +595,16 @@ func (r *memSessions) Touch(_ context.Context, id string, at time.Time) error {
 		m.sessions[id] = s
 	}
 	return nil
+}
+func (r *memSessions) Get(_ context.Context, id string) (store.Session, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return store.Session{}, store.ErrNotFound
+	}
+	return s, nil
 }
 func (r *memSessions) Delete(_ context.Context, id string) error {
 	m := (*memStore)(r)
@@ -653,12 +1041,17 @@ func (r *memProviders) Delete(_ context.Context, id string) error {
 
 type memConversations memStore
 
-func (r *memConversations) ListPage(_ context.Context, cursor store.ConversationListCursor, limit int) ([]store.Conversation, bool, error) {
+func (r *memConversations) ListPage(_ context.Context, userID string, cursor store.ConversationListCursor, limit int) ([]store.Conversation, bool, error) {
 	m := (*memStore)(r)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]store.Conversation, 0, len(m.conversations))
 	for _, c := range m.conversations {
+		// 与生产 pgstore 同语义：user_id 过滤先于排序/分页（等价于 SQL 的
+		// WHERE 在 LIMIT 之前），否则他人会话会占满窗口导致翻页卡死。
+		if userID != "" && c.UserID != userID {
+			continue
+		}
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -708,7 +1101,7 @@ func (r *memConversations) Create(_ context.Context, p store.CreateConversationP
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
-	c := store.Conversation{ID: m.nextID("conv"), Title: p.Title, CreatedAt: now, UpdatedAt: now, LastMessageAt: now}
+	c := store.Conversation{ID: m.nextID("conv"), Title: p.Title, UserID: p.UserID, CreatedAt: now, UpdatedAt: now, LastMessageAt: now}
 	m.conversations[c.ID] = c
 	return c, nil
 }
@@ -775,6 +1168,11 @@ func (r *memConversations) ListReplayCatalog(_ context.Context, p store.ListRepl
 	q := strings.ToLower(p.Query)
 	out := make([]store.ReplayCatalogItem, 0, len(m.conversations))
 	for _, c := range m.conversations {
+		// 与生产 pgstore / 契约 12.3 第 3 条同语义：非 audit:read 的目录在
+		// SQL 侧强制 user_id=自己（fake 在收集阶段先过滤，等价于 WHERE）。
+		if p.UserID != "" && c.UserID != p.UserID {
+			continue
+		}
 		if q != "" && !strings.Contains(strings.ToLower(c.Title), q) {
 			continue
 		}
@@ -971,12 +1369,18 @@ func (r *memApprovals) Create(_ context.Context, p store.CreateApprovalParams) (
 		source = "chat"
 	}
 	ap := store.Approval{
-		ID: m.nextID("ap"), ConversationID: p.ConversationID, ToolCallID: p.ToolCallID,
+		ID: uuid.NewString(), ConversationID: p.ConversationID, ToolCallID: p.ToolCallID,
 		Source:   source,
 		ServerID: p.ServerID, ServerName: p.ServerName, Command: p.Command,
 		RiskLevel: p.RiskLevel, RuleID: p.RuleID, Reason: p.Reason,
 		ApprovalMode: store.ApprovalMode(p.ApprovalMode),
+		RequestedBy:  p.RequestedBy,
 		Status:       store.ApprovalPending, RequestedAt: now, ExpiresAt: now.Add(time.Hour),
+		GrantKind: p.GrantKind, GrantExpiresAt: p.GrantExpiresAt,
+		PolicyFrom: p.PolicyFrom, PolicyTo: p.PolicyTo,
+	}
+	if !p.ExpiresAt.IsZero() {
+		ap.ExpiresAt = p.ExpiresAt
 	}
 	if ap.ApprovalMode == "" {
 		ap.ApprovalMode = store.ApprovalModeStandard
@@ -988,6 +1392,9 @@ func (r *memApprovals) Get(_ context.Context, id string) (store.Approval, error)
 	m := (*memStore)(r)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.errApprovalsGet != nil {
+		return store.Approval{}, m.errApprovalsGet
+	}
 	ap, ok := m.approvals[id]
 	if !ok {
 		return store.Approval{}, store.ErrNotFound
@@ -1039,7 +1446,145 @@ func (r *memApprovals) Decide(_ context.Context, p store.DecideApprovalParams) (
 	m.approvals[p.ID] = ap
 	return ap, nil
 }
-func (r *memApprovals) Expire(_ context.Context, now time.Time) (int64, error) { return 0, nil }
+
+// Expire 与生产 pgstore 同语义：pending 且 expires_at<=now → expired，
+// 返回受影响行数（第 4 轮走查 medium 的 outbox 同事务测试需要真实计数）。
+func (r *memApprovals) Expire(_ context.Context, now time.Time) (int64, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, ap := range m.approvals {
+		if ap.Status == store.ApprovalPending && !ap.ExpiresAt.After(now) {
+			ap.Status = store.ApprovalExpired
+			m.approvals[id] = ap
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (r *memApprovals) ConsumeGrant(_ context.Context, p store.ConsumeGrantParams) (store.Approval, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	match := func(ap store.Approval) error {
+		if ap.Source != "terminal" || ap.GrantKind == nil || *ap.GrantKind != p.GrantKind {
+			return store.ErrGrantKindMismatch
+		}
+		if ap.Status != store.ApprovalApproved || ap.ConsumedAt != nil ||
+			ap.GrantExpiresAt == nil || !ap.GrantExpiresAt.After(p.Now) ||
+			ap.RequestedBy != p.UserID || ap.ServerID == nil || *ap.ServerID != p.ServerID {
+			return store.ErrGrantUnavailable
+		}
+		return nil
+	}
+	if p.ApprovalID != "" {
+		ap, ok := m.approvals[p.ApprovalID]
+		if !ok {
+			return store.Approval{}, store.ErrGrantUnavailable
+		}
+		if err := match(ap); err != nil {
+			return store.Approval{}, err
+		}
+		now := p.Now
+		ap.ConsumedAt = &now
+		m.approvals[ap.ID] = ap
+		return ap, nil
+	}
+	// 空 id：消费最新一条符合条件（与 postgres ORDER BY decided_at DESC 同义）。
+	var best *store.Approval
+	for _, ap := range m.approvals {
+		if match(ap) != nil {
+			continue
+		}
+		if best == nil || (ap.DecidedAt != nil && (best.DecidedAt == nil || ap.DecidedAt.After(*best.DecidedAt))) {
+			copied := ap
+			best = &copied
+		}
+	}
+	if best == nil {
+		return store.Approval{}, store.ErrGrantUnavailable
+	}
+	now := p.Now
+	best.ConsumedAt = &now
+	m.approvals[best.ID] = *best
+	return *best, nil
+}
+
+// ReleaseGrant 与生产 pgstore 同语义：仅回滚本次消费（consumed_at 精确
+// 匹配）且 requested_by=调用者，否则 ErrGrantUnavailable。
+func (r *memApprovals) ReleaseGrant(_ context.Context, p store.ReleaseGrantParams) (store.Approval, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ap, ok := m.approvals[p.ApprovalID]
+	if !ok || ap.Status != store.ApprovalApproved || ap.ConsumedAt == nil ||
+		!ap.ConsumedAt.Equal(p.ConsumedAt) || ap.RequestedBy != p.UserID {
+		return store.Approval{}, store.ErrGrantUnavailable
+	}
+	ap.ConsumedAt = nil
+	m.approvals[ap.ID] = ap
+	return ap, nil
+}
+
+func (r *memApprovals) ExpirePendingGrantsByUser(_ context.Context, userID string, now time.Time) ([]store.Approval, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	expired := make([]store.Approval, 0, len(m.approvals))
+	for id, ap := range m.approvals {
+		if ap.Source == "terminal" && ap.Status == store.ApprovalPending && ap.RequestedBy == userID {
+			ap.Status = store.ApprovalExpired
+			ap.Note = "rbac:user_revoked"
+			at := now
+			ap.DecidedAt = &at
+			m.approvals[id] = ap
+			expired = append(expired, ap)
+		}
+	}
+	return expired, nil
+}
+
+// ListAvailableGrants 与生产 pgstore 同语义：只返回本人 approved、未消费、
+// 未过期（grant_expires_at > now）的 terminal grant，按最先到期排序。
+func (r *memApprovals) ListAvailableGrants(_ context.Context, p store.ListAvailableGrantsParams) ([]store.Approval, error) {
+	if p.UserID == "" {
+		return nil, store.ErrInvalid
+	}
+	if p.GrantKind != "" && p.GrantKind != "term" && p.GrantKind != "rdp" {
+		return nil, store.ErrInvalid
+	}
+	limit := p.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		return nil, store.ErrInvalid
+	}
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]store.Approval, 0, len(m.approvals))
+	for _, ap := range m.approvals {
+		if ap.Source != "terminal" || ap.Status != store.ApprovalApproved ||
+			ap.ConsumedAt != nil || ap.GrantExpiresAt == nil ||
+			!ap.GrantExpiresAt.After(p.Now) || ap.RequestedBy != p.UserID {
+			continue
+		}
+		if p.GrantKind != "" && (ap.GrantKind == nil || *ap.GrantKind != p.GrantKind) {
+			continue
+		}
+		out = append(out, ap)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].GrantExpiresAt.Before(*out[j].GrantExpiresAt)
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
 
 type memAudit memStore
 
@@ -1047,11 +1592,15 @@ func (r *memAudit) Append(_ context.Context, p store.CreateAuditParams) error {
 	m := (*memStore)(r)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	createdAt := p.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
 	m.auditLogs = append(m.auditLogs, store.AuditLog{
-		ID: int64(len(m.auditLogs) + 1), CreatedAt: time.Now(), ActorType: p.ActorType,
+		ID: int64(len(m.auditLogs) + 1), CreatedAt: createdAt, ActorType: p.ActorType,
 		ActorID: p.ActorID, Action: p.Action, ResourceType: p.ResourceType,
 		ResourceID: p.ResourceID, RequestID: p.RequestID, ConversationID: p.ConversationID,
-		ServerID: p.ServerID, IP: p.IP, Detail: p.Detail,
+		ServerID: p.ServerID, IP: p.IP, Detail: p.Detail, PrevHash: p.PrevHash, Hash: p.Hash,
 	})
 	return nil
 }
@@ -1084,7 +1633,15 @@ func (r *memAudit) List(_ context.Context, f store.AuditFilter) ([]store.AuditLo
 	}
 	return out, false, nil
 }
-func (r *memAudit) LastHash(context.Context) (string, error) { return "", nil }
+func (r *memAudit) LastHash(context.Context) (string, error) {
+	m := (*memStore)(r)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.auditLogs) == 0 {
+		return audit.ZeroHash, nil
+	}
+	return m.auditLogs[len(m.auditLogs)-1].Hash, nil
+}
 
 // ---------------------------------------------------------------------------
 // 假 SSH / dbproxy 执行器
@@ -1191,20 +1748,69 @@ func getAdminHash() string {
 }
 
 type testEnv struct {
-	t         *testing.T
-	st        *memStore
-	cipher    *cryptox.Cipher
-	sshExec   *fakeSSHExec
-	netExec   *fakeNetCLI
-	dbExec    *fakeDBExec
-	llmReg    *llm.Registry
-	auditW    *audit.Writer
-	authSvc   *auth.Service
-	apprSvc   *approvals.Service
-	streams   *agent.StreamGuard
-	router    *gin.Engine
-	cookie    string
-	llmClient atomicLLMClient
+	t       *testing.T
+	st      *memStore
+	cipher  *cryptox.Cipher
+	sshExec *fakeSSHExec
+	netExec *fakeNetCLI
+	dbExec  *fakeDBExec
+	llmReg  *llm.Registry
+	auditW  *audit.Writer
+	authSvc *auth.Service
+	apprSvc *approvals.Service
+	streams *agent.StreamGuard
+	router  *gin.Engine
+	cookie  string
+	// reviewerCookie 是 approver 角色的独立会话：审批职责分离下，
+	// admin 发起的审批不能由 admin 自己批准。懒创建，避免污染用户列表用例。
+	reviewerCookie string
+	llmClient      atomicLLMClient
+}
+
+// seedSecondAdmin 预置第二个启用管理员：默认测试环境代表「非降级部署」
+// （契约 12.3 第 11 条：仅一个启用管理员时不得审批/开终端/放宽 policy）。
+// 单管理员降级模式的用例显式停用它。
+func seedSecondAdmin(st *memStore) {
+	st.users[testSecondAdminUsername] = store.User{
+		ID: testSecondAdminID, Username: testSecondAdminUsername, PasswordHash: getAdminHash(),
+		Role: store.RoleAdmin, Enabled: true,
+		CreatedAt: time.Date(2026, 10, 24, 11, 0, 0, 0, time.UTC),
+	}
+}
+
+// RBAC 测试身份。
+const (
+	testSecondAdminUsername = "admin-second"
+	testSecondAdminID       = "user-second-admin"
+	testReviewerUsername    = "reviewer"
+	testRequesterID         = "requester-1"
+	testRequesterUsername   = "requester"
+)
+
+// ensureRequester 插入固定 ID 的发起人（历史用例以 "requester-1" 造审批）。
+func (e *testEnv) ensureRequester(t *testing.T) {
+	t.Helper()
+	e.st.mu.Lock()
+	defer e.st.mu.Unlock()
+	if _, ok := e.st.users[testRequesterUsername]; ok {
+		return
+	}
+	e.st.users[testRequesterUsername] = store.User{
+		ID: testRequesterID, Username: testRequesterUsername, PasswordHash: getAdminHash(),
+		Role: store.RoleOperator, Enabled: true,
+		CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+// approverCookie 返回 approver 角色的会话（懒创建：先加用户再登录）。
+func (e *testEnv) approverCookie(t *testing.T) string {
+	t.Helper()
+	if e.reviewerCookie != "" {
+		return e.reviewerCookie
+	}
+	addTestUser(t, e, testReviewerUsername, testPassword, store.RoleApprover, true)
+	e.reviewerCookie = loginAs(t, e, testReviewerUsername, testPassword)
+	return e.reviewerCookie
 }
 
 // atomicLLMClient 允许在装配后替换注入 agent 的假客户端。
@@ -1239,8 +1845,10 @@ func newTestEnv(t *testing.T) *testEnv {
 	st := newMemStore()
 	st.users["admin"] = store.User{
 		ID: "user-1", Username: "admin", PasswordHash: getAdminHash(),
+		Role: store.RoleAdmin, Enabled: true,
 		CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
 	}
+	seedSecondAdmin(st)
 
 	cipher, err := cryptox.New([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
@@ -1319,7 +1927,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 func (e *testEnv) login() string {
 	e.t.Helper()
-	body := fmt.Sprintf(`{"password":%q}`, testPassword)
+	body := fmt.Sprintf(`{"username":"admin","password":%q}`, testPassword)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", testOrigin)
@@ -1339,6 +1947,12 @@ func (e *testEnv) login() string {
 // do 发起带会话与 Origin 的请求。
 func (e *testEnv) do(method, path, body string) *httptest.ResponseRecorder {
 	e.t.Helper()
+	return e.doAs(e.cookie, method, path, body)
+}
+
+// doAs 以指定会话发起请求（审批人用 reviewerCookie）。
+func (e *testEnv) doAs(cookie, method, path, body string) *httptest.ResponseRecorder {
+	e.t.Helper()
 	var reader io.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
@@ -1348,11 +1962,38 @@ func (e *testEnv) do(method, path, body string) *httptest.ResponseRecorder {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Origin", testOrigin)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: e.cookie})
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookie})
 	rec := httptest.NewRecorder()
 	e.router.ServeHTTP(rec, req)
 	return rec
 }
+
+// withTestAdminIdentity 在只测 handler 的中间件链里注入已认证 admin 身份。
+//
+// RBAC（00012）后，Register*Routes 注册的端点都带 d.guard 权限中间件；
+// 这些单元测试直接挂 handler，不经过 NewRouter 的 requireAuth，因此必须
+// 显式提供 user/user_id 上下文，否则守卫按未认证返回 401。这不是放宽
+// 生产鉴权：真实路由仍由 requireAuth 从会话注入身份。
+func withTestAdminIdentity() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user := store.User{
+			ID: "user-1", Username: "admin", Role: store.RoleAdmin, Enabled: true,
+		}
+		// 职责分离：审批决定必须由另一用户发起；单元测试用请求头切换
+		// 身份（真实路由仍是 requireAuth 从会话注入，不受影响）。
+		if c.GetHeader(testIdentityHeader) == string(store.RoleApprover) {
+			user = store.User{
+				ID: "user-2", Username: "reviewer", Role: store.RoleApprover, Enabled: true,
+			}
+		}
+		c.Set("user", user)
+		c.Set("user_id", user.ID)
+		c.Next()
+	}
+}
+
+// testIdentityHeader 仅在 handler 单元测试的假中间件里使用。
+const testIdentityHeader = "X-Test-Identity"
 
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
 	t.Helper()

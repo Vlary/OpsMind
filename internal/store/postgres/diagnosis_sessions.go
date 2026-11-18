@@ -16,7 +16,7 @@ type diagnosisSessionStore struct{ q querier }
 
 const diagnosisSessionColumns = `d.id, d.alert_event_id, d.server_id, coalesce(s.name, ''),
 	d.conversation_id, d.trigger, d.status, d.report, d.error_code, d.started_at,
-	d.finished_at, d.expires_at, d.created_at, d.updated_at`
+	d.finished_at, d.expires_at, d.created_at, d.updated_at, d.created_by::text`
 
 const diagnosisSessionFrom = `
 	FROM diagnosis_sessions d
@@ -24,12 +24,14 @@ const diagnosisSessionFrom = `
 
 func scanDiagnosisSession(row interface{ Scan(dest ...any) error }) (store.DiagnosisSession, error) {
 	var d store.DiagnosisSession
+	var createdBy *string
 	err := row.Scan(&d.ID, &d.AlertEventID, &d.ServerID, &d.ServerName,
 		&d.ConversationID, &d.Trigger, &d.Status, &d.Report, &d.ErrorCode,
-		&d.StartedAt, &d.FinishedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt)
+		&d.StartedAt, &d.FinishedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt, &createdBy)
 	if err != nil {
 		return store.DiagnosisSession{}, mapError(err)
 	}
+	d.CreatedBy = createdBy
 	d.ExpiresAt = utc(d.ExpiresAt)
 	d.CreatedAt = utc(d.CreatedAt)
 	d.UpdatedAt = utc(d.UpdatedAt)
@@ -37,24 +39,27 @@ func scanDiagnosisSession(row interface{ Scan(dest ...any) error }) (store.Diagn
 }
 
 // Create 插入 pending 会话（契约 4.21：expires_at 由建者给定）。ServerName
-// 经子查询装配（与 JOIN 读取路径同形）。
+// 经子查询装配（与 JOIN 读取路径同形）。CreatedBy=nil 表示系统自动诊断。
 func (s diagnosisSessionStore) Create(ctx context.Context, p store.CreateDiagnosisParams) (store.DiagnosisSession, error) {
 	var d store.DiagnosisSession
+	var createdBy *string
 	err := s.q.QueryRow(ctx, `
 		INSERT INTO diagnosis_sessions (alert_event_id, server_id, conversation_id,
-			trigger, status, expires_at)
-		VALUES ($1, $2::uuid, $3::uuid, $4, 'pending', $5)
+			trigger, status, expires_at, created_by)
+		VALUES ($1, $2::uuid, $3::uuid, $4, 'pending', $5, $6::uuid)
 		RETURNING id, alert_event_id, server_id,
 			(SELECT name FROM servers WHERE id = $2::uuid), conversation_id,
 			trigger, status, report, error_code, started_at, finished_at,
-			expires_at, created_at, updated_at`,
-		p.AlertEventID, p.ServerID, ptrOrNil(p.ConversationID), string(p.Trigger), utc(p.ExpiresAt)).
+			expires_at, created_at, updated_at, created_by::text`,
+		p.AlertEventID, p.ServerID, ptrOrNil(p.ConversationID), string(p.Trigger), utc(p.ExpiresAt),
+		ptrOrNil(p.CreatedBy)).
 		Scan(&d.ID, &d.AlertEventID, &d.ServerID, &d.ServerName, &d.ConversationID,
 			&d.Trigger, &d.Status, &d.Report, &d.ErrorCode,
-			&d.StartedAt, &d.FinishedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt)
+			&d.StartedAt, &d.FinishedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt, &createdBy)
 	if err != nil {
 		return store.DiagnosisSession{}, mapError(err)
 	}
+	d.CreatedBy = createdBy
 	d.ExpiresAt = utc(d.ExpiresAt)
 	d.CreatedAt = utc(d.CreatedAt)
 	d.UpdatedAt = utc(d.UpdatedAt)
@@ -66,14 +71,19 @@ func (s diagnosisSessionStore) Get(ctx context.Context, id string) (store.Diagno
 		`SELECT `+diagnosisSessionColumns+diagnosisSessionFrom+` WHERE d.id = $1::uuid`, id))
 }
 
-// List 按 created_at DESC 分页；status/serverID 为空表示不过滤。
-func (s diagnosisSessionStore) List(ctx context.Context, status store.DiagnosisStatus, serverID string, limit int) ([]store.DiagnosisSession, error) {
+// List 按 created_at DESC 分页；status/serverID/createdBy 为空表示不过滤。
+// createdBy 非空时在 SQL 层限定 d.created_by = 该用户（第 11 轮走查
+// medium）：不能先取全量再在 Go 侧过滤——他人较新的会话会占满 limit，
+// 导致非 admin 自己的会话被挤出列表。created_by IS NULL 的 system 行
+// （监控自动诊断）不满足等值条件，非 admin 自然看不到（契约 12.3 第 16
+// 条：NULL=system 仅 admin）。
+func (s diagnosisSessionStore) List(ctx context.Context, status store.DiagnosisStatus, serverID, createdBy string, limit int) ([]store.DiagnosisSession, error) {
 	n, err := pageLimit(limit)
 	if err != nil {
 		return nil, err
 	}
 	where := "TRUE"
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 4)
 	if status != "" {
 		args = append(args, string(status))
 		where = "d.status = $1"
@@ -81,6 +91,10 @@ func (s diagnosisSessionStore) List(ctx context.Context, status store.DiagnosisS
 	if serverID != "" {
 		args = append(args, serverID)
 		where += " AND d.server_id = $" + strconv.Itoa(len(args)) + "::uuid"
+	}
+	if createdBy != "" {
+		args = append(args, createdBy)
+		where += " AND d.created_by = $" + strconv.Itoa(len(args)) + "::uuid"
 	}
 	args = append(args, n)
 	rows, err := s.q.Query(ctx, `SELECT `+diagnosisSessionColumns+diagnosisSessionFrom+

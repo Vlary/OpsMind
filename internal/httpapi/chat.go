@@ -16,6 +16,7 @@ import (
 	"aiops/internal/agent"
 	"aiops/internal/apierr"
 	"aiops/internal/audit"
+	"aiops/internal/authz"
 )
 
 // chatRequest 对应 OpenAPI ChatRequest。
@@ -28,6 +29,9 @@ type chatRequest struct {
 
 // handleChat 处理 POST /api/chat。
 func (d *Deps) handleChat(c *gin.Context) {
+	if !d.requireChatPermission(c) {
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	var req chatRequest
 	if !decodeJSONBody(c, &req) {
@@ -71,6 +75,10 @@ func (d *Deps) streamChat(c *gin.Context, conversationID, providerID, model, con
 		writeError(c, "AUTH_REQUIRED", "authentication required")
 		return
 	}
+	// 会话私有：非 owner 一律 404（与 GET/DELETE 同一语义，不泄露存在性）。
+	if _, ok := d.ownedConversation(c, conversationID); !ok {
+		return
+	}
 	requestID := c.GetString("request_id")
 	requestCtx := c.Request.Context()
 
@@ -99,7 +107,9 @@ func (d *Deps) streamChat(c *gin.Context, conversationID, providerID, model, con
 	// （WithoutCancel+5s 路径）失败。取消后 Runner 走既有的 abort 落库路径。
 	ctx, cancel := context.WithCancel(c.Request.Context())
 	defer cancel()
-	d.Streams.Watch(conversationID, cancel)
+	// 记录发起人身份：logout 按 auth session、停用/降级/吊销按用户取消流
+	//（契约 12.4 第 5 条：logout 按 auth session 关闭 WS/SSE）。
+	d.Streams.WatchOwned(conversationID, userID, c.GetString("auth_session_id"), cancel)
 
 	d.enqueueAudit(ctx, c, "chat.started", "conversation", conversationID, &conversationID, nil, map[string]any{
 		"provider_id": providerID, "model": model,
@@ -116,8 +126,11 @@ func (d *Deps) streamChat(c *gin.Context, conversationID, providerID, model, con
 	writer := newSSEWriter(c.Writer)
 	defer writer.Close()
 
+	user, _ := userFromContext(c)
 	runErr := d.Agent.Run(ctx, agent.RunInput{
 		UserID:         userID,
+		Role:           user.Role,
+		Permissions:    authz.PermissionsOf(user.Role),
 		ConversationID: conversationID,
 		ProviderID:     providerID,
 		Model:          model,

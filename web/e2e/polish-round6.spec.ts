@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 import { AUTH_STATE_FILE, SCENARIO_RISKY, sendMessage } from './helpers';
 
@@ -62,12 +62,13 @@ test.describe('第 6 轮打磨：连接测试失败透出真实原因', () => {
 test.describe('第 6 轮打磨：登录失败提示全中文', () => {
   test('错误密码登录：提示不再混入 invalid credentials 英文', async ({ page }) => {
     await page.goto('/login');
-    await page.getByPlaceholder('请输入管理员密码').fill('definitely-wrong-round6');
+    await page.getByPlaceholder('请输入用户名').fill('admin');
+    await page.getByPlaceholder('请输入密码').fill('definitely-wrong-round6');
     await page.getByRole('button', { name: /登\s*录/ }).click();
 
-    const alert = page.locator('.ant-alert-error').filter({ hasText: '管理员密码错误' });
+    const alert = page.locator('.ant-alert-error').filter({ hasText: '用户名或密码错误' });
     await expect(alert).toBeVisible({ timeout: 20_000 });
-    // 修复前：标题是「管理员密码错误（invalid credentials）」。
+    // 修复前：标题混入后端英文原因（invalid credentials）。
     await expect(alert).not.toContainText('invalid credentials');
   });
 });

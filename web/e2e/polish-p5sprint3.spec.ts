@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, installApproverIdentity, test } from './fixtures';
 
 import {
   AUTH_STATE_FILE,
@@ -46,6 +46,8 @@ test('__scenario_diagnosis__：首点批准链路——fix 直返审批、decide
   const popupPromise = page.waitForEvent('popup', { timeout: 20_000 });
   await deepLink.click();
   const popup = await popupPromise;
+  // popup 由 page 深链打开；显式安装审批人身份，避免与 context 'page' 事件竞态。
+  await installApproverIdentity(popup);
   await expect(popup).toHaveURL(/\/alerts\?diagnosis=[0-9a-f-]{36}/, { timeout: 20_000 });
 
   // 收集页面未捕获异常（void mutateAsync 未 catch → unhandledrejection）。

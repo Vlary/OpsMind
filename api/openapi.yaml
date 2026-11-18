@@ -3,9 +3,11 @@ info:
   title: 云枢 OpsMind API
   version: 1.0.0
   description: |
-    云枢 OpsMind 单管理员 AI 运维控制台 API。
+    云枢 OpsMind 多用户 RBAC AI 运维控制台 API。
 
-    - 除 `POST /api/auth/login` 与 `GET /healthz` 外，所有端点要求 `opsmind_session` Cookie。
+    - 除 `POST /api/auth/login`、`POST /api/auth/invite/accept` 与 `GET /healthz` 外，所有端点要求 `opsmind_session` Cookie。
+    - 角色固定为 `admin` / `operator` / `approver` / `auditor`，每用户恰一个角色；权限串与矩阵见 `docs/CONTRACT.md` 第 12 节。
+    - 需要权限的端点返回 `403 FORBIDDEN`；职责分离冲突返回 `403 APPROVAL_SELF_DECISION`；停用自己/改自己角色返回 `409 SELF_OPERATION`。
     - 所有非 GET/HEAD 的 `/api/*` 请求必须携带与允许列表精确匹配的 `Origin` 头；缺失或不匹配返回 `403 ORIGIN_FORBIDDEN`。
     - 成功响应为 JSON；失败统一为 `{"error":{"code","message","request_id","details"?}}`。
     - `/api/chat` 成功时返回 `text/event-stream`，不使用压缩，事件格式见 `x-sse-events` 与 `docs/CONTRACT.md` 第 6 节。
@@ -21,7 +23,9 @@ security:
   - cookieAuth: []
 tags:
   - name: auth
-    description: 登录、登出、当前用户
+    description: 登录、登出、当前用户、邀请接受
+  - name: users
+    description: 多用户管理（00012；角色/启停/重置令牌/吊销会话）
   - name: servers
     description: SSH 服务器资产
   - name: databases
@@ -85,8 +89,8 @@ paths:
     post:
       tags: [auth]
       operationId: login
-      summary: 管理员登录
-      description: 密码校验成功后设置 `opsmind_session` Cookie。按 IP 限流（5 次/分钟）。必须携带 Origin。
+      summary: 用户登录
+      description: 用户名 + 密码校验成功后设置 `opsmind_session` Cookie。未知用户名、停用用户与错误密码统一返回 401 AUTH_INVALID。按 IP 限流（5 次/分钟）。必须携带 Origin。
       security: []
       parameters:
         - $ref: '#/components/parameters/Origin'
@@ -148,16 +152,19 @@ paths:
     get:
       tags: [auth]
       operationId: getMe
-      summary: 当前登录用户
+      summary: 当前登录用户、角色与权限
+      description: 返回当前用户（含 role/enabled/display_name/email/invite_pending）与服务端计算的 permissions 数组。客户端不得提交或覆盖 role/permissions。
       responses:
         '200':
-          description: 当前用户
+          description: 当前用户与权限
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MeResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -165,7 +172,7 @@ paths:
     post:
       tags: [auth]
       operationId: changePassword
-      summary: 修改管理员密码
+      summary: 修改当前用户密码
       description: |
         校验 `old_password` 后将密码更新为 `new_password`，写审计
         `auth.password_changed`；成功后吊销该用户全部会话（含当前会话），
@@ -194,6 +201,217 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/auth/invite/accept:
+    post:
+      tags: [auth]
+      operationId: acceptInvite
+      summary: 接受邀请并设置密码
+      description: |
+        公开端点：使用一次性 invite/reset token 设置新密码。token 只存 SHA-256、30 分钟有效、单次使用；
+        invite 接受后启用已存在的停用用户行（enabled=true），reset 接受后重置已存在用户的密码。创建者 IP 兑换返回 403 SELF_REDEEM_FORBIDDEN。
+        必须携带 Origin；按 IP 限流。
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteAcceptRequest'
+      responses:
+        '204':
+          description: 密码已设置；不创建会话，客户端应跳转登录
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Origin 不允许，或创建者 IP 尝试兑换（SELF_REDEEM_FORBIDDEN）
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: 用户列表
+      description: 需要权限 `user:read`。不返回密码哈希或 token。
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: 用户列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [users]
+      operationId: createUser
+      summary: 创建用户并发送邀请（同名未激活账号重发邀请）
+      description: |
+        需要权限 `user:write`。请求不含密码；服务端生成一次性 invite token，
+        经 SMTP/IM 通知通道直达目标 email，**不在响应中返回 token**。新用户行 enabled=false，
+        invite_pending=true；目标接受邀请后 enabled=true。无可用投递通道返回 503 DELIVERY_UNAVAILABLE。
+        同名账号若尚未启用且仍持有未使用的 invite token（含已过期），视为「重发邀请」：
+        作废旧链接、重新签发并投递，返回同一用户行（201），不重复建行；已启用账号返回 409。
+        必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreate'
+      responses:
+        '201':
+          description: 已创建或已重发邀请（待邀请接受）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/users/{id}:
+    get:
+      tags: [users]
+      operationId: getUser
+      summary: 用户详情
+      description: 需要权限 `user:read`。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+      responses:
+        '200':
+          description: 用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [users]
+      operationId: updateUser
+      summary: 修改角色/启停/展示名
+      description: |
+        需要权限 `user:write`。`role`/`enabled`/`display_name` 至少一项。
+        不能停用自己或修改自己的 role；不能停用/降级最后一个 enabled admin（409 LAST_ADMIN）。
+        改 role 或 enabled 会在同一事务吊销目标全部 auth session、关闭 live 终端/RDP、取消 pending 审批。
+        停用（enabled=false）是唯一删除语义，不提供物理 DELETE。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+      responses:
+        '200':
+          description: 更新后的用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/users/{id}/password:
+    post:
+      tags: [users]
+      operationId: resetUserPassword
+      summary: 签发一次性密码重置令牌
+      description: |
+        需要权限 `user:credential_reset`。不接收新密码、不在响应中返回 token；
+        服务端生成 reset token 并经 SMTP/IM 通道投递到目标 email。签发即吊销该用户全部
+        auth session、关闭 live 终端/RDP。不能重置自己（409 SELF_OPERATION）。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '202':
+          description: 已签发并投递
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialResetResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/users/{id}/revoke-sessions:
+    post:
+      tags: [users]
+      operationId: revokeUserSessions
+      summary: 吊销用户全部会话
+      description: 需要权限 `user:write`。删除目标全部 auth session、关闭 live 终端/RDP、取消 pending 审批。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/IdPath'
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: 已吊销
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1126,7 +1344,7 @@ paths:
         承载动作串（UI 标注为「动作」）。新增第三道截断：`arguments` 装载
         总量超 6 MiB 或响应序列化超 8 MiB 时 `truncated_reason='payload'`
         （优先级 steps > payload > approvals，只报最高者）。
-        权限与 GET /api/conversations/{id}/messages 相同（登录态；v1 单管理员）。
+        权限与 GET /api/conversations/{id}/messages 相同（登录态；owner 或 audit:read 只读；其他用户 404）。
       responses:
         '200':
           description: 有序回放步骤
@@ -1157,7 +1375,7 @@ paths:
         `has_actions=true` 只返回至少有一个动作类工具调用（12 工具，契约 7.8）
         的会话。`truncated` 为该行步数上限预判（`tool_count + approval_count
         > 20000`），不预判 payload 预算。
-        权限同 GET /api/conversations（登录态；v1 单管理员）。
+        权限同 GET /api/conversations（登录态；非 audit:read 按 user_id 过滤，audit:read 全量只读）。
       parameters:
         - name: q
           in: query
@@ -1356,19 +1574,50 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/approvals/{id}/context:
+    parameters:
+      - $ref: '#/components/parameters/IdPath'
+    get:
+      tags: [approvals]
+      operationId: getApprovalContext
+      summary: 有界审批上下文
+      description: |
+        需要权限 `approval:read`。返回审批对象、对应 tool_call、资产元数据与
+        审批前最多 20 条消息；不返回审批后的新消息，不授予 /conversations/{id}/replay。
+        跨用户读取写 approval.context_viewed 审计。
+      responses:
+        '200':
+          description: 有界上下文
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalContext'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/approvals/{id}/decide:
     parameters:
       - $ref: '#/components/parameters/IdPath'
     post:
       tags: [approvals]
       operationId: decideApproval
-      summary: 批准或拒绝审批（六期支持批准时改写命令）
+      summary: 批准或拒绝审批/策略变更
       description: |
-        只有 `pending` 可决策。批准后命令才会执行；拒绝或超时不执行。必须携带 Origin。
-        六期起请求体可带 `edited_command`（仅 decision=approve 时合法；1..2000 字符、
-        禁止 NUL）：服务端按审批目标重新 risk.Classify——改写后 forbidden 返回
-        403 COMMAND_FORBIDDEN 且审批保持 pending；否则落库 edited_* 并执行改写后
-        命令（契约 2.11 约定 3）。改写不改变「已批准」语义。
+        只有 `pending` 可决策；需要权限 `approval:decide`。请求体只允许 `decision` 与
+        `note`，不得携带 edited_command 或任何目标字段（bindJSONStrict 未知字段 400）。
+        `requested_by == decided_by` 返回 403 APPROVAL_SELF_DECISION 且保持 pending；
+        legacy pending 且 edited_command<>'' 返回 409 APPROVAL_LEGACY_EDIT。
+        source=policy 只按创建时持久化的 policy_from/policy_to 生效，decide 不能改目标；
+        source=terminal 只落状态（session 创建时按 grant_kind 消费）；命令执行使用
+        approval.command，永不读取 edited_command。`:id` 必须是 UUID，非 UUID 返回
+        400 VALIDATION_FAILED（与 GET /api/approvals/{id} 一致，不得映射为 503/500）。
+        必须携带 Origin。
       parameters:
         - $ref: '#/components/parameters/Origin'
       requestBody:
@@ -1379,7 +1628,7 @@ paths:
               $ref: '#/components/schemas/ApprovalDecision'
       responses:
         '200':
-          description: 决策后的审批；source=console/batch 且批准时携带同步执行结果 execution（chat 审批恒 null）。批准且携带 edited_command 时执行的是改写后命令，approval.edited_* 非空。
+          description: 决策后的审批；source=console/batch 且批准时携带同步执行结果 execution（chat 审批恒 null）。
           content:
             application/json:
               schema:
@@ -1389,7 +1638,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          description: Origin 不允许；或改写命令被风险规则禁止（COMMAND_FORBIDDEN，审批保持 pending）
+          description: Origin 不允许；或缺少权限（FORBIDDEN）；或发起者自审（APPROVAL_SELF_DECISION）
           content:
             application/json:
               schema:
@@ -1397,7 +1646,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: 审批已决策或已过期
+          description: 审批已决策/已过期；或 legacy edited（APPROVAL_LEGACY_EDIT）；或 policy 目标过期（POLICY_STALE）
           content:
             application/json:
               schema:
@@ -1452,6 +1701,50 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/audit/verify:
+    get:
+      tags: [audit]
+      operationId: verifyAuditChain
+      summary: 校验审计哈希链
+      description: |
+        需要权限 `audit:read`。重算指定区间（缺省最近 200 条）的 prev_hash/hash，
+        并与外部 anchor 比对。链完整返回 ok=true；篡改返回 409 AUDIT_CHAIN_BROKEN，
+        其 `error.details` 带 broken_at / checked / head_id / head_hash / legacy。
+        00014 迁移前的存量行按 legacy 规则只校验链接、不做哈希复算，计入 `legacy`；
+        新行必须完整复算。读取本身写 audit.verify 审计。
+      parameters:
+        - name: from_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: to_id
+          in: query
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: 校验结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditVerifyResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: 哈希链断裂（AUDIT_CHAIN_BROKEN）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -2492,17 +2785,88 @@ paths:
               $ref: '#/components/schemas/SettingsUpdate'
       responses:
         '200':
-          description: 更新后的设置
+          description: 更新后的设置（收紧/同档直接生效）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SettingsResponse'
+        '202':
+          description: |
+            放宽门限已创建 source=policy 审批，等待第二位审批者批准；settings 未变更。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [approval_mode, pending_approval]
+                properties:
+                  approval_mode:
+                    $ref: '#/components/schemas/ApprovalMode'
+                  pending_approval:
+                    $ref: '#/components/schemas/Approval'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/OriginForbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/term/grants:
+    get:
+      tags: [terminal]
+      operationId: listTerminalGrants
+      summary: 本人可用的 JIT 终端授权（00012 第 2 轮走查）
+      description: |
+        返回当前用户 `approved` 且未消费、未过期的 `source=terminal` 授权
+        （`grant_kind=term`），按 `grant_expires_at` 升序（最先到期在前）。
+        只按 `requested_by=当前用户` 过滤——他人授权即便有 `audit:read` 也不
+        可见（授权是个人凭据）。发起人据此在终端页提示「你有 N 条已批准授权」
+        并直接打开终端（会话创建时按 `grant_id` 单次消费）。
+      responses:
+        '200':
+          description: 可用授权列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalGrantList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [terminal]
+      operationId: createTerminalGrant
+      summary: 申请 JIT 终端授权（00012）
+      description: |
+        创建 source=terminal/grant_kind=term 审批（grant 有效期 30 分钟），
+        由另一位有审批权限的用户经 POST /api/approvals/{id}/decide 批准；
+        创建会话时携带 grant_id 单次消费。必须携带 Origin。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminalGrantCreate'
+      responses:
+        '202':
+          description: 已创建待批准 grant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalGrantCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -2682,6 +3046,56 @@ paths:
           $ref: '#/components/responses/NotFound'
         '502':
           $ref: '#/components/responses/BadGateway'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/rdp/grants:
+    get:
+      tags: [terminal]
+      operationId: listRdpGrants
+      summary: 本人可用的 JIT RDP 授权（00012 第 2 轮走查）
+      description: 同终端；`grant_kind=rdp`。
+      responses:
+        '200':
+          description: 可用授权列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalGrantList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [terminal]
+      operationId: createRdpGrant
+      summary: 申请 JIT RDP 授权（00012）
+      description: 同终端 grant；grant_kind=rdp，批准后由创建 RDP 会话单次消费。
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminalGrantCreate'
+      responses:
+        '202':
+          description: 已创建待批准 grant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TerminalGrantCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -2922,6 +3336,15 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: 已登录但缺少所需权限（403 FORBIDDEN），或职责分离/自我操作等授权拒绝
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/XRequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     NotFound:
       description: 资源不存在
       headers:
@@ -3048,6 +3471,21 @@ components:
         - APPROVAL_DENIED
         - APPROVAL_TIMEOUT
         - APPROVAL_CANCELLED
+        - APPROVAL_SELF_DECISION
+        - APPROVAL_LEGACY_EDIT
+        - APPROVAL_MODE_WIDENING_FORBIDDEN
+        - POLICY_STALE
+        - NO_SECOND_APPROVER
+        - LAST_ADMIN
+        - SELF_OPERATION
+        - FORBIDDEN
+        - PASSWORD_CHANGE_REQUIRED
+        - SELF_REDEEM_FORBIDDEN
+        - DELIVERY_UNAVAILABLE
+        - TERMINAL_APPROVAL_REQUIRED
+        - TERMINAL_GRANT_KIND_MISMATCH
+        - AUDIT_CHAIN_BROKEN
+        - TOOL_FORBIDDEN
         - TOOL_NOT_FOUND
         - TOOL_ARGS_INVALID
         - AGENT_MAX_ITERATIONS
@@ -3159,27 +3597,148 @@ components:
       type: string
       enum: [started, awaiting_approval, succeeded, failed, denied, expired, awaiting_user]
 
+    Role:
+      type: string
+      description: 固定角色；每用户恰一个。
+      enum: [admin, operator, approver, auditor]
+    Permission:
+      type: string
+      description: 权限串（resource:action）；完整矩阵见 docs/CONTRACT.md 12.2。
+      enum:
+        - chat:use
+        - asset:read
+        - asset:write
+        - asset:test
+        - exec:read
+        - exec:write
+        - monitor:read
+        - monitor:manage
+        - inspection:manage
+        - terminal:use
+        - approval:read
+        - approval:decide
+        - approval:policy
+        - audit:read
+        - provider:manage
+        - user:read
+        - user:write
+        - user:credential_reset
+        - debug:read
     User:
       type: object
-      required: [id, username, created_at, updated_at]
+      required: [id, username, role, enabled, display_name, email, invite_pending, must_change_password, created_at, updated_at]
       properties:
         id:
           type: string
           format: uuid
         username:
           type: string
-          const: admin
+          pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'
+        role:
+          $ref: '#/components/schemas/Role'
+        enabled:
+          type: boolean
+          description: false=停用；登录与存量会话一律失效。
+        display_name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          description: 邀请/重置 token 的独立投递地址；可为空串（历史 admin）。
+        invite_pending:
+          type: boolean
+          description: 派生字段：是否存在未使用的 invite token（含已过期）；不落列。为 true 时只能重发邀请，不能启用或重置密码。
+        must_change_password:
+          type: boolean
+          description: 离线 admin reset 后为 true；为 true 时除 me/logout/change-password 外全部 403 PASSWORD_CHANGE_REQUIRED。
+        created_by:
+          type: string
+          format: uuid
+          nullable: true
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
-    LoginRequest:
+    UserCreate:
       type: object
-      required: [password]
+      required: [username, email, role]
       additionalProperties: false
       properties:
+        username:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'
+        email:
+          type: string
+          format: email
+        role:
+          $ref: '#/components/schemas/Role'
+        display_name:
+          type: string
+          maxLength: 100
+    UserUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+        enabled:
+          type: boolean
+        display_name:
+          type: string
+          maxLength: 100
+    UserList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+    InviteAcceptRequest:
+      type: object
+      required: [token, new_password]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          minLength: 32
+          maxLength: 128
+        new_password:
+          type: string
+          minLength: 1
+          maxLength: 72
+        display_name:
+          type: string
+          maxLength: 100
+    CredentialResetResponse:
+      type: object
+      required: [user_id, expires_at, delivered]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        delivered:
+          type: boolean
+          description: token 已投递到目标 email；响应不包含 token。
+    LoginRequest:
+      type: object
+      required: [username, password]
+      additionalProperties: false
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
         password:
           type: string
           minLength: 1
@@ -3200,16 +3759,24 @@ components:
           description: 长度按字节计（bcrypt 明文上限 72 字节）。
     LoginResponse:
       type: object
-      required: [user]
+      required: [user, permissions]
       properties:
         user:
           $ref: '#/components/schemas/User'
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
     MeResponse:
       type: object
-      required: [user]
+      required: [user, permissions]
       properties:
         user:
           $ref: '#/components/schemas/User'
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
 
     Server:
       type: object
@@ -4674,11 +5241,15 @@ components:
         - requested_at
         - expires_at
         - decided_at
+        - requested_by
+        - requested_by_name
         - decided_by
         - note
         - edited_command
         - edited_risk_level
         - edited_rule_id
+        - break_glass
+        - legacy
       properties:
         id:
           type: string
@@ -4693,8 +5264,8 @@ components:
           description: console/batch 审批为 null；chat 审批恒非 null。
         source:
           type: string
-          enum: [chat, console, batch]
-          description: 审批发起来源（四期 console、五期 batch；历史数据等价 chat）。
+          enum: [chat, console, batch, terminal, policy]
+          description: 审批发起来源（console 四期、batch 五期、terminal/policy 00012）。
         server_id:
           type: [string, 'null']
           format: uuid
@@ -4724,6 +5295,13 @@ components:
         decided_at:
           type: [string, 'null']
           format: date-time
+        requested_by:
+          type: string
+          format: uuid
+          description: 发起人（00012 必填）；chat=会话 owner，console=HTTP 用户，batch=batch_jobs.created_by，terminal/policy=请求用户。
+        requested_by_name:
+          type: string
+          description: 发起人 username/display_name（JOIN 派生，不落列）。
         decided_by:
           type: [string, 'null']
           format: uuid
@@ -4733,14 +5311,36 @@ components:
         edited_command:
           type: string
           maxLength: 2000
-          description: 用户改写后的命令（六期）；空串=未改写。执行（console/batch decide 或 chat 等待方）使用本字段非空时的值。
+          description: 历史字段（00012 起新行恒为空）；仅 legacy 行可非空，执行层永不读取。
         edited_risk_level:
           type: string
           enum: ['', safe, needs_approval]
-          description: 改写后命令的重新分类级别（六期）；空串=未改写。改写后 forbidden 在 decide 即被 403 拒绝，不落库。
+          description: 历史字段；00012 起新行恒为空。
         edited_rule_id:
           type: string
-          description: 改写后命令命中的风险规则 ID（六期）；未改写为空串。
+          description: 历史字段；00012 起新行恒为空。
+        grant_kind:
+          type: [string, 'null']
+          enum: [term, rdp, null]
+          description: source=terminal 的 grant 类型。
+        grant_expires_at:
+          type: [string, 'null']
+          format: date-time
+        consumed_at:
+          type: [string, 'null']
+          format: date-time
+        policy_from:
+          type: [string, 'null']
+          enum: [all, standard, high, none, null]
+        policy_to:
+          type: [string, 'null']
+          enum: [all, standard, high, none, null]
+        break_glass:
+          type: boolean
+          description: 仅主机侧 aiops break-glass 置 true。
+        legacy:
+          type: boolean
+          description: 迁移前历史行；应用不得写 true。
     ApprovalList:
       type: object
       required: [items]
@@ -4760,15 +5360,59 @@ components:
         note:
           type: string
           maxLength: 500
-        edited_command:
-          type: string
-          minLength: 1
-          maxLength: 2000
-          description: |
-            六期：批准时改写命令（可选）。仅 decision=approve 时合法（deny 携带本字段
-            返回 400）；禁止 NUL；服务端按审批目标重新 risk.Classify——改写后
-            forbidden 返回 403 COMMAND_FORBIDDEN 且审批保持 pending。
 
+    ApprovalContext:
+      type: object
+      required: [approval, tool_call, server, messages]
+      properties:
+        approval:
+          $ref: '#/components/schemas/Approval'
+        tool_call:
+          oneOf:
+            - $ref: '#/components/schemas/ToolCall'
+            - type: 'null'
+        server:
+          oneOf:
+            - $ref: '#/components/schemas/Server'
+            - type: 'null'
+        messages:
+          type: array
+          description: 审批前最多 20 条消息；不含审批后的新消息。
+          items:
+            $ref: '#/components/schemas/Message'
+    AuditVerifyResponse:
+      type: object
+      required: [ok, checked, first_id, window, legacy, head_id, head_hash]
+      properties:
+        ok:
+          type: boolean
+        checked:
+          type: integer
+          minimum: 0
+        first_id:
+          type: integer
+          format: int64
+          description: |
+            本次校验覆盖的最小审计 id（空区间为 0）。页面据此展示「#first–#head」
+            并声明更早记录未在本次范围内（第 2 轮走查：窗口是有界的，不能只报条数）。
+        window:
+          type: integer
+          minimum: 1
+          description: 本次实际生效的窗口上限（缺省与上限均为 200）。
+        legacy:
+          type: integer
+          minimum: 0
+          description: 本次区间内按 legacy 规则只校验链接的存量行数（00014 前，纳秒哈希输入不可恢复）。
+        head_id:
+          type: integer
+          format: int64
+        head_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        broken_at:
+          type: [integer, 'null']
+          format: int64
+          description: 链断点 id；ok=true 时为 null。
     AuditLog:
       type: object
       required:
@@ -5021,7 +5665,7 @@ components:
           oneOf:
             - $ref: '#/components/schemas/ApprovalExecution'
             - type: 'null'
-          description: 仅 source=console|batch 且批准时非 null（四期容器/五期批量同步执行结果；执行命令为 edited_command 非空时的改写后命令）；chat 审批与拒绝/过期恒 null。
+          description: 仅 source=console|batch 且批准时非 null（四期容器/五期批量同步执行结果；执行命令恒为 approval.command——00012 起 edited_command 仅历史只读，永不参与执行）；chat 审批与拒绝/过期恒 null。
     DiagnosisFixResult:
       type: object
       required: [approval, execution]
@@ -5043,6 +5687,17 @@ components:
         approval_mode:
           $ref: '#/components/schemas/ApprovalMode'
           description: 全局审批门限（settings['approval.mode']；键缺失兜底 standard）。
+        single_admin_degraded:
+          type: boolean
+          description: |
+            只读降级态：可承担第二人职责的启用账号（admin/approver）<= 1 时为 true。
+            此时审批批准、终端/RDP 授权与会话、policy 放宽都会被拒（409
+            NO_SECOND_APPROVER）。前端据此在点按钮前渲染中文说明并置灰按钮。
+            与启动告警 rbac_single_admin_warning 同一判定口径（CountEnabledApprovers）。
+            存储不可用时本字段缺省（未知状态，前端不得据此隐藏按钮）。
+        enabled_approvers:
+          type: integer
+          description: 只读：当前启用且可审批的账号数（admin + approver），用于降级说明文案。
     SettingsUpdate:
       type: object
       required: [approval_mode]
@@ -5174,7 +5829,7 @@ components:
         edited_command:
           type: [string, 'null']
           maxLength: 2000
-          description: 六期：decide 批准时携带改写后命令则非 null（等待方按它执行）；未改写/拒绝/过期为 null。
+          description: 历史字段（00012 起 decide 禁止改写，新决策恒为 null）；等待方执行恒以 approval.command 为准。
     SseDone:
       type: object
       required: [turn_id, message_id, finish_reason, usage]
@@ -5222,6 +5877,49 @@ components:
       type: string
       enum: ['', client_closed, idle_timeout, max_duration, server_shutdown, error]
 
+    TerminalGrantCreate:
+      type: object
+      required: [server_id]
+      additionalProperties: false
+      properties:
+        server_id:
+          type: string
+          format: uuid
+    TerminalGrantCreated:
+      type: object
+      required: [approval, grant]
+      properties:
+        approval:
+          $ref: '#/components/schemas/Approval'
+        grant:
+          type: object
+          required: [approval_id, grant_kind, server_id, grant_expires_at]
+          properties:
+            approval_id:
+              type: string
+              format: uuid
+            grant_kind:
+              type: string
+              enum: [term, rdp]
+            server_id:
+              type: string
+              format: uuid
+            grant_expires_at:
+              type: string
+              format: date-time
+    TerminalGrantList:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Approval'
+        count:
+          type: integer
+          minimum: 0
+          description: 本次返回的可用授权条数（与 items 长度一致，便于页面直接展示「N 条」）。
+
     TerminalSessionCreate:
       type: object
       required: [server_id]
@@ -5230,6 +5928,14 @@ components:
         server_id:
           type: string
           format: uuid
+        grant_id:
+          type: string
+          format: uuid
+          description: |
+            已批准、未消费的 source=terminal/grant_kind=term 审批 id（00012）。
+            省略/空串表示消费该用户在该服务器上最新一条已批准 grant；没有
+            可消费 grant 返回 403 TERMINAL_APPROVAL_REQUIRED（仍要求他人批准
+            与单次消费）。
         cols:
           type: integer
           minimum: 10
@@ -5282,7 +5988,7 @@ components:
           $ref: '#/components/schemas/TargetOS'
         username:
           type: string
-          description: 发起终端的登录用户名（v1 恒为 admin）。
+          description: 发起终端的用户（users.username；RBAC 后随实际发起人，不再恒为 admin）。
         status:
           $ref: '#/components/schemas/InteractiveSessionStatus'
         cols:
@@ -5456,6 +6162,12 @@ components:
         server_id:
           type: string
           format: uuid
+        grant_id:
+          type: string
+          format: uuid
+          description: |
+            已批准、未消费的 source=terminal/grant_kind=rdp 审批 id（00012）；
+            省略/空串消费最新一条已批准 grant。
         width:
           type: integer
           minimum: 640

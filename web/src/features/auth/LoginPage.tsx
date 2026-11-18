@@ -1,7 +1,7 @@
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Card, ConfigProvider, Form, Input, Spin, Typography } from 'antd';
-import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { Alert, Button, Card, ConfigProvider, Form, Input, Spin, Typography } from 'antd';
+import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { themeConfig } from '../../styles/theme';
 import { useTheme } from '../../styles/themePreference';
@@ -19,6 +19,9 @@ import {
   toApiFailure,
   writeHeaders,
 } from '../../components/admin/apiError';
+import { defaultLandingPath } from '../../lib/rbac';
+import { sessionExpiredNotice } from './loginNotice';
+import { useMe } from './useMe';
 import '../../styles/admin.css';
 
 interface LoginFormValues {
@@ -27,49 +30,47 @@ interface LoginFormValues {
 }
 
 // 只允许站内路径回跳，阻止 //evil.example 之类的开放重定向。
-function safeNext(raw: string | null): string {
+// 未带 next 时返回 null，由登录响应里的 permissions 决定落地页。
+function safeNext(raw: string | null): string | null {
   if (!raw) {
-    return '/chat';
+    return null;
   }
   if (!raw.startsWith('/') || raw.startsWith('//')) {
-    return '/chat';
+    return null;
   }
   if (raw === '/login' || raw.startsWith('/login?') || raw.startsWith('/login/')) {
-    return '/chat';
+    return null;
   }
   return raw;
 }
 
 export default function LoginPage() {
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [form] = Form.useForm<LoginFormValues>();
   const next = safeNext(searchParams.get('next'));
+  // 会话过期或角色/权限变更导致服务端吊销会话时，认证门会带 reason 跳回；
+  // 明确告知用户原因，而不是静默回到登录页。被停用账号仍统一 AUTH_INVALID
+  //（契约 12.4 第 7 条，禁止账号枚举），不能在此区分。
+  const sessionNotice = sessionExpiredNotice(searchParams.get('reason'));
+  // RBAC 走查 sprint 2：邀请/重置落地页设置密码成功后跳转到登录页并带上
+  // state.passwordSet（InviteAcceptPage）。此前登录页从不读这个 state，
+  // 用户被静默送到 /login，不知道密码已生效、也不知道为何没有自动登录。
+  const passwordSet = (location.state as { passwordSet?: boolean } | null)?.passwordSet === true;
   // 契约 8.3 第 7 章：登录页也走全站主题（公开页，无 AppShell 包裹）。
   const { resolved: theme } = useTheme();
 
   // 已登录访问 /login 时直接回首页（CONTRACT.md 8.1）。
-  const meQuery = useQuery({
-    queryKey: qk.me(),
-    retry: false,
-    queryFn: async () => {
-      const { data, error, response } = await api.GET('/api/auth/me');
-      if (error) {
-        throw new ApiRequestError(toApiFailure(error, response));
-      }
-      if (!data) {
-        throw new ApiRequestError(makeFailure('INTERNAL', 'empty me response'));
-      }
-      return data.user;
-    },
-  });
+  // 00012：缓存完整 MeResponse（user + permissions），供角色感知落地。
+  const meQuery = useMe();
 
   const loginMutation = useMutation({
     mutationFn: async (values: LoginFormValues) => {
-      // LoginRequest 只接受 password（用户名固定为内置 admin）。
+      // 00012：登录必须同时提交 username 与 password。
       const { data, error, response } = await api.POST('/api/auth/login', {
-        body: { password: values.password },
+        body: { username: values.username, password: values.password },
         params: { header: writeHeaders() },
       });
       if (error) {
@@ -81,13 +82,14 @@ export default function LoginPage() {
       return data;
     },
     onSuccess: (data) => {
-      queryClient.setQueryData(qk.me(), data.user);
-      navigate(next, { replace: true });
+      // 00012：缓存完整响应（含 permissions），避免落地页再拉一次 me。
+      queryClient.setQueryData(qk.me(), data);
+      navigate(next ?? defaultLandingPath(data.permissions), { replace: true });
     },
   });
 
   if (meQuery.data) {
-    return <Navigate to={next} replace />;
+    return <Navigate to={next ?? defaultLandingPath(meQuery.data.permissions)} replace />;
   }
 
   if (meQuery.isPending) {
@@ -134,18 +136,30 @@ export default function LoginPage() {
             </div>
           </div>
           <Typography.Paragraph type="secondary" style={{ marginTop: 16 }}>
-            使用内置管理员账户登录，以管理服务器、数据库、模型与审计日志。
+            使用你的用户名与密码登录。角色与权限由服务端下发，界面只按权限展示可用操作。
           </Typography.Paragraph>
+          {sessionNotice ? (
+            <Alert type="info" showIcon style={{ marginBottom: 12 }} message={sessionNotice} />
+          ) : null}
+          {passwordSet ? (
+            <Alert
+              type="success"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="密码已设置，请用新密码登录"
+              description="为安全起见不会自动登录；请使用刚设置的密码登录。"
+            />
+          ) : null}
           <Typography.Paragraph type="secondary" style={{ marginTop: -8, fontSize: 12 }}>
-            未设置 ADMIN_PASSWORD 时，首次启动会生成随机密码并打印在服务日志中 （docker compose logs
-            app | grep &apos;admin password&apos;）。
+            首次启动会创建 admin；未设置 ADMIN_PASSWORD 时随机密码打印在服务日志中（docker compose
+            logs app | grep &apos;admin
+            password&apos;）。其他账号由管理员创建并通过邀请邮件设置密码。
           </Typography.Paragraph>
 
           {showMeWarning && meFailure ? (
             <ApiErrorAlert failure={meFailure} onRetry={() => void meQuery.refetch()} />
           ) : null}
-          {/* 登录页唯一可输入凭据是管理员密码（用户名固定 admin）：AUTH_INVALID
-            按场景改写为「管理员密码错误」，不再提示不存在的用户名字段。 */}
+          {/* 00012：用户名 + 密码均需输入；服务端对未知用户/停用/错密码统一 AUTH_INVALID。 */}
           {loginFailure ? (
             <ApiErrorAlert failure={loginFailure} describe={describeLoginFailure} />
           ) : null}
@@ -153,7 +167,7 @@ export default function LoginPage() {
           <Form<LoginFormValues>
             form={form}
             layout="vertical"
-            initialValues={{ username: 'admin', password: '' }}
+            initialValues={{ username: '', password: '' }}
             onFinish={(values) => {
               loginMutation.reset();
               loginMutation.mutate(values);
@@ -163,10 +177,17 @@ export default function LoginPage() {
             <Form.Item
               name="username"
               label="用户名"
-              rules={[{ required: true, message: '请输入用户名' }]}
-              extra="服务端仅支持内置管理员 admin"
+              rules={[
+                { required: true, message: '请输入用户名' },
+                { max: 64, message: '用户名不能超过 64 个字符' },
+              ]}
             >
-              <Input prefix={<UserOutlined />} disabled autoComplete="username" />
+              <Input
+                prefix={<UserOutlined />}
+                placeholder="请输入用户名"
+                autoComplete="username"
+                autoFocus
+              />
             </Form.Item>
             <Form.Item
               name="password"
@@ -178,9 +199,8 @@ export default function LoginPage() {
             >
               <Input.Password
                 prefix={<LockOutlined />}
-                placeholder="请输入管理员密码"
+                placeholder="请输入密码"
                 autoComplete="current-password"
-                autoFocus
               />
             </Form.Item>
             <Form.Item style={{ marginBottom: 0 }}>

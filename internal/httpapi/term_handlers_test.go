@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"aiops/internal/approvals"
+	"aiops/internal/audit"
 	"aiops/internal/auth"
 	"aiops/internal/config"
 	"aiops/internal/cryptox"
@@ -50,6 +53,8 @@ func (t *memTerminalTable) Create(_ context.Context, p store.CreateTerminalSessi
 	s := store.TerminalSession{
 		ID:             uuid.NewString(),
 		ServerID:       p.ServerID,
+		UserID:         p.UserID,
+		GrantID:        p.GrantID,
 		ServerName:     "mem-server",
 		ServerOS:       store.ServerOSLinux,
 		Username:       "admin",
@@ -186,6 +191,7 @@ type termTestEnv struct {
 	cipher *cryptox.Cipher
 	cookie string
 	dir    string
+	auditW *audit.Writer
 }
 
 func newTermTestEnv(t *testing.T) *termTestEnv {
@@ -201,8 +207,10 @@ func newTermTestEnvWithSSH(t *testing.T, ssh sshx.Executor) *termTestEnv {
 	st := &termMemStore{memStore: newMemStore(), table: &memTerminalTable{terms: map[string]*store.TerminalSession{}}}
 	st.users["admin"] = store.User{
 		ID: "user-1", Username: "admin", PasswordHash: getAdminHash(),
+		Role: store.RoleAdmin, Enabled: true,
 		CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
 	}
+	seedSecondAdmin(st.memStore)
 	cipher, err := cryptox.New([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)
@@ -215,20 +223,31 @@ func newTermTestEnvWithSSH(t *testing.T, ssh sshx.Executor) *termTestEnv {
 		defer cancel()
 		termMgr.Shutdown(ctx)
 	})
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditW := audit.NewWriter(st, log, time.Now)
+	auditW.Start(context.Background())
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = auditW.Close(ctx)
+	})
 	cfg := &config.Config{
 		AllowedOrigins: []string{testOrigin},
 		PublicOrigin:   testOrigin,
 		WebDir:         "",
 		RecordingsDir:  dir,
 	}
-	env := &termTestEnv{t: t, st: st, cipher: cipher, dir: dir}
+	env := &termTestEnv{t: t, st: st, cipher: cipher, dir: dir, auditW: auditW}
+	apprSvc := approvals.NewService(st, nil, time.Hour, time.Now, nil)
 	env.router = NewRouter(&Deps{
-		Config: cfg,
-		Auth:   authSvc,
-		Store:  st,
-		Cipher: cipher,
-		Term:   termMgr,
-		Clock:  time.Now,
+		Config:    cfg,
+		Auth:      authSvc,
+		Store:     st,
+		Cipher:    cipher,
+		Term:      termMgr,
+		Approvals: apprSvc,
+		Audit:     auditW,
+		Clock:     time.Now,
 	})
 	env.cookie = env.login()
 	return env
@@ -236,7 +255,7 @@ func newTermTestEnvWithSSH(t *testing.T, ssh sshx.Executor) *termTestEnv {
 
 func (e *termTestEnv) login() string {
 	e.t.Helper()
-	body := `{"password":"` + testPassword + `"}`
+	body := `{"username":"admin","password":"` + testPassword + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", testOrigin)
@@ -293,9 +312,27 @@ func (e *termTestEnv) createServer(t *testing.T, os string, auth store.AuthMetho
 	return id
 }
 
+// grant 注入一条已批准、未消费的 term terminal grant（请求人为 admin）。
+func (e *termTestEnv) grant(t *testing.T, serverID string) string {
+	t.Helper()
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	expires := now.Add(30 * time.Minute)
+	holder := serverID
+	kind := "term"
+	e.st.mu.Lock()
+	e.st.approvals[id] = store.Approval{
+		ID: id, Source: "terminal", ServerID: &holder, ServerName: "mem-server",
+		Status: store.ApprovalApproved, RequestedBy: "user-1",
+		GrantKind: &kind, GrantExpiresAt: &expires, RequestedAt: now, ExpiresAt: expires,
+	}
+	e.st.mu.Unlock()
+	return id
+}
+
 func (e *termTestEnv) createSession(t *testing.T, serverID string) store.TerminalSession {
 	t.Helper()
-	rec := e.do(http.MethodPost, "/api/term/sessions", `{"server_id":"`+serverID+`","cols":120,"rows":40}`)
+	rec := e.do(http.MethodPost, "/api/term/sessions", `{"server_id":"`+serverID+`","cols":120,"rows":40,"grant_id":"`+e.grant(t, serverID)+`"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create session status = %d body = %s", rec.Code, rec.Body.String())
 	}
@@ -452,9 +489,165 @@ func TestTermWSUpgradeSucceeds(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 会话/录制 REST
-// ---------------------------------------------------------------------------
+// TestTermOpenFailureReleasesConsumedGrant 覆盖第 4 轮走查 medium 的第二半：
+// 预检通过但 Open 仍失败（全局会话上限）时，必须回滚本次消费的
+// consumed_at 并写 terminal.grant_released 审计，授权保留可重试。
+func TestTermOpenFailureReleasesConsumedGrant(t *testing.T) {
+	env := newTermTestEnv(t)
+	// 默认 MaxSessions=4：把 4 条 active 会话放在其它服务器上，目标服务器
+	// 本身没有活动会话（预检放行，失败发生在 Open 的全局上限判定）。
+	for i := 0; i < 4; i++ {
+		other := env.createServer(t, "linux", store.AuthMethodPassword)
+		if _, err := env.st.table.Create(context.Background(), store.CreateTerminalSessionParams{
+			ServerID: other, UserID: "user-1", Cols: 120, Rows: 40, StartedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("seed active session: %v", err)
+		}
+	}
+	serverID := env.createServer(t, "linux", store.AuthMethodPassword)
+	grantID := env.grant(t, serverID)
+
+	rec := env.do(http.MethodPost, "/api/term/sessions", `{"server_id":"`+serverID+`","grant_id":"`+grantID+`"}`)
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "TERM_SESSION_LIMIT") {
+		t.Fatalf("open over limit: status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	env.st.mu.Lock()
+	released := env.st.approvals[grantID]
+	env.st.mu.Unlock()
+	if released.ConsumedAt != nil {
+		t.Fatalf("failed open left grant %s consumed at %v", grantID, released.ConsumedAt)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := env.auditW.Flush(ctx); err != nil {
+		t.Fatalf("flush audit: %v", err)
+	}
+	env.st.mu.Lock()
+	defer env.st.mu.Unlock()
+	found := false
+	for _, row := range env.st.auditLogs {
+		if row.Action == "terminal.grant_released" && row.ResourceID == grantID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("terminal.grant_released audit missing after rollback")
+	}
+}
+
+// TestTermWSDialFailureReleasesConsumedGrant 覆盖第 10 轮走查 medium：
+// POST 创建会话已消费 grant，但 WS 升级后 SSH 拨号失败时，会话以 error
+// 收尾；审批的 consumed_at 必须回滚并写 terminal.grant_released，授权
+// 保留可重试（契约 12.3 第 12 条），用户不必重新找审批人。
+func TestTermWSDialFailureReleasesConsumedGrant(t *testing.T) {
+	env := newTermTestEnv(t)
+	serverID := env.createServer(t, "linux", store.AuthMethodPassword)
+	grantID := env.grant(t, serverID)
+
+	rec := env.do(http.MethodPost, "/api/term/sessions",
+		`{"server_id":"`+serverID+`","grant_id":"`+grantID+`"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create session: status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		Session store.TerminalSession `json:"session"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal session: %v", err)
+	}
+	// grant_id 不进 API 响应（json:"-"），但必须在会话行持久化，供 WS
+	// 拨号失败时回滚对应审批。
+	stored, err := env.st.TerminalSessions().Get(context.Background(), created.Session.ID)
+	if err != nil {
+		t.Fatalf("get created session: %v", err)
+	}
+	if stored.GrantID != grantID {
+		t.Fatalf("session grant_id = %q, want %q", stored.GrantID, grantID)
+	}
+
+	httpSrv := httptest.NewServer(env.router)
+	t.Cleanup(httpSrv.Close)
+	wsURL := "ws" + strings.TrimPrefix(httpSrv.URL, "http") + "/api/term/sessions/" + created.Session.ID + "/ws"
+	header := http.Header{}
+	header.Set("Origin", testOrigin)
+	header.Set("Cookie", sessionCookieName+"="+env.cookie)
+	header.Set("Sec-WebSocket-Protocol", termWSSubprotocol)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("dial ws: %v resp=%v", err, resp)
+	}
+	defer conn.Close()
+	// fakePTYPool 的 Session 恒失败：error 帧后 closed(error)，连接由 manager 关闭。
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var m map[string]any
+		if err := conn.ReadJSON(&m); err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		if m["type"] == "closed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no closed frame after dial failure")
+		}
+	}
+
+	// 会话行以 error 收尾。
+	rowDeadline := time.Now().Add(5 * time.Second)
+	for {
+		row, err := env.st.TerminalSessions().Get(context.Background(), created.Session.ID)
+		if err == nil && row.Status == store.SessionClosed && row.EndedReason == "error" {
+			break
+		}
+		if time.Now().After(rowDeadline) {
+			t.Fatalf("session row after dial failure: %+v err=%v", row, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// 授权回滚：consumed_at 清空（handler 在 manager 收尾后同步执行）。
+	releaseDeadline := time.Now().Add(5 * time.Second)
+	for {
+		env.st.mu.Lock()
+		ap := env.st.approvals[grantID]
+		env.st.mu.Unlock()
+		if ap.ConsumedAt == nil {
+			break
+		}
+		if time.Now().After(releaseDeadline) {
+			t.Fatalf("dial failure left grant %s consumed at %v", grantID, ap.ConsumedAt)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := env.auditW.Flush(ctx); err != nil {
+		t.Fatalf("flush audit: %v", err)
+	}
+	env.st.mu.Lock()
+	found := false
+	for _, auditRow := range env.st.auditLogs {
+		if auditRow.Action == "terminal.grant_released" && auditRow.ResourceID == grantID {
+			found = true
+			break
+		}
+	}
+	env.st.mu.Unlock()
+	if !found {
+		t.Fatal("terminal.grant_released audit missing after dial failure")
+	}
+
+	// 同一 grant 可重试（授权已保留）；新会话创建成功即证明未被烧掉。
+	rec = env.do(http.MethodPost, "/api/term/sessions",
+		`{"server_id":"`+serverID+`","grant_id":"`+grantID+`"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("retry with released grant: status = %d body = %s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestTermSessionCreateAndList(t *testing.T) {
 	env := newTermTestEnv(t)
@@ -465,9 +658,30 @@ func TestTermSessionCreateAndList(t *testing.T) {
 	}
 
 	// 同服务器第二个会话 → 409 TERM_SESSION_EXISTS（G20）。
-	rec := env.do(http.MethodPost, "/api/term/sessions", `{"server_id":"`+serverID+`"}`)
+	//
+	// 第 4 轮走查 medium：冲突必须在消费 grant 之前判定——此前消费先于
+	// Open，409 会烧掉一次刚批准的授权，重试注定 403 只能重新审批。
+	conflictGrant := env.grant(t, serverID)
+	rec := env.do(http.MethodPost, "/api/term/sessions", `{"server_id":"`+serverID+`","grant_id":"`+conflictGrant+`"}`)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "TERM_SESSION_EXISTS") {
 		t.Fatalf("second session: status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	env.st.mu.Lock()
+	unused := env.st.approvals[conflictGrant]
+	env.st.mu.Unlock()
+	if unused.ConsumedAt != nil {
+		t.Fatalf("conflict 409 consumed grant %s at %v; retry would need re-approval", conflictGrant, unused.ConsumedAt)
+	}
+
+	// 结束现有会话后，同一 grant 必须仍可用（未消耗 → 可重试）。
+	if _, err := env.st.table.Close(context.Background(), store.CloseInteractiveSessionParams{
+		ID: session.ID, Reason: "user_closed", EndedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	rec = env.do(http.MethodPost, "/api/term/sessions", `{"server_id":"`+serverID+`","grant_id":"`+conflictGrant+`"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("retry with unconsumed grant: status = %d body = %s", rec.Code, rec.Body.String())
 	}
 
 	// 非法 cols → 400。

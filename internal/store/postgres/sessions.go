@@ -39,6 +39,13 @@ func (s sessionStore) ByTokenHash(ctx context.Context, tokenHash []byte) (store.
 		SELECT `+sessionColumns+` FROM sessions WHERE token_hash = $1`, tokenHash))
 }
 
+// Get 按会话 id 读取（WS 周期复检与 CloseByAuthSession 注册表，
+// 契约 12.3 第 13 条）。不存在返回 ErrNotFound。
+func (s sessionStore) Get(ctx context.Context, id string) (store.Session, error) {
+	return scanSession(s.q.QueryRow(ctx, `
+		SELECT `+sessionColumns+` FROM sessions WHERE id = $1::uuid`, id))
+}
+
 func (s sessionStore) Touch(ctx context.Context, id string, at time.Time) error {
 	tag, err := s.q.Exec(ctx, `UPDATE sessions SET last_seen_at = $2 WHERE id = $1::uuid`, id, utc(at))
 	if err != nil {

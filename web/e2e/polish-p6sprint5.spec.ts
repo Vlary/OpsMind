@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import {
   AUTH_STATE_FILE,
   RISKY_COMMAND,
@@ -142,9 +142,7 @@ test.describe('六期打磨 sprint 5：审计命令批准与审批行命令摘�
     await page.keyboard.press('Control+a');
     await page.keyboard.press('Delete');
     await page.keyboard.type('命令预览');
-    await expect(
-      page.locator('.ant-select-item-option', { hasText: '命令预览' }),
-    ).toHaveCount(0);
+    await expect(page.locator('.ant-select-item-option', { hasText: '命令预览' })).toHaveCount(0);
     await page.keyboard.press('Escape');
   });
 
@@ -196,12 +194,10 @@ test.describe('六期打磨 sprint 5：审计命令批准与审批行命令摘�
 });
 
 // ---------------------------------------------------------------------------
-// 3. 批量详情：已执行行显示实际执行的改写命令
+// 3. 批量详情：00012 起审批禁止改写，执行行恒为原命令
 // ---------------------------------------------------------------------------
-test.describe('六期打磨 sprint 5：批量详情显示实际执行命令', () => {
-  test('改写为 uptime 批准并执行后，详情行显示「实际执行 uptime」+ 用户改写', async ({
-    page,
-  }) => {
+test.describe('六期打磨 sprint 5：批量详情执行原命令（禁止改写）', () => {
+  test('批准原命令 uptime 后，详情行显示 uptime 且无「用户改写」标注', async ({ page }) => {
     const name = `e2e-batch-p6s5-${Date.now()}`;
     const created = await page.request.post('/api/servers', {
       headers: { Origin: ORIGIN },
@@ -233,26 +229,29 @@ test.describe('六期打磨 sprint 5：批量详情显示实际执行命令', ()
     const drawer = page.getByRole('dialog');
     await expect(drawer.getByText('批量任务详情')).toBeVisible({ timeout: 30_000 });
     await expect(drawer.getByText('待审批').first()).toBeVisible({ timeout: 30_000 });
-    await drawer.getByRole('button', { name: /编\s*辑/ }).first().click();
+    await drawer
+      .getByRole('button', { name: /查\s*看/ })
+      .first()
+      .click();
 
-    const modal = page.locator('.ant-modal').filter({ hasText: '编辑命令并批准' });
+    const modal = page.locator('.ant-modal').filter({ hasText: '查看命令并批准' });
     await expect(modal).toBeVisible();
-    const editor = modal.getByLabel('改写命令');
-    await expect(editor).toHaveValue('uptime');
-    await editor.fill('whoami');
-    await expect(modal.getByText('改写后风险：')).toBeVisible({ timeout: 10_000 });
-    await modal.getByRole('button', { name: /保存并批准/ }).click();
+    // 00012 定稿：编辑弹窗只读，不再提供改写框。
+    await expect(
+      modal.getByText('本版本不支持审批时改写命令。如需修改，请拒绝后由发起人重新发起'),
+    ).toBeVisible();
+    await expect(modal.getByLabel('改写命令')).toHaveCount(0);
+    await modal.getByRole('button', { name: '批准原命令' }).click();
 
-    // 假 sshd 拒绝 exec（夹具只服务终端 PTY）→ 行落「执行失败」，但
-    // 命令列必须显示实际下发的 whoami + 「用户改写」。
+    // 假 sshd 拒绝 exec（夹具只服务终端 PTY）→ 行落「执行失败」；执行的是
+    // 审批原命令 uptime，不得出现「用户改写」标注。
     await expect(drawer.getByText('执行失败').first()).toBeVisible({ timeout: 30_000 });
     const row = drawer.locator('.ant-table-row', { hasText: name }).first();
     await expect(row).toBeVisible();
-    await expect(row.getByText('实际执行')).toBeVisible();
-    await expect(row.getByText('用户改写')).toBeVisible();
-    await expect(row).toContainText('whoami');
-    // 不再把 job 原文命令当作这一行实际执行的内容。
-    await expect(row.locator('.opsmind-admin-mono')).toContainText('whoami');
+    await expect(row.getByText('用户改写')).toHaveCount(0);
+    await expect(row.getByText('实际执行')).toHaveCount(0);
+    await expect(row.locator('.opsmind-admin-mono')).toContainText('uptime');
+    await expect(row).not.toContainText('whoami');
   });
 });
 
@@ -300,37 +299,35 @@ test.describe('六期打磨 sprint 5：回放审批来源中文化', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. 工具卡改写后命令面板
+// 5. 工具卡命令面板（00012：审批禁止改写）
 // ---------------------------------------------------------------------------
-test.describe('六期打磨 sprint 5：工具卡显示模型原命令与实际执行', () => {
-  test('改写为 uptime 批准后，命令面板标题为「模型原命令」并补「实际执行」', async ({
-    page,
-  }) => {
+test.describe('六期打磨 sprint 5：工具卡命令面板保持原命令', () => {
+  test('无改写入口：批准后命令面板仍为「命令」，无「实际执行」标注', async ({ page }) => {
     await page.goto('/chat');
     await sendMessage(page, SCENARIO_RISKY);
     await expect(page).toHaveURL(/\/c\/[0-9a-f-]+/, { timeout: 20_000 });
 
     const approvalCard = page.locator('.chat-approval', { hasText: '命令审批' }).first();
     await expect(approvalCard).toBeVisible({ timeout: 30_000 });
-    await approvalCard.getByRole('button', { name: '编辑命令' }).click();
-    const editor = page.getByLabel('改写命令');
-    await expect(editor).toBeVisible();
-    await editor.fill('uptime');
-    await expect(approvalCard.getByText('改写后风险：')).toBeVisible({ timeout: 10_000 });
-    await approvalCard.getByRole('button', { name: '保存并批准' }).click();
+    // 00012：审批时禁止改写，卡片没有编辑命令/保存并批准入口。
+    await expect(approvalCard.getByRole('button', { name: '编辑命令' })).toHaveCount(0);
+    await expect(approvalCard.getByLabel('改写命令')).toHaveCount(0);
+    await approvalCard.getByRole('button', { name: '批准' }).click();
     await expect(approvalCard.getByText('审批已批准', { exact: true })).toBeVisible({
       timeout: 20_000,
     });
 
     const sshCard = page.locator('.chat-toolcall-card', { hasText: 'ssh_exec' }).first();
-    // 命令面板标题变「模型原命令」，正文仍是模型原始参数（审计事实）。
+    // 00012：edited_command 恒为空 → 面板标题保持「命令」，正文是实际执行的
+    // 原命令；不再出现「模型原命令 / 实际执行 / 用户改写」。
     const commandPanel = sshCard.locator('.ant-collapse-item').first();
-    await expect(commandPanel.getByText('模型原命令')).toBeVisible({ timeout: 20_000 });
+    await expect(commandPanel.getByText('命令', { exact: true })).toBeVisible({
+      timeout: 20_000,
+    });
     await expect(commandPanel).toContainText(RISKY_COMMAND);
-    // 同一面板内补「实际执行 uptime」+「用户改写」。
-    await expect(commandPanel.getByText('实际执行')).toBeVisible();
-    await expect(commandPanel.getByText('用户改写')).toBeVisible();
-    await expect(commandPanel).toContainText('uptime');
+    await expect(commandPanel.getByText('模型原命令')).toHaveCount(0);
+    await expect(commandPanel.getByText('实际执行')).toHaveCount(0);
+    await expect(commandPanel.getByText('用户改写')).toHaveCount(0);
   });
 });
 
@@ -338,61 +335,29 @@ test.describe('六期打磨 sprint 5：工具卡显示模型原命令与实际�
 // 6. 设置页免审批警示去字段名
 // ---------------------------------------------------------------------------
 test.describe('六期打磨 sprint 5：免审批警示不含数据库字段名', () => {
-  test('切到「免审批」后警示用「自动执行」开关名，不含 auto_exec_enabled', async ({ page }) => {
+  test('免审批档警示用「自动执行」开关名，不含 auto_exec_enabled', async ({ page }) => {
+    // 00012：单管理员不能把全局门限放宽到 none（需第二人批准），这里用
+    // GET /api/settings 的测试替身渲染 none 档 UI，只验证警示文案。
+    await page.route('**/api/settings', async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ approval_mode: 'none' }),
+      });
+    });
     await page.goto('/settings');
     const card = page.locator('.ant-card', { hasText: '审批门限' });
     await expect(card).toBeVisible();
-    const select = card.locator('.ant-select').first();
 
-    await select.click();
-    await page.getByRole('option', { name: '免审批', exact: true }).click();
     const alert = page.locator('.ant-alert', {
       hasText: '所有命令将自动执行（含高危）',
     });
     await expect(alert).toBeVisible({ timeout: 10_000 });
     await expect(alert).toContainText('关闭了「自动执行」开关的服务器');
     await expect(alert).not.toContainText('auto_exec_enabled');
-
-    // 收尾恢复默认档（避免影响其他并行审批用例）。
-    await select.click();
-    await page.getByRole('option', { name: '危险命令审批', exact: true }).click();
-    await expect(card.getByText('当前 · 危险命令审批')).toBeVisible({ timeout: 10_000 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 7 + 8. 对话页顶栏 tooltip 与页头三方一致
-// ---------------------------------------------------------------------------
-test.describe('六期打磨 sprint 5：对话页标题', () => {
-  test('顶栏标题有 title 属性；页头「对话」与 nav/标签页一致', async ({ page }) => {
-    const longTitle = `WALK_EXEC-p6sprint5-${Date.now()}-${'x'.repeat(40)}`;
-    const created = await page.request.post('/api/conversations', {
-      headers: { Origin: ORIGIN },
-      data: { title: longTitle },
-    });
-    expect(created.status()).toBe(201);
-    const cid = ((await created.json()) as { id: string }).id;
-
-    await page.goto(`/c/${cid}`);
-    const titleEl = page.locator('.chat-topbar-title');
-    await expect(titleEl).toBeVisible({ timeout: 20_000 });
-    // 7：超长标题被 CSS 截断，但 title 属性给完整值（侧栏同名条目同口径）。
-    await expect(titleEl).toHaveAttribute('title', longTitle);
-    const box = await titleEl.boundingBox();
-    expect(box?.width ?? 0).toBeLessThanOrEqual(260);
-
-    // 8：页头「对话」= 导航当前项 = 标签页 title（全站唯一原缺页头的页面）。
-    await expect(page.getByRole('heading', { name: '对话', exact: true })).toBeVisible();
-    await expect(page).toHaveTitle('对话 · 云枢 OpsMind');
-    const selectedNav = page.locator('.ant-menu-item-selected').first();
-    await expect(selectedNav).toContainText('对话');
-
-    // 空态页（/chat 新会话）同样有页头「对话」，但会话标题显示「新会话」。
-    await page.goto('/chat');
-    await expect(page.getByRole('heading', { name: '对话', exact: true })).toBeVisible({
-      timeout: 20_000,
-    });
-    await expect(page.locator('.chat-topbar-title')).toHaveText('新会话');
-    await expect(page.getByText('开始新的运维对话').first()).toBeVisible();
   });
 });

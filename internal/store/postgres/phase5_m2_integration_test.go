@@ -209,3 +209,82 @@ func TestInspectionJobAndReports(t *testing.T) {
 		t.Fatalf("report should cascade on job delete")
 	}
 }
+
+// TestDiagnosisListCreatedByFilter 第 11 轮走查 medium：归属过滤必须在 SQL
+// 层（WHERE d.created_by=... 先于 LIMIT）。非 admin 只拿到自己的会话；
+// created_by IS NULL 的 system 行仅 admin 可见（契约 12.3 第 16 条）。
+func TestDiagnosisListCreatedByFilter(t *testing.T) {
+	cleanDB(t)
+	ctx := context.Background()
+	owner := rbacUserID(t)
+	other, err := testDB.Users().Create(ctx, store.CreateUserParams{
+		Username: "diag-other", PasswordHash: "$2a$12$diagother",
+		Role: store.RoleOperator, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := mustServerRow(t)
+	now := time.Now().UTC()
+
+	mk := func(createdBy *string) store.DiagnosisSession {
+		t.Helper()
+		d, err := testDB.DiagnosisSessions().Create(ctx, store.CreateDiagnosisParams{
+			ServerID: srv.ID, Trigger: store.DiagnosisTriggerManual,
+			ExpiresAt: now.Add(30 * time.Minute), CreatedBy: createdBy,
+		})
+		if err != nil {
+			t.Fatalf("create diagnosis: %v", err)
+		}
+		return d
+	}
+	// other 的会话先建（较旧），owner 的三条后建（较新）。
+	otherSession := mk(&other.ID)
+	var ownerSessions []string
+	for i := 0; i < 3; i++ {
+		ownerSessions = append(ownerSessions, mk(&owner).ID)
+	}
+	systemSession := mk(nil)
+
+	own, err := testDB.DiagnosisSessions().List(ctx, "", "", owner, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 3 {
+		t.Fatalf("owner list = %d rows, want 3", len(own))
+	}
+	for _, d := range own {
+		if d.CreatedBy == nil || *d.CreatedBy != owner {
+			t.Fatalf("owner list leaked created_by=%v", d.CreatedBy)
+		}
+		if d.ID == otherSession.ID || d.ID == systemSession.ID {
+			t.Fatalf("owner list leaked session %s", d.ID)
+		}
+	}
+
+	// LIMIT 1：过滤在 LIMIT 前，owner 的会话不会因 other 先建/较旧而丢失。
+	first, err := testDB.DiagnosisSessions().List(ctx, "", "", owner, 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("owner limit=1 = (%d, %v)", len(first), err)
+	}
+	if first[0].CreatedBy == nil || *first[0].CreatedBy != owner {
+		t.Fatalf("owner limit=1 leaked created_by=%v", first[0].CreatedBy)
+	}
+
+	all, err := testDB.DiagnosisSessions().List(ctx, "", "", "", 50)
+	if err != nil || len(all) != 5 {
+		t.Fatalf("admin list = (%d, %v), want 5", len(all), err)
+	}
+	foundSystem := false
+	for _, d := range all {
+		if d.ID == systemSession.ID {
+			if d.CreatedBy != nil {
+				t.Fatalf("system session created_by = %v, want nil", d.CreatedBy)
+			}
+			foundSystem = true
+		}
+	}
+	if !foundSystem {
+		t.Fatal("admin list missing system session")
+	}
+}

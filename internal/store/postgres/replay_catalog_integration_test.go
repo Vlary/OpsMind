@@ -32,7 +32,7 @@ var replayActionToolsFixture = []string{
 func mustCatalogConv(t *testing.T, title string, at time.Time) store.Conversation {
 	t.Helper()
 	ctx := context.Background()
-	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: title})
+	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: title, UserID: rbacUserID(t)})
 	if err != nil {
 		t.Fatalf("create conversation %q: %v", title, err)
 	}
@@ -62,6 +62,7 @@ func mustCatalogApproval(t *testing.T, convID, command string) {
 		ConversationID: &convID, Source: "chat", Command: command,
 		RiskLevel: "needs_approval", RuleID: "DEFAULT_ASK", Reason: "r",
 		ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create approval: %v", err)
@@ -294,5 +295,66 @@ func TestReplayCatalogNoMessagesOrResultRead(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].ToolCount != 1 || items[0].ActionCount != 1 {
 		t.Fatalf("items = %+v", items)
+	}
+}
+
+// TestReplayCatalogScopedByUser 覆盖第 2 轮走查 high（契约 12.3 第 3 条）：
+// ListReplayCatalogParams.UserID 必须在 SQL 内过滤。他人较新会话占满窗口时
+// 目录不能为空，游标也不能停在「有更多但没有下一行」的死角。
+func TestReplayCatalogScopedByUser(t *testing.T) {
+	cleanDB(t)
+	ctx := context.Background()
+	owner := rbacUserID(t)
+	other, err := testDB.Users().Create(ctx, store.CreateUserParams{
+		Username: "rbac-catalog-other", PasswordHash: "$2a$12$rbaccatalogother",
+		Role: store.RoleOperator, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	mk := func(userID, title string, at time.Time) store.Conversation {
+		t.Helper()
+		conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{
+			Title: title, UserID: userID,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		if err := testDB.Conversations().Touch(ctx, conv.ID, at); err != nil {
+			t.Fatalf("touch %s: %v", title, err)
+		}
+		conv.LastMessageAt = at
+		return conv
+	}
+	for i := 0; i < 5; i++ {
+		mk(other.ID, "other-cat-"+fmt.Sprint(i), base.Add(-time.Duration(i)*time.Minute))
+	}
+	mine := mk(owner, "mine-cat", base.Add(-time.Hour))
+
+	// 本人视角：只有自己 1 条，has_more=false，无游标。
+	items, hasMore, err := testDB.Conversations().ListReplayCatalog(ctx, store.ListReplayCatalogParams{
+		Limit: 50, ActionTools: replayActionToolsFixture, UserID: owner,
+	})
+	if err != nil {
+		t.Fatalf("scoped catalog: %v", err)
+	}
+	if len(items) != 1 || items[0].ConversationID != mine.ID || hasMore {
+		t.Fatalf("scoped catalog = %+v (more=%v), want only %s", items, hasMore, mine.ID)
+	}
+	// 窗口 1：仍是自己那条（不是空页 + more=true）。
+	items, hasMore, err = testDB.Conversations().ListReplayCatalog(ctx, store.ListReplayCatalogParams{
+		Limit: 1, ActionTools: replayActionToolsFixture, UserID: owner,
+	})
+	if err != nil || len(items) != 1 || hasMore {
+		t.Fatalf("limit=1 = %+v (more=%v), err=%v", items, hasMore, err)
+	}
+
+	// audit:read 全量（UserID 空）：6 条。
+	all, _, err := testDB.Conversations().ListReplayCatalog(ctx, store.ListReplayCatalogParams{
+		Limit: 50, ActionTools: replayActionToolsFixture,
+	})
+	if err != nil || len(all) != 6 {
+		t.Fatalf("unscoped catalog = %d, %v", len(all), err)
 	}
 }

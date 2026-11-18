@@ -79,6 +79,19 @@ services:
       # 不用 RDP 的部署可整体移除 guacd 服务与本条依赖。
       AIOPS_GUACD_ADDR: guacd:4822
       AIOPS_RDP_RECORDINGS_DIR: /app/rdp-recordings
+      # invite/reset token 的 SMTP 通道（RBAC 必需）。不在这里透传时，
+      # 按 README 起的 compose 实例无法创建第二个账号，POST /api/users 恒
+      # 503 DELIVERY_UNAVAILABLE（走查第 3 轮 low）。全部留空 = 无通道，
+      # 行为与之前一致；配置后 587 走 STARTTLS、465 走 implicit TLS。
+      AIOPS_SMTP_HOST: ${AIOPS_SMTP_HOST:-}
+      AIOPS_SMTP_PORT: ${AIOPS_SMTP_PORT:-587}
+      AIOPS_SMTP_USERNAME: ${AIOPS_SMTP_USERNAME:-}
+      AIOPS_SMTP_PASSWORD: ${AIOPS_SMTP_PASSWORD:-}
+      AIOPS_SMTP_FROM: ${AIOPS_SMTP_FROM:-}
+      AIOPS_SMTP_USE_TLS: ${AIOPS_SMTP_USE_TLS:-true}
+      AIOPS_SMTP_IMPLICIT_TLS: ${AIOPS_SMTP_IMPLICIT_TLS:-false}
+      # 首次启动自动创建 approver 邀请；留空则进入单管理员降级模式。
+      AIOPS_BOOTSTRAP_APPROVER_EMAIL: ${AIOPS_BOOTSTRAP_APPROVER_EMAIL:-}
     ports:
       # 宿主机 18081 → 容器 8080（部署验证约定端口）。
       # 绑 0.0.0.0 以便局域网访问；生产环境仍建议经反向代理。

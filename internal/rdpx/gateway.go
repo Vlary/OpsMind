@@ -41,6 +41,8 @@ const (
 
 	// 孤儿行（Open 未 Attach/重启残留）扫描间隔。
 	orphanScanEvery = 5
+	// 交互会话授权复检间隔（契约 12.3 第 13 条）。
+	authRecheckEvery = 30
 
 	// 收尾各阶段预算：Shutdown 同步封盘总预算 ≤5s（契约 2.1）。
 	auditEnqueueTimeout = 2 * time.Second
@@ -103,6 +105,7 @@ type pendingSession struct {
 	id        string
 	serverID  string
 	userID    string
+	authID    string
 	startedAt time.Time
 }
 
@@ -111,6 +114,7 @@ type rdpLiveSession struct {
 	id         string
 	serverID   string
 	userID     string
+	authID     string
 	serverName string
 	requestID  string
 	ip         string
@@ -151,6 +155,11 @@ type Gateway struct {
 	live    map[string]*rdpLiveSession
 	servers map[string]string // serverID → sessionID（同服务器单会话）
 	closed  bool
+	// authorize 每 30 秒复检用户 enabled/角色权限（装配层注入）。
+	authorize func(ctx context.Context, userID string) error
+	// sessionAuthorize 是带 auth session id 的复检（契约 12.3 第 13 条）。
+	// 设置后优先于 authorize；nil 时回落。
+	sessionAuthorize func(ctx context.Context, userID, authSessionID string) error
 
 	govWG   sync.WaitGroup
 	govStop chan struct{}
@@ -199,6 +208,12 @@ func NewGateway(cfg Config, st store.Store, auditW *audit.Writer, cipher *crypto
 // GuacdAddr 为空返回 ErrGuacdUnavailable；同服务器活动会话/全局上限同
 // termx。成功写审计 session.start。不拨 guacd——WS Attach 时才拨。
 func (g *Gateway) Open(ctx context.Context, server store.Server, userID string, width, height, dpi int) (store.RdpSession, error) {
+	return g.OpenForAuthSession(ctx, server, userID, "", width, height, dpi)
+}
+
+// OpenForAuthSession 与 Open 相同，额外记录发起本次会话的 auth session id
+// （logout 按 auth session 精确关闭，契约 12.3 第 13 条）。
+func (g *Gateway) OpenForAuthSession(ctx context.Context, server store.Server, userID, authSessionID string, width, height, dpi int) (store.RdpSession, error) {
 	if server.OS != store.ServerOSWindows {
 		return store.RdpSession{}, ErrUnsupported
 	}
@@ -259,6 +274,7 @@ func (g *Gateway) Open(ctx context.Context, server store.Server, userID string, 
 		id:        session.ID,
 		serverID:  server.ID,
 		userID:    userID,
+		authID:    authSessionID,
 		startedAt: g.clock(),
 	}
 	g.enqueueAudit(session.ID, userID, server.ID, "session.start", map[string]any{
@@ -277,6 +293,12 @@ func (g *Gateway) Open(ctx context.Context, server store.Server, userID string, 
 // guacd 拨号或握手失败走完整收尾（Close 会话行 reason=error + 审计
 // session.end）并返回包装错误。错误路径连接由本方法收尾关闭。
 func (g *Gateway) Attach(ws WSConn, sessionID, userID, requestID, ip string) error {
+	return g.AttachForAuthSession(ws, sessionID, userID, "", requestID, ip)
+}
+
+// AttachForAuthSession 与 Attach 相同，额外绑定 auth session id（logout 按
+// auth session 精确关闭；空串表示不追踪）。
+func (g *Gateway) AttachForAuthSession(ws WSConn, sessionID, userID, authSessionID, requestID, ip string) error {
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
@@ -286,6 +308,9 @@ func (g *Gateway) Attach(ws WSConn, sessionID, userID, requestID, ip string) err
 	if !ok || p.userID != userID {
 		g.mu.Unlock()
 		return ErrNotActive
+	}
+	if authSessionID == "" {
+		authSessionID = p.authID
 	}
 	delete(g.pending, sessionID)
 	row, err := g.st.RdpSessions().Get(context.Background(), sessionID)
@@ -303,6 +328,7 @@ func (g *Gateway) Attach(ws WSConn, sessionID, userID, requestID, ip string) err
 		id:         sessionID,
 		serverID:   p.serverID,
 		userID:     userID,
+		authID:     authSessionID,
 		serverName: row.ServerName,
 		requestID:  requestID,
 		ip:         ip,
@@ -743,6 +769,108 @@ func (g *Gateway) recordingBytes(sessionID string) int64 {
 	return info.Size()
 }
 
+// SetAuthorizer 注入周期授权复检（装配期调用）。
+func (g *Gateway) SetAuthorizer(fn func(ctx context.Context, userID string) error) {
+	g.mu.Lock()
+	g.authorize = fn
+	g.mu.Unlock()
+}
+
+// SetSessionAuthorizer 注入带 auth session id 的周期复检（logout/TTL 后
+// 既有 RDP WS 必须断开；nil 回落 SetAuthorizer）。
+func (g *Gateway) SetSessionAuthorizer(fn func(ctx context.Context, userID, authSessionID string) error) {
+	g.mu.Lock()
+	g.sessionAuthorize = fn
+	g.mu.Unlock()
+}
+
+// CloseByAuthSession 结束某 auth session 名下的全部 RDP 会话（登出）。
+func (g *Gateway) CloseByAuthSession(ctx context.Context, authSessionID, reason string) {
+	if authSessionID == "" {
+		return
+	}
+	g.mu.Lock()
+	pendingTargets := make([]*pendingSession, 0, 1)
+	for id, p := range g.pending {
+		if p.authID == authSessionID {
+			pendingTargets = append(pendingTargets, p)
+			delete(g.pending, id)
+		}
+	}
+	targets := make([]*rdpLiveSession, 0, 1)
+	for _, s := range g.live {
+		if s.authID == authSessionID {
+			targets = append(targets, s)
+		}
+	}
+	g.mu.Unlock()
+
+	now := g.clock().UTC()
+	for _, p := range pendingTargets {
+		closeCtx, cancel := context.WithTimeout(ctx, dbCloseTimeout)
+		_, _ = g.st.RdpSessions().Close(closeCtx, store.CloseInteractiveSessionParams{
+			ID: p.id, Reason: reason, EndedAt: now,
+		})
+		cancel()
+	}
+	g.finishAll(ctx, targets, reason)
+}
+
+// finishAll 并行收尾一组 live 会话，等待完成或超时（≤5s）。
+func (g *Gateway) finishAll(ctx context.Context, targets []*rdpLiveSession, reason string) {
+	if len(targets) == 0 {
+		return
+	}
+	done := make(chan struct{}, len(targets))
+	for _, s := range targets {
+		go func(s *rdpLiveSession) {
+			g.finish(s, reason)
+			done <- struct{}{}
+		}(s)
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for range targets {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		}
+	}
+}
+
+// CloseByUser 结束某用户的全部 RDP 会话（停用/改角色/吊销会话/重置密码）。
+func (g *Gateway) CloseByUser(ctx context.Context, userID, reason string) {
+	g.mu.Lock()
+	pendingTargets := make([]*pendingSession, 0, 1)
+	for id, p := range g.pending {
+		if p.userID == userID {
+			pendingTargets = append(pendingTargets, p)
+			delete(g.pending, id)
+		}
+	}
+	targets := make([]*rdpLiveSession, 0, 1)
+	for _, s := range g.live {
+		if s.userID == userID {
+			targets = append(targets, s)
+		}
+	}
+	g.mu.Unlock()
+
+	now := g.clock().UTC()
+	for _, p := range pendingTargets {
+		closeCtx, cancel := context.WithTimeout(ctx, dbCloseTimeout)
+		_, _ = g.st.RdpSessions().Close(closeCtx, store.CloseInteractiveSessionParams{
+			ID: p.id, Reason: reason, EndedAt: now,
+		})
+		cancel()
+	}
+
+	g.finishAll(ctx, targets, reason)
+}
+
 // CloseByServer 结束某服务器的全部活动会话（服务器删除前调用）。
 func (g *Gateway) CloseByServer(ctx context.Context, serverID, reason string) {
 	g.mu.Lock()
@@ -819,18 +947,58 @@ func (g *Gateway) governLoop() {
 			return
 		case now := <-ticker.C:
 			tick++
-			g.governOnce(now, tick%orphanScanEvery == 0)
+			g.governOnce(now, tick%orphanScanEvery == 0, tick%authRecheckEvery == 0)
 		}
 	}
 }
 
-func (g *Gateway) governOnce(now time.Time, scanOrphans bool) {
+func (g *Gateway) governOnce(now time.Time, scanOrphans, recheckAuth bool) {
 	g.mu.Lock()
+	authorize := g.authorize
+	sessionAuthorize := g.sessionAuthorize
 	live := make([]*rdpLiveSession, 0, len(g.live))
 	for _, s := range g.live {
 		live = append(live, s)
 	}
+	pending := make([]*pendingSession, 0, len(g.pending))
+	for _, p := range g.pending {
+		pending = append(pending, p)
+	}
 	g.mu.Unlock()
+
+	check := func(userID, authID string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if sessionAuthorize != nil {
+			return sessionAuthorize(ctx, userID, authID)
+		}
+		if authorize != nil {
+			return authorize(ctx, userID)
+		}
+		return nil
+	}
+	// 契约 12.3 第 13 条：每 30 秒复检会话仍存在/未过期 + enabled/角色权限；
+	// 失败即断开。
+	if recheckAuth && (authorize != nil || sessionAuthorize != nil) {
+		for _, p := range pending {
+			if err := check(p.userID, p.authID); err == nil {
+				continue
+			}
+			g.mu.Lock()
+			delete(g.pending, p.id)
+			g.mu.Unlock()
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), dbCloseTimeout)
+			_, _ = g.st.RdpSessions().Close(closeCtx, store.CloseInteractiveSessionParams{
+				ID: p.id, Reason: reasonError, EndedAt: now.UTC(),
+			})
+			closeCancel()
+		}
+		for _, s := range live {
+			if err := check(s.userID, s.authID); err != nil {
+				g.finish(s, reasonError)
+			}
+		}
+	}
 
 	for _, s := range live {
 		activity := time.Unix(0, s.activity.Load())

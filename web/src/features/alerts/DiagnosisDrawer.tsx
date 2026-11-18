@@ -29,6 +29,7 @@ import RiskBadge from '../../components/RiskBadge';
 import CodeBlock from '../../components/CodeBlock';
 
 import { describePhase5Failure, describeResultCode } from './phase5Codes';
+import { useApprovalDecision } from '../auth/useApprovalDecision';
 import {
   DIAGNOSIS_STATUS_COLOR,
   DIAGNOSIS_STATUS_LABELS,
@@ -122,8 +123,7 @@ export default function DiagnosisDrawer({ open, sessionId, onClose }: DiagnosisD
       // 把 wrapper 整体当 Approval 存入，.id/.command 全 undefined，首点
       // decide 打到字面模板 URL 500 且命令区空白。
       const approval = ((data as { approval?: Approval } | undefined)?.approval ?? data) as
-        | Approval
-        | undefined;
+        Approval | undefined;
       message.success('已创建修复审批，请批准或拒绝');
       if (approval) {
         setPendingApproval(approval);
@@ -136,18 +136,11 @@ export default function DiagnosisDrawer({ open, sessionId, onClose }: DiagnosisD
   });
 
   const decideMutation = useMutation({
-    mutationFn: async (input: {
-      approvalId: string;
-      decision: 'approve' | 'deny';
-      /** 六期打磨 sprint 3：编辑态提交的改写后命令（仅 approve 合法）。 */
-      editedCommand?: string;
-    }) => {
+    mutationFn: async (input: { approvalId: string; decision: 'approve' | 'deny' }) => {
       const { data, error, response } = await api.POST('/api/approvals/{id}/decide', {
         params: { header: writeHeaders(), path: { id: input.approvalId } },
-        body: {
-          decision: input.decision,
-          ...(input.editedCommand !== undefined ? { edited_command: input.editedCommand } : {}),
-        },
+        // 00012：decide 只允许 decision/note；审批时不得改写命令。
+        body: { decision: input.decision },
       });
       if (error) {
         throw new ApiRequestError(toApiFailure(error, response));
@@ -230,15 +223,11 @@ export default function DiagnosisDrawer({ open, sessionId, onClose }: DiagnosisD
           onFix={(command) => {
             fixMutation.mutate(command);
           }}
-          onDecide={(decision, editedCommand) => {
+          onDecide={(decision) => {
             // .id 防御：审批对象若缺 id（异常数据），decide 会打到字面
             // 模板 URL 500——不触发而非报错。
             if (effectiveApproval?.id) {
-              decideMutation.mutate({
-                approvalId: effectiveApproval.id,
-                decision,
-                ...(editedCommand !== undefined ? { editedCommand } : {}),
-              });
+              decideMutation.mutate({ approvalId: effectiveApproval.id, decision });
             }
           }}
           onComplete={() => {
@@ -257,8 +246,7 @@ interface DiagnosisBodyProps {
   decidePending: boolean;
   completePending: boolean;
   onFix: (command: string) => void;
-  /** editedCommand 仅编辑态「保存并批准」携带（六期打磨 sprint 3）。 */
-  onDecide: (decision: 'approve' | 'deny', editedCommand?: string) => void;
+  onDecide: (decision: 'approve' | 'deny') => void;
   onComplete: () => void;
 }
 
@@ -273,7 +261,15 @@ function DiagnosisBody({
   onComplete,
 }: DiagnosisBodyProps) {
   const report = session.report;
-  // 六期打磨 sprint 3：修复审批的编辑命令态（此前该入口只能批准/拒绝）。
+  // RBAC 00012 / 第 7 轮走查 medium：修复审批可能与发起人相同（自审）或
+  // 当前账号无 approval:decide。两种情况下都不渲染批准/拒绝，避免点击后
+  // 才拿到 403。
+  const decisionState = useApprovalDecision({
+    status: pendingApproval?.status ?? 'expired',
+    requestedBy: pendingApproval?.requested_by ?? '',
+  });
+  const canApprove = decisionState === 'actions';
+  // 六期打磨 sprint 3：修复批审批的命令查看态（审批时禁止改写）。
   const [editing, setEditing] = useState(false);
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -335,26 +331,37 @@ function DiagnosisBody({
               </Typography.Paragraph>
               <Space wrap>
                 <RiskBadge level={pendingApproval.risk_level} />
-                <Button
-                  size="small"
-                  type="primary"
-                  loading={decidePending}
-                  onClick={() => {
-                    onDecide('approve');
-                  }}
-                >
-                  批准执行
-                </Button>
-                <Button
-                  size="small"
-                  danger
-                  loading={decidePending}
-                  onClick={() => {
-                    onDecide('deny');
-                  }}
-                >
-                  拒绝
-                </Button>
+                {canApprove ? (
+                  <>
+                    <Button
+                      size="small"
+                      type="primary"
+                      loading={decidePending}
+                      onClick={() => {
+                        onDecide('approve');
+                      }}
+                    >
+                      批准执行
+                    </Button>
+                    <Button
+                      size="small"
+                      danger
+                      loading={decidePending}
+                      onClick={() => {
+                        onDecide('deny');
+                      }}
+                    >
+                      拒绝
+                    </Button>
+                  </>
+                ) : editing ? null : (
+                  <Typography.Text type="secondary">
+                    等待审批者处理
+                    {decisionState === 'self'
+                      ? '（不能审批自己发起的请求）'
+                      : '（当前账号没有审批权限）'}
+                  </Typography.Text>
+                )}
                 {/* 六期打磨 sprint 3（走查 medium）：诊断修复审批此前只能
                     批准/拒绝，六期改写能力只在对话审批卡可用。编辑态复用
                     ApprovalCommandEditor（同一套校验/预览/请求体构造）。 */}
@@ -364,7 +371,7 @@ function DiagnosisBody({
                   disabled={decidePending}
                   onClick={() => setEditing((value) => !value)}
                 >
-                  {editing ? '取消编辑' : '编辑命令'}
+                  {editing ? '关闭命令' : '查看命令'}
                 </Button>
               </Space>
               {editing ? (
@@ -374,8 +381,9 @@ function DiagnosisBody({
                     riskLevel={pendingApproval.risk_level}
                     serverId={pendingApproval.server_id}
                     pending={decidePending}
-                    onSubmit={(body) => {
-                      onDecide('approve', body.edited_command);
+                    canApprove={canApprove}
+                    onSubmit={() => {
+                      onDecide('approve');
                     }}
                   />
                 </div>

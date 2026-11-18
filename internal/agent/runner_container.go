@@ -22,10 +22,6 @@ import (
 // errExecNotConfigured 表示对应执行通道未注入。
 var errExecNotConfigured = errors.New("agent: executor is not configured")
 
-// containerActionExecTimeout 是改写命令经通道逐字节执行的预算（六期
-// BE-P；与 containerx 内部 cliTimeout=60s 同口径）。
-const containerActionExecTimeout = 60 * time.Second
-
 // sshRunRequest / winRMRunRequest 构造通道层执行请求（输出上限 256KB，
 // 契约 7.2；logs 输出截断由通道层完成，Truncated 透传）。
 func sshRunRequest(command string, timeout time.Duration) sshx.RunRequest {
@@ -265,8 +261,8 @@ func (r *Runner) runImageList(ctx context.Context, rec store.ToolCall, raw json.
 // start=safe；stop/restart=needs_approval（CONTAINER_CHANGE，severity=high，
 // 7.3E）；审批判定走统一门限 approvals.NeedsApproval（六期 BE-P，契约
 // 2.11 约定 2——替换内联「needs_approval || !auto_exec」）。审批命令即
-// 逐字节命令（如 `docker stop 9f2c...`）；decide 批准且用户改写时执行
-// 改写后命令（经通道逐字节执行，契约 2.11 约定 3）。
+// 逐字节命令（如 `docker stop 9f2c...`）；00012 起 decide 禁止改写，
+// 批准后恒执行 approval.command（edited_command 仅历史只读）。
 func (r *Runner) runContainerAction(ctx context.Context, conv store.Conversation, rec store.ToolCall, providerCallID string, raw json.RawMessage, emit func(Event) error, in RunInput, approvalMode store.ApprovalMode) (out toolOutcome) {
 	var args containerActionArgs
 	if err := decodeStrictArgs(raw, &args); err != nil || args.ServerID == "" || args.ContainerID == "" {
@@ -302,7 +298,6 @@ func (r *Runner) runContainerAction(ctx context.Context, conv store.Conversation
 	})
 
 	approvalID := ""
-	editedCommand := ""
 	if needsApproval {
 		if r.approvals == nil {
 			return toolOutcome{Err: &ToolError{Code: codeInternal, Message: "approval service is not configured"}, Status: store.ToolFailed}
@@ -311,6 +306,7 @@ func (r *Runner) runContainerAction(ctx context.Context, conv store.Conversation
 		approval, err := r.approvals.Create(ctx, approvals.CreateRequest{
 			ConversationID: &conv.ID,
 			ToolCallID:     &rec.ID,
+			RequestedBy:    in.UserID,
 			ServerID:       &srv.ID,
 			ServerName:     srv.Name,
 			Command:        command,
@@ -359,8 +355,11 @@ func (r *Runner) runContainerAction(ctx context.Context, conv store.Conversation
 		}
 		switch decisionResult.Status {
 		case store.ApprovalApproved:
-			// 继续执行；批准且用户改写时改执行改写后命令（契约 2.11 约定 3）。
-			editedCommand = decisionResult.EditedCommand
+			// 契约 12.4 第 4 条：等待期间用户可能被停用/降权，执行前
+			// 从 store 再复读一次；失败则不执行动作。
+			if r.userStateDenied(ctx, in, ToolContainerAction) {
+				return toolOutcome{Err: &ToolError{Code: codeToolForbidden, Message: "tool forbidden"}, Status: store.ToolFailed}
+			}
 		case store.ApprovalDenied:
 			return toolOutcome{
 				Err:    &ToolError{Code: codeApprovalDenied, Message: "action was denied by the operator"},
@@ -374,20 +373,10 @@ func (r *Runner) runContainerAction(ctx context.Context, conv store.Conversation
 		}
 	}
 
-	// 执行：未改写走结构化 containerx（逐字节同审批命令）；改写时经通道
-	// 逐字节执行改写后命令（decide 已重新 Classify 拒绝 forbidden；超时
-	// 同 containerx 内部 cliTimeout=60s）。
+	// 执行：结构化 containerx 生成的命令与审批行 approval.command 逐字节
+	// 一致（契约 2.9 约定 3）；00012 起不存在改写路径。
 	var res containerx.ExecResult
-	if editedCommand != "" {
-		var execErr error
-		res, execErr = exec(ctx, editedCommand, containerActionExecTimeout)
-		if execErr != nil {
-			terr := classifyContainerExecError(execErr)
-			// 执行失败也落 container.action 审计（契约 9.7：含失败）。
-			r.auditContainerAction(ctx, conv.ID, srv.ID, string(rt), args.ContainerID, string(action), res.ExitCode, "chat", terr.Code)
-			return toolOutcome{Err: terr, Status: store.ToolFailed}
-		}
-	} else {
+	{
 		var err error
 		res, err = containerx.ContainerAction(ctx, rt, args.ContainerID, action, exec)
 		if err != nil {
@@ -399,11 +388,8 @@ func (r *Runner) runContainerAction(ctx context.Context, conv store.Conversation
 	}
 	r.auditContainerAction(ctx, conv.ID, srv.ID, string(rt), args.ContainerID, string(action), res.ExitCode, "chat", "")
 
-	// 实际执行命令（六期 BE-P：result 的 command 为改写后命令，回放据此重建）。
+	// 实际执行命令（与审批行/结构化命令同源；00012 起不读取 edited）。
 	executedCommand := containerx.ActionCommand(rt, args.ContainerID, action)
-	if editedCommand != "" {
-		executedCommand = editedCommand
-	}
 	var approvalPtr *string
 	if approvalID != "" {
 		approvalPtr = &approvalID

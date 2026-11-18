@@ -7,6 +7,7 @@ package approvals
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -21,10 +22,13 @@ import (
 
 // 审计动作名（CONTRACT.md 9.7）。
 const (
+	// revokeNote 是账号吊销收敛写入审批的 note（与 httpapi/rbacops 同值）。
+	revokeNote            = "rbac:user_revoked"
 	actionCreated         = "approval.created"
 	actionApproved        = "approval.approved"
 	actionDenied          = "approval.denied"
 	actionExpired         = "approval.expired"
+	actionGrantExpired    = "terminal.grant_expired"
 	actionStreamCancelled = "approval.stream_cancelled"
 	// actionCommandApproved 是「命令批准」动作（契约 9.7 command.approved）：
 	// chat/console 审批 decide 批准时写入；source=batch 由 batchx 在
@@ -37,10 +41,29 @@ const (
 	auditEnqueueTimeout    = 2 * time.Second
 	pendingExpireBatchSize = 200
 	pendingExpireMaxRounds = 50
+	// approvalPollInterval 是 Wait 轮询 DB 状态的间隔（走查第 3 轮 medium：
+	// 主机侧 break-glass/另一实例的决定不经过本进程 notify，只能读库看到）。
+	// 1s 远小于默认 120s TTL；每秒一次按主键 SELECT。
+	approvalPollInterval = time.Second
 )
 
 // ErrStoreUnavailable 表示未注入 store（仅骨架启动路径会出现）。
 var ErrStoreUnavailable = errors.New("approvals: store unavailable")
+
+// ErrPolicyStale 表示策略变更审批的目标已不适用于当前全局门限（期间已被
+// 他人收紧/调整）。httpapi 映射 409 POLICY_STALE（契约 12.3 第 10 条）。
+var ErrPolicyStale = errors.New("approvals: policy change is stale")
+
+// ErrPolicyNotWidening 表示策略审批的目标不比当前更宽——已经过期，批准
+// 不得覆盖更严的现行值。
+var ErrPolicyNotWidening = errors.New("approvals: policy change no longer widens current value")
+
+// ErrSelfDecision 表示审批人正是发起人（职责分离，契约 12.3 第 6 条）。
+// 审批状态保持 pending，绝不落 decided_by。
+var ErrSelfDecision = errors.New("approvals: requester cannot decide own approval")
+
+// maxTrackedRequesters 是进程内发起人表上限（防被刷时无界增长）。
+const maxTrackedRequesters = 4096
 
 // Decision 是审批等待结果。
 type Decision struct {
@@ -74,15 +97,31 @@ type CreateRequest struct {
 	// EffectiveMode 的结果原样传入）；空串按 standard 落库。
 	ApprovalMode string
 	RequestID    string
+	// RequestedBy 是实际发起人（契约 12.3 第 5 条）：chat=会话 owner；
+	// console/诊断 fix=HTTP 用户；batch=batch_jobs.created_by；terminal/policy
+	// =请求用户。必填。
+	RequestedBy string
+	// 00012：source=terminal 的 grant 元数据（grant_kind + grant_expires_at）。
+	GrantKind      *string
+	GrantExpiresAt *time.Time
+	// 00012：source=policy 的不可变变更目标（创建后不可改）。
+	PolicyFrom *string
+	PolicyTo   *string
+	// ExpiresAt 可选覆盖默认审批 TTL（terminal grant 需要 30 分钟窗口）。
+	// 零值使用服务默认 TTL。
+	ExpiresAt time.Time
 }
 
 // DecideRequest 是 decide 请求（httpapi → Service，六期 BE-P 结构体化）。
-// EditedCommand 仅 approve 时允许非空（deny 携带返回 ErrInvalid）；
-// 重分类在本函数内完成，httpapi 只透传用户输入、不得自行分类。
+// EditedCommand 仅历史兼容：HTTP handler 拒绝该字段（bindJSONStrict），
+// Service 侧保留旧内部路径；执行层永不读取。重分类在本函数内完成，
+// httpapi 只透传用户输入、不得自行分类。
 type DecideRequest struct {
-	ApprovalID    string
-	Approve       bool
-	DecidedBy     string
+	ApprovalID string
+	Approve    bool
+	DecidedBy  string
+	// RequestedBy 可显式传入（DB 行字段）；为空时用进程内创建时记录。
+	RequestedBy   string
 	Note          string
 	EditedCommand string
 	RequestID     string
@@ -98,8 +137,11 @@ type Service struct {
 
 	mu      sync.Mutex
 	waiters map[string]map[uint64]chan Decision
-	waitSeq uint64
-	started bool
+	// requesters 记录进程内创建的审批发起人（审批 TTL 到期/进程重启后
+	// pending 行由 sweeper 置 expired，故无需持久化即可覆盖存活审批）。
+	requesters map[string]string
+	waitSeq    uint64
+	started    bool
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -118,13 +160,14 @@ func NewService(st store.Store, auditWriter *audit.Writer, ttl time.Duration, cl
 		log = slog.Default()
 	}
 	return &Service{
-		st:      st,
-		audit:   auditWriter,
-		ttl:     ttl,
-		clock:   clock,
-		log:     log,
-		waiters: make(map[string]map[uint64]chan Decision),
-		stop:    make(chan struct{}),
+		st:         st,
+		audit:      auditWriter,
+		ttl:        ttl,
+		clock:      clock,
+		log:        log,
+		waiters:    make(map[string]map[uint64]chan Decision),
+		requesters: make(map[string]string, 64),
+		stop:       make(chan struct{}),
 	}
 }
 
@@ -190,17 +233,47 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (store.Approval
 		if req.ConversationID == nil || req.ToolCallID == nil || *req.ConversationID == "" || *req.ToolCallID == "" {
 			return store.Approval{}, store.ErrInvalid
 		}
-	case "console", "batch":
+	case "console", "batch", "terminal", "policy":
 		// 五期 M3（契约 4.26/2.10 约定 5）：batch 与 console 同语义——
 		// conversation_id/tool_call_id 为 NULL（NULL 不参与 UNIQUE）。
+		// 00012：terminal/policy 同样无对话上下文。
 		if req.ConversationID != nil || req.ToolCallID != nil {
 			return store.Approval{}, store.ErrInvalid
+		}
+		if source == "terminal" {
+			if req.GrantKind == nil || (*req.GrantKind != "term" && *req.GrantKind != "rdp") ||
+				req.GrantExpiresAt == nil {
+				return store.Approval{}, store.ErrInvalid
+			}
+			if req.ServerID == nil || *req.ServerID == "" {
+				return store.Approval{}, store.ErrInvalid
+			}
+		}
+		if source == "policy" {
+			if req.PolicyFrom == nil || req.PolicyTo == nil ||
+				!store.ValidApprovalMode(store.ApprovalMode(*req.PolicyFrom)) ||
+				!store.ValidApprovalMode(store.ApprovalMode(*req.PolicyTo)) {
+				return store.Approval{}, store.ErrInvalid
+			}
+			// 策略请求只能放宽（rank 更低）；收紧直接由 PUT /settings 执行，
+			// 不占用审批通道。
+			if !IsWidening(store.ApprovalMode(*req.PolicyFrom), store.ApprovalMode(*req.PolicyTo)) {
+				return store.Approval{}, ErrPolicyNotWidening
+			}
 		}
 	default:
 		return store.Approval{}, store.ErrInvalid
 	}
+	if strings.TrimSpace(req.RequestedBy) == "" {
+		// 契约 12.3 第 5 条：新审批 requested_by 非空；缺失即拒绝。
+		return store.Approval{}, store.ErrInvalid
+	}
 	now := s.clock().UTC()
-	ap, err := s.st.Approvals().Create(ctx, store.CreateApprovalParams{
+	expiresAt := now.Add(s.ttl)
+	if !req.ExpiresAt.IsZero() {
+		expiresAt = req.ExpiresAt.UTC()
+	}
+	params := store.CreateApprovalParams{
 		ConversationID: req.ConversationID,
 		ToolCallID:     req.ToolCallID,
 		Source:         source,
@@ -212,36 +285,134 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (store.Approval
 		Reason:         req.Reason,
 		ApprovalMode:   req.ApprovalMode,
 		RequestID:      req.RequestID,
-		ExpiresAt:      now.Add(s.ttl),
+		ExpiresAt:      expiresAt,
 		CreatedAt:      now,
+		// 契约 12.3 第 5 条：发起人必须落库（chat=会话 owner、
+		// console/诊断 fix=HTTP 用户、batch=batch_jobs.created_by），
+		// 不能只依赖进程内 recorders 表——重启后审批仍可被复检/决策。
+		RequestedBy:    req.RequestedBy,
+		GrantKind:      req.GrantKind,
+		GrantExpiresAt: req.GrantExpiresAt,
+		PolicyFrom:     req.PolicyFrom,
+		PolicyTo:       req.PolicyTo,
+	}
+	// 审批行与「approval.created / terminal.grant_requested /
+	// policy.change_requested」审计在同一事务内提交（契约 12.3 第 19 条）：
+	// 进程在提交与进程内入队之间崩溃不再丢这条审计。
+	actorType, actorID := "model", conversationActorID(req.ConversationID)
+	if source != "chat" {
+		actorType, actorID = "user", req.RequestedBy
+	}
+	action := actionCreated
+	detail := map[string]any{
+		"tool_call_id": derefOrEmpty(req.ToolCallID),
+		"source":       source,
+		"requested_by": req.RequestedBy,
+		"risk_level":   req.RiskLevel,
+		"expires_at":   expiresAt.UTC().Format(time.RFC3339Nano),
+	}
+	switch source {
+	case "terminal":
+		action = "terminal.grant_requested"
+		detail["grant_kind"] = derefOrEmpty(req.GrantKind)
+		detail["server_id"] = derefOrEmpty(req.ServerID)
+	case "policy":
+		action = "policy.change_requested"
+		detail["policy_from"] = derefOrEmpty(req.PolicyFrom)
+		detail["policy_to"] = derefOrEmpty(req.PolicyTo)
+	}
+
+	ev := func(approvalID string) audit.Event {
+		detail["approval_id"] = approvalID
+		// 契约 9.7 / 6016：policy.change_requested 与 policy.change_applied
+		// 同口径 resource_type=setting、resource_id=approval.mode（第 4 轮
+		// 走查 low）。此前 policy 申请也硬编码 approval，审计页按
+		// 「目标类型=设置」过滤时看不到「谁申请了放宽审批门限」。
+		resourceType, resourceID := "approval", approvalID
+		if source == "policy" {
+			resourceType, resourceID = "setting", approvalModeSettingKey
+		}
+		return audit.Event{
+			ActorType:      actorType,
+			ActorID:        actorID,
+			Action:         action,
+			ResourceType:   resourceType,
+			ResourceID:     resourceID,
+			RequestID:      req.RequestID,
+			ConversationID: req.ConversationID,
+			ServerID:       req.ServerID,
+			Detail:         detail,
+		}
+	}
+
+	var ap store.Approval
+	if store.OutboxOf(s.st) == nil {
+		// 未实现 outbox 的存储（内存 fake/骨架）：保持旧路径（直接建行 +
+		// 进程内异步审计），保证单测与骨架可运行。
+		created, cerr := s.st.Approvals().Create(ctx, params)
+		if cerr != nil {
+			return store.Approval{}, cerr
+		}
+		ap = created
+		s.emitAudit(ctx, ev(ap.ID))
+		s.trackRequester(ap.ID, req.RequestedBy)
+		return ap, nil
+	}
+	err := s.withOutboxTx(ctx, func(tx store.Store) error {
+		created, cerr := tx.Approvals().Create(ctx, params)
+		if cerr != nil {
+			return cerr
+		}
+		ap = created
+		_, aerr := s.emitAuditTx(ctx, tx, ev(ap.ID))
+		return aerr
 	})
 	if err != nil {
 		return store.Approval{}, err
 	}
-	s.emitAudit(ctx, audit.Event{
-		ActorType:      "model",
-		ActorID:        conversationActorID(req.ConversationID),
-		Action:         actionCreated,
-		ResourceType:   "approval",
-		ResourceID:     ap.ID,
-		RequestID:      req.RequestID,
-		ConversationID: req.ConversationID,
-		ServerID:       req.ServerID,
-		Detail: map[string]any{
-			"approval_id":  ap.ID,
-			"tool_call_id": derefOrEmpty(ap.ToolCallID),
-			"source":       source,
-			"risk_level":   req.RiskLevel,
-			"expires_at":   ap.ExpiresAt.UTC().Format(time.RFC3339Nano),
-		},
-	})
+	s.trackRequester(ap.ID, req.RequestedBy)
 	return ap, nil
+}
+
+// withOutboxTx 在事务内执行审批状态变更；不支持事务的存储（内存 fake）
+// 直接以自身为事务执行（行为与旧路径一致）。
+//
+// 返回 store.ErrTxUnsupported 时回落到非事务路径，保证骨架/单测可运行。
+func (s *Service) withOutboxTx(ctx context.Context, fn func(tx store.Store) error) error {
+	err := s.st.WithTx(ctx, fn)
+	if errors.Is(err, store.ErrTxUnsupported) {
+		return fn(s.st)
+	}
+	return err
+}
+
+// emitAuditTx 在业务事务内写 audit_outbox（契约 12.3 第 19 条）。
+// 返回 false 表示存储未实现 outbox，调用方应在提交后回落到进程内 Enqueue。
+func (s *Service) emitAuditTx(ctx context.Context, tx store.Store, e audit.Event) (bool, error) {
+	outbox := store.OutboxOf(tx)
+	if outbox == nil {
+		return false, nil
+	}
+	payload, err := audit.OutboxPayload(e, s.clock())
+	if err != nil {
+		return true, err
+	}
+	if err := outbox.EnqueueAuditOutbox(ctx, payload, s.clock()); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // Wait 等待审批决策或超时。
 //
 // 返回 approved/denied/expired；ctx 取消返回 ctx.Err()，不改变数据库状态
 // （调用方必须调用 Cancel 或由 sweeper 过期）。
+//
+// 走查第 3 轮 medium：跨进程决策只能从 DB 看到（主机侧
+// `aiops break-glass` 直接 UPDATE approvals，进程内 channel 永不触发），
+// 旧实现只等 channel 或 TTL——等待方会挂到审批到期才继续，期间库里已是
+// approved，用户以为没生效。这里在 channel 之外按 approvalPollInterval
+// 轮询一次 DB 状态；轮询间隔远小于 TTL，代价是一次按主键的 SELECT。
 func (s *Service) Wait(ctx context.Context, approvalID string) (Decision, error) {
 	if s.st == nil {
 		return Decision{}, ErrStoreUnavailable
@@ -274,27 +445,47 @@ func (s *Service) Wait(ctx context.Context, approvalID string) (Decision, error)
 
 	timer := time.NewTimer(time.Until(ap.ExpiresAt))
 	defer timer.Stop()
+	poll := time.NewTicker(approvalPollInterval)
+	defer poll.Stop()
 
-	select {
-	case d := <-ch:
-		return d, nil
-	case <-ctx.Done():
-		return Decision{}, ctx.Err()
-	case <-timer.C:
-		// 落库交给 sweeper；这里也尝试一次，确保状态及时可见。
-		if _, err := s.Expire(context.WithoutCancel(ctx), s.clock()); err != nil {
-			s.log.Warn("approval_expire_failed", "approval_id", approvalID, "error", err.Error())
+	for {
+		select {
+		case d := <-ch:
+			return d, nil
+		case <-ctx.Done():
+			return Decision{}, ctx.Err()
+		case <-poll.C:
+			// 跨进程决策（主机侧 break-glass / 另一实例的 HTTP decide）
+			// 不经过本进程的 notify：直接读库确认终态。
+			cur, gerr := s.st.Approvals().Get(ctx, approvalID)
+			if gerr != nil {
+				if ctx.Err() != nil {
+					return Decision{}, ctx.Err()
+				}
+				// 瞬时读失败不结束等待：下一 tick 再试，TTL 兜底。
+				continue
+			}
+			if cur.Status != store.ApprovalPending {
+				return decisionOf(cur), nil
+			}
+		case <-timer.C:
+			// 落库交给 sweeper；这里也尝试一次，确保状态及时可见。
+			if _, err := s.Expire(context.WithoutCancel(ctx), s.clock()); err != nil {
+				s.log.Warn("approval_expire_failed", "approval_id", approvalID, "error", err.Error())
+			}
+			d, err := s.Get(context.WithoutCancel(ctx), approvalID)
+			if err == nil && d.Status != store.ApprovalPending {
+				return decisionOf(d), nil
+			}
+			return Decision{ApprovalID: approvalID, Status: store.ApprovalExpired}, nil
 		}
-		d, err := s.Get(context.WithoutCancel(ctx), approvalID)
-		if err == nil && d.Status != store.ApprovalPending {
-			return decisionOf(d), nil
-		}
-		return Decision{ApprovalID: approvalID, Status: store.ApprovalExpired}, nil
 	}
 }
 
 // Decide 批准或拒绝审批（六期 BE-P 结构体化，契约 5.5/2.11 约定 3）。
-// 先持久化，再通知等待者。改写流程：EditedCommand 非空时——
+// 00012 起先读持久化行做职责分离（requested_by != decided_by）与历史改写
+// 拦截，再持久化并通知等待者。改写流程（仅历史兼容路径；HTTP 已拒绝
+// edited_command）：EditedCommand 非空时——
 // approve=false → ErrInvalid；长度/NUL 校验 → ErrInvalid；server_id 为空
 // → ErrInvalid；按 server 的 device_kind/os 重新分类（network_device 走
 // ClassifyNet）→ forbidden 返回 ErrForbidden（httpapi 映射 403
@@ -304,6 +495,54 @@ func (s *Service) Wait(ctx context.Context, approvalID string) (Decision, error)
 func (s *Service) Decide(ctx context.Context, req DecideRequest) (store.Approval, error) {
 	if s.st == nil {
 		return store.Approval{}, ErrStoreUnavailable
+	}
+	// 先读持久化行：requested_by 是职责分离的唯一事实源（契约 12.3 第 6
+	// 条）。不能只依赖进程内 map——多实例/重启后 map 为空时也必须拒绝自审；
+	// 调用方传入的 RequestedBy 只作为历史行的兜底，不覆盖 DB 值。
+	stored, err := s.st.Approvals().Get(ctx, req.ApprovalID)
+	if err != nil {
+		return store.Approval{}, err
+	}
+	if stored.Status != store.ApprovalPending {
+		return store.Approval{}, store.ErrConflict
+	}
+	// 第 11 轮走查 high：TTL 是审批有效性的一部分。sweeper 尚未把过期行
+	// 置为 expired 的窗口内（DB/审计积压时可达数秒），任何有
+	// approval:decide 的账号仍能批准并触发 console/batch 同步执行或
+	// policy 放宽。这里按决策时刻先判 TTL：过期即收敛为 expired 并返回
+	// 冲突，保证「倒计时归零后不能批准」；store 的 UPDATE 另有 expires_at
+	// 兜底（decideExpiryClause），覆盖读到与写入之间时间推进的竞态。
+	now := s.clock().UTC()
+	if !stored.ExpiresAt.After(now) {
+		// 收敛写库不跟随请求取消，但必须有上限：请求方断开不应让 decide
+		// handler 挂在审计积压上（与 Cancel 同用 5s）。
+		expireCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelWriteTimeout)
+		defer cancel()
+		if _, err := s.Expire(expireCtx, now); err != nil {
+			// 收敛失败也不放行：DB 的 expires_at 兜底同样会拒绝这次决策。
+			if s.log != nil {
+				s.log.Warn("approval_expire_on_decide_failed", "approval_id", req.ApprovalID, "error", err.Error())
+			}
+		}
+		return store.Approval{}, store.ErrConflict
+	}
+	// 契约 12.3 第 7 条：00012 之前的历史 pending 改写行不得决策。
+	if stored.Legacy && stored.EditedCommand != "" {
+		return store.Approval{}, ErrLegacyEdit
+	}
+	requestedBy := stored.RequestedBy
+	if requestedBy == "" {
+		requestedBy = req.RequestedBy
+	}
+	if requestedBy == "" {
+		requestedBy = s.requesterOf(req.ApprovalID)
+	}
+	if requestedBy == "" || req.DecidedBy == "" {
+		// 无法证明「第二人」时失败关闭，绝不落 decided_by。
+		return store.Approval{}, ErrInvalid
+	}
+	if requestedBy == req.DecidedBy {
+		return store.Approval{}, ErrSelfDecision
 	}
 	edited := req.EditedCommand
 	editedRiskLevel := ""
@@ -331,8 +570,8 @@ func (s *Service) Decide(ctx context.Context, req DecideRequest) (store.Approval
 		status = store.ApprovalDenied
 		action = actionDenied
 	}
-	now := s.clock().UTC()
-	ap, err := s.st.Approvals().Decide(ctx, store.DecideApprovalParams{
+	now = s.clock().UTC()
+	params := store.DecideApprovalParams{
 		ID:              req.ApprovalID,
 		Status:          status,
 		DecidedBy:       req.DecidedBy,
@@ -341,10 +580,56 @@ func (s *Service) Decide(ctx context.Context, req DecideRequest) (store.Approval
 		EditedRiskLevel: editedRiskLevel,
 		EditedRuleID:    editedRuleID,
 		DecidedAt:       now,
-	})
+	}
+	// 决策状态（policy 批准时还含 settings）与决策审计在**同一事务**内提交
+	// （契约 12.3 第 19 条）：approval.approved/denied、command.approved、
+	// terminal.grant_approved、policy.change_applied 全部走 audit_outbox，
+	// 进程在提交与入队之间崩溃不再永久丢审计。
+	var ap store.Approval
+	outboxUsed := false
+	apply := func(tx store.Store) error {
+		if stored.Source == "policy" && req.Approve {
+			// 契约 12.3 第 10/11 条：策略变更批准在**同一事务**内复验目标
+			// （policy_from 必须仍是当前值、policy_to 仍更宽）并写 settings，
+			// 与审批状态一起提交或一起回滚。
+			current, err := GlobalMode(ctx, tx)
+			if err != nil {
+				return err
+			}
+			from := derefOrEmpty(stored.PolicyFrom)
+			to := derefOrEmpty(stored.PolicyTo)
+			if from != string(current) {
+				return ErrPolicyStale
+			}
+			if !IsWidening(current, store.ApprovalMode(to)) {
+				return ErrPolicyNotWidening
+			}
+			raw, err := json.Marshal(to)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Settings().Set(ctx, approvalModeSettingKey, raw, now); err != nil {
+				return err
+			}
+		}
+		decided, err := tx.Approvals().Decide(ctx, params)
+		if err != nil {
+			return err
+		}
+		ap = decided
+		used, err := s.emitDecideAuditTx(ctx, tx, ap, req, action, edited, editedRiskLevel)
+		outboxUsed = used
+		return err
+	}
+	if store.OutboxOf(s.st) != nil {
+		err = s.withOutboxTx(ctx, apply)
+	} else {
+		err = apply(s.st)
+	}
 	if err != nil {
 		return store.Approval{}, err
 	}
+	s.untrackRequester(req.ApprovalID)
 	s.notify(req.ApprovalID, decisionOf(ap))
 
 	detail := map[string]any{
@@ -367,7 +652,50 @@ func (s *Service) Decide(ctx context.Context, req DecideRequest) (store.Approval
 		detail["original_risk_level"] = ap.RiskLevel
 		detail["edited_risk_level"] = editedRiskLevel
 	}
-	s.emitAudit(ctx, audit.Event{
+	if !outboxUsed {
+		// 未实现 outbox 的存储（内存 fake/骨架）：进程内异步审计，顺序与
+		// 事务内路径一致（决策行 → command.approved → 生命周期行）。
+		s.emitAudit(ctx, audit.Event{
+			ActorType:      "user",
+			ActorID:        req.DecidedBy,
+			Action:         action,
+			ResourceType:   "approval",
+			ResourceID:     ap.ID,
+			RequestID:      req.RequestID,
+			ConversationID: ap.ConversationID,
+			ServerID:       ap.ServerID,
+			Detail:         detail,
+		})
+		// 与事务内路径同口径：仅 chat/console 批准写 command.approved
+		//（batch 由 batchx 补齐 batch_job_id），terminal/policy 另写生命周期行。
+		if req.Approve && (ap.Source == "chat" || ap.Source == "console") {
+			s.emitCommandApproved(ctx, ap, req, edited, editedRiskLevel)
+		}
+		if ev, ok := lifecycleAudit(ap, req); ok {
+			s.emitAudit(ctx, ev)
+		}
+	}
+	return ap, nil
+}
+
+// emitDecideAuditTx 在决策事务内写全部决策审计（决策行 + command.approved
+// + terminal/policy 生命周期行）。
+func (s *Service) emitDecideAuditTx(ctx context.Context, tx store.Store, ap store.Approval, req DecideRequest, action, edited, editedRiskLevel string) (bool, error) {
+	detail := map[string]any{
+		"approval_id":  ap.ID,
+		"tool_call_id": derefOrEmpty(ap.ToolCallID),
+		"source":       ap.Source,
+		"risk_level":   ap.RiskLevel,
+		"note":         req.Note,
+		"command":      ap.Command,
+	}
+	if edited != "" {
+		detail["original_command"] = ap.Command
+		detail["edited_command"] = edited
+		detail["original_risk_level"] = ap.RiskLevel
+		detail["edited_risk_level"] = editedRiskLevel
+	}
+	events := []audit.Event{{
 		ActorType:      "user",
 		ActorID:        req.DecidedBy,
 		Action:         action,
@@ -377,21 +705,78 @@ func (s *Service) Decide(ctx context.Context, req DecideRequest) (store.Approval
 		ConversationID: ap.ConversationID,
 		ServerID:       ap.ServerID,
 		Detail:         detail,
-	})
-	// 契约 9.7：批准另写 command.approved（命令生命周期动作，审计页
-	//「命令批准」筛选的落地行）。source=batch 不在此写——批量审批的
-	// command.approved 由 batchx.OnApprovalDecided 补齐 batch_job_id
-	//（与 command.executed/command.denied 同口径），避免一次批准两行重复。
-	if req.Approve && ap.Source != "batch" {
-		s.emitCommandApproved(ctx, ap, req, edited, editedRiskLevel)
+	}}
+	// 契约 9.7：批准另写 command.approved。source=batch 由 batchx 补齐
+	// batch_job_id，避免一次批准两行重复。
+	if req.Approve && (ap.Source == "chat" || ap.Source == "console") {
+		events = append(events, commandApprovedEvent(ap, req, edited, editedRiskLevel))
 	}
-	return ap, nil
+	if ev, ok := lifecycleAudit(ap, req); ok {
+		events = append(events, ev)
+	}
+	used := true
+	for _, e := range events {
+		u, err := s.emitAuditTx(ctx, tx, e)
+		if err != nil {
+			return used, err
+		}
+		used = used && u
+	}
+	return used, nil
+}
+
+// lifecycleAudit 返回 terminal/policy 的专用生命周期审计（契约 9.7）。
+func lifecycleAudit(ap store.Approval, req DecideRequest) (audit.Event, bool) {
+	if !req.Approve {
+		return audit.Event{}, false
+	}
+	switch ap.Source {
+	case "terminal":
+		return audit.Event{
+			ActorType:    "user",
+			ActorID:      req.DecidedBy,
+			Action:       "terminal.grant_approved",
+			ResourceType: "approval",
+			ResourceID:   ap.ID,
+			RequestID:    req.RequestID,
+			ServerID:     ap.ServerID,
+			Detail: map[string]any{
+				"approval_id":  ap.ID,
+				"grant_kind":   derefOrEmpty(ap.GrantKind),
+				"server_id":    derefOrEmpty(ap.ServerID),
+				"requested_by": ap.RequestedBy,
+				"decided_by":   req.DecidedBy,
+			},
+		}, true
+	case "policy":
+		return audit.Event{
+			ActorType:    "user",
+			ActorID:      req.DecidedBy,
+			Action:       "policy.change_applied",
+			ResourceType: "setting",
+			ResourceID:   approvalModeSettingKey,
+			RequestID:    req.RequestID,
+			Detail: map[string]any{
+				"policy_from":  derefOrEmpty(ap.PolicyFrom),
+				"policy_to":    derefOrEmpty(ap.PolicyTo),
+				"requested_by": ap.RequestedBy,
+				"decided_by":   req.DecidedBy,
+			},
+		}, true
+	default:
+		return audit.Event{}, false
+	}
 }
 
 // emitCommandApproved 写 command.approved 审计（契约 9.7）。资源锚定
 // 服务器（与 command.executed 同口径）；审批无 server_id 时回落到审批行，
 // 保证命令文本始终有出处可查。
 func (s *Service) emitCommandApproved(ctx context.Context, ap store.Approval, req DecideRequest, edited, editedRiskLevel string) {
+	s.emitAudit(ctx, commandApprovedEvent(ap, req, edited, editedRiskLevel))
+}
+
+// commandApprovedEvent 构造 command.approved 审计事件（契约 9.7）。
+func commandApprovedEvent(ap store.Approval, req DecideRequest, edited, editedRiskLevel string) audit.Event {
 	commandDetail := map[string]any{
 		"approval_id":   ap.ID,
 		"tool_call_id":  derefOrEmpty(ap.ToolCallID),
@@ -412,7 +797,7 @@ func (s *Service) emitCommandApproved(ctx context.Context, ap store.Approval, re
 		resourceType = "server"
 		resourceID = *ap.ServerID
 	}
-	s.emitAudit(ctx, audit.Event{
+	return audit.Event{
 		ActorType:      "user",
 		ActorID:        req.DecidedBy,
 		Action:         actionCommandApproved,
@@ -422,7 +807,7 @@ func (s *Service) emitCommandApproved(ctx context.Context, ap store.Approval, re
 		ConversationID: ap.ConversationID,
 		ServerID:       ap.ServerID,
 		Detail:         commandDetail,
-	})
+	}
 }
 
 // reclassify 按审批目标服务器对改写命令重新分类（契约 2.11 约定 3）：
@@ -484,13 +869,47 @@ func (s *Service) Cancel(ctx context.Context, approvalID, reason, requestID stri
 	defer cancel()
 
 	now := s.clock().UTC()
-	ap, err := s.st.Approvals().Decide(writeCtx, store.DecideApprovalParams{
-		ID:        approvalID,
-		Status:    store.ApprovalExpired,
-		DecidedBy: "",
-		Note:      reason,
-		DecidedAt: now,
-	})
+	action := actionExpired
+	if reason == cancelReasonStream {
+		action = actionStreamCancelled
+	}
+	var ap store.Approval
+	outboxUsed := false
+	apply := func(tx store.Store) error {
+		decided, err := tx.Approvals().Decide(writeCtx, store.DecideApprovalParams{
+			ID:        approvalID,
+			Status:    store.ApprovalExpired,
+			DecidedBy: "",
+			Note:      reason,
+			DecidedAt: now,
+		})
+		if err != nil {
+			return err
+		}
+		ap = decided
+		used, err := s.emitAuditTx(ctx, tx, audit.Event{
+			ActorType:      "system",
+			ActorID:        "system",
+			Action:         action,
+			ResourceType:   "approval",
+			ResourceID:     ap.ID,
+			RequestID:      requestID,
+			ConversationID: ap.ConversationID,
+			ServerID:       ap.ServerID,
+			Detail: map[string]any{
+				"approval_id": ap.ID,
+				"reason":      reason,
+			},
+		})
+		outboxUsed = used
+		return err
+	}
+	var err error
+	if store.OutboxOf(s.st) != nil {
+		err = s.withOutboxTx(writeCtx, apply)
+	} else {
+		err = apply(s.st)
+	}
 	if err != nil {
 		return store.Approval{}, err
 	}
@@ -500,25 +919,22 @@ func (s *Service) Cancel(ctx context.Context, approvalID, reason, requestID stri
 		DecidedAt:  ap.DecidedAt,
 		Note:       reason,
 	})
-
-	action := actionExpired
-	if reason == cancelReasonStream {
-		action = actionStreamCancelled
+	if !outboxUsed {
+		s.emitAudit(ctx, audit.Event{
+			ActorType:      "system",
+			ActorID:        "system",
+			Action:         action,
+			ResourceType:   "approval",
+			ResourceID:     ap.ID,
+			RequestID:      requestID,
+			ConversationID: ap.ConversationID,
+			ServerID:       ap.ServerID,
+			Detail: map[string]any{
+				"approval_id": ap.ID,
+				"reason":      reason,
+			},
+		})
 	}
-	s.emitAudit(ctx, audit.Event{
-		ActorType:      "system",
-		ActorID:        "system",
-		Action:         action,
-		ResourceType:   "approval",
-		ResourceID:     ap.ID,
-		RequestID:      requestID,
-		ConversationID: ap.ConversationID,
-		ServerID:       ap.ServerID,
-		Detail: map[string]any{
-			"approval_id": ap.ID,
-			"reason":      reason,
-		},
-	})
 	return ap, nil
 }
 
@@ -548,68 +964,197 @@ func (s *Service) Expire(ctx context.Context, now time.Time) (int64, error) {
 		return 0, ErrStoreUnavailable
 	}
 	now = now.UTC()
+	// 走查第 3 轮 medium：已批准但已过 grant_expires_at 的终端/RDP 授权
+	// 也必须收敛为 expired 并写终端授权过期审计。此前库里状态永远是
+	// approved，只有前端按 grant_expires_at 临时推算「已过期」，审计页
+	// 「终端授权过期」筛选恒空。放在 pending 过期之前：两者互不相关。
+	if _, err := s.expireStaleGrants(ctx, now); err != nil {
+		s.log.Warn("terminal_grant_expire_failed", "error", err.Error())
+	}
 	// 候选快照失败不阻断过期本身（过期是安全方向的收敛）；只丢明细。
 	candidates, snapErr := s.expiringCandidates(ctx, now)
 	if snapErr != nil && s.log != nil {
 		s.log.Warn("approval_expire_snapshot_failed", "error", snapErr.Error())
 	}
-	n, err := s.st.Approvals().Expire(ctx, now)
-	if err != nil {
-		return n, err
+
+	// 第 4 轮走查 medium：pending 过期此前是「裸 UPDATE + 进程内审计队列」，
+	// 进程在两步之间崩溃会留下「已过期但无审计」的审批，与契约 12.3 第 19
+	// 条「审批过期与 audit_outbox 同事务」冲突。这里与 expireStaleGrants
+	// 同口径：UPDATE 与逐条/聚合 audit_outbox 在同一 WithTx 内提交；
+	// 存储未实现 outbox（内存 fake/骨架）时回落到进程内审计。
+	var n int64
+	var detailEvents []audit.Event
+	var aggregate audit.Event
+	apply := func(tx store.Store) error {
+		var err error
+		n, err = tx.Approvals().Expire(ctx, now)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+		detailEvents = detailEvents[:0]
+		expiredIDs := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			// 复核：并发 decide 抢先的行不是「过期」，不得落「已过期」事实。
+			cur, gerr := tx.Approvals().Get(ctx, candidate.ID)
+			if gerr != nil || cur.Status != store.ApprovalExpired {
+				continue
+			}
+			expiredIDs = append(expiredIDs, cur.ID)
+			detailEvents = append(detailEvents, audit.Event{
+				ActorType:      "system",
+				ActorID:        "system",
+				Action:         actionExpired,
+				ResourceType:   "approval",
+				ResourceID:     cur.ID,
+				ConversationID: cur.ConversationID,
+				ServerID:       cur.ServerID,
+				Detail: map[string]any{
+					"approval_id":   cur.ID,
+					"reason":        expireCandidateReason,
+					"source":        cur.Source,
+					"command":       cur.Command,
+					"risk_level":    cur.RiskLevel,
+					"approval_mode": string(cur.ApprovalMode),
+					"server_name":   cur.ServerName,
+				},
+			})
+		}
+		// 聚合行保留（一次扫描一行的旧口径不变；detail 另带本次落过明细的
+		// 审批 ID 列表，便于按 ID 反查——上限 expireCandidateLimit，超出时
+		// truncated=true 表示明细未覆盖全部）。
+		detail := map[string]any{"count": n}
+		if len(expiredIDs) > 0 {
+			detail["approval_ids"] = expiredIDs
+		}
+		if int64(len(candidates)) < n {
+			detail["detail_truncated"] = true
+		}
+		aggregate = audit.Event{
+			ActorType:    "system",
+			ActorID:      "system",
+			Action:       actionExpired,
+			ResourceType: "approval",
+			ResourceID:   "",
+			Detail:       detail,
+		}
+		return nil
+	}
+
+	outbox := store.OutboxOf(s.st) != nil
+	if outbox {
+		err := s.withOutboxTx(ctx, func(tx store.Store) error {
+			if err := apply(tx); err != nil {
+				return err
+			}
+			if n == 0 {
+				return nil
+			}
+			for _, ev := range detailEvents {
+				if _, err := s.emitAuditTx(ctx, tx, ev); err != nil {
+					return err
+				}
+			}
+			_, err := s.emitAuditTx(ctx, tx, aggregate)
+			return err
+		})
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	}
+	if err := apply(s.st); err != nil {
+		return 0, err
 	}
 	if n == 0 {
 		return 0, nil
 	}
-	expiredIDs := make([]string, 0, len(candidates))
-	for _, candidate := range candidates {
-		// 复核：并发 decide 抢先的行不是「过期」，不得落「已过期」事实。
-		cur, gerr := s.st.Approvals().Get(ctx, candidate.ID)
-		if gerr != nil || cur.Status != store.ApprovalExpired {
-			continue
-		}
-		expiredIDs = append(expiredIDs, cur.ID)
-		s.emitAudit(ctx, audit.Event{
-			ActorType:      "system",
-			ActorID:        "system",
-			Action:         actionExpired,
-			ResourceType:   "approval",
-			ResourceID:     cur.ID,
-			ConversationID: cur.ConversationID,
-			ServerID:       cur.ServerID,
-			Detail: map[string]any{
-				"approval_id":   cur.ID,
-				"reason":        expireCandidateReason,
-				"source":        cur.Source,
-				"command":       cur.Command,
-				"risk_level":    cur.RiskLevel,
-				"approval_mode": string(cur.ApprovalMode),
-				"server_name":   cur.ServerName,
-			},
-		})
+	for _, ev := range detailEvents {
+		s.emitAudit(ctx, ev)
 	}
-	// 聚合行保留（一次扫描一行的旧口径不变；detail 另带本次落过明细的
-	// 审批 ID 列表，便于按 ID 反查——上限 expireCandidateLimit，超出时
-	// truncated=true 表示明细未覆盖全部）。
-	detail := map[string]any{"count": n}
-	if len(expiredIDs) > 0 {
-		detail["approval_ids"] = expiredIDs
-	}
-	if int64(len(candidates)) < n {
-		detail["detail_truncated"] = true
-	}
-	s.emitAudit(ctx, audit.Event{
-		ActorType:    "system",
-		ActorID:      "system",
-		Action:       actionExpired,
-		ResourceType: "approval",
-		ResourceID:   "",
-		Detail:       detail,
-	})
+	s.emitAudit(ctx, aggregate)
 	return n, nil
 }
 
-// expiringCandidates 读取 pending 审批中已到期的行（逐条审计的明细来源）。
-// List 无游标（契约 3.3/4.9），因此只取一页 expireCandidateLimit 条——
+// grantExpireBatchSize 是单轮收敛的过期授权上限（防 OOM 铁律：写死数值；
+// 与 expireCandidateLimit 同量级，sweeper 每秒复扫，积压会连续清空）。
+const grantExpireBatchSize = 200
+
+// expireStaleGrants 把「已批准、未消费、grant_expires_at 已过」的终端/RDP
+// 授权收敛为 expired，并在同一事务内逐条写 terminal.grant_expired 审计
+// （走查第 3 轮 medium：此前只有前端按时间戳临时推算「已过期」，库里的
+// 状态永远是 approved，审计页「终端授权过期」筛选恒空）。
+//
+// 存储未实现 GrantExpiryStore（内存 fake/骨架）时无操作。
+func (s *Service) expireStaleGrants(ctx context.Context, now time.Time) (int64, error) {
+	if store.GrantExpiryStoreOf(s.st) == nil {
+		return 0, nil
+	}
+	var expired []store.Approval
+	apply := func(tx store.Store) error {
+		expiry := store.GrantExpiryStoreOf(tx)
+		if expiry == nil {
+			return nil
+		}
+		rows, err := expiry.ExpireStaleGrants(ctx, now, grantExpireBatchSize)
+		if err != nil {
+			return err
+		}
+		expired = rows
+		for _, ap := range rows {
+			if _, err := s.emitAuditTx(ctx, tx, grantExpiredEvent(ap, "grant_expired")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var err error
+	if store.OutboxOf(s.st) != nil {
+		err = s.withOutboxTx(ctx, apply)
+	} else {
+		err = apply(s.st)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if store.OutboxOf(s.st) == nil {
+		for _, ap := range expired {
+			s.emitAudit(ctx, grantExpiredEvent(ap, "grant_expired"))
+		}
+	}
+	return int64(len(expired)), nil
+}
+
+// grantExpiredEvent 构造终端/RDP 授权过期的审计事件（契约 9.7 动作名
+// terminal.grant_expired，resource_type=approval）。
+func grantExpiredEvent(ap store.Approval, reason string) audit.Event {
+	detail := map[string]any{
+		"approval_id":  ap.ID,
+		"reason":       reason,
+		"grant_kind":   derefOrEmpty(ap.GrantKind),
+		"server_id":    derefOrEmpty(ap.ServerID),
+		"requested_by": ap.RequestedBy,
+	}
+	if ap.GrantExpiresAt != nil {
+		detail["grant_expires_at"] = ap.GrantExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if ap.ConsumedAt != nil {
+		detail["consumed_at"] = ap.ConsumedAt.UTC().Format(time.RFC3339)
+	}
+	return audit.Event{
+		ActorType:    "system",
+		ActorID:      "system",
+		Action:       actionGrantExpired,
+		ResourceType: "approval",
+		ResourceID:   ap.ID,
+		ServerID:     ap.ServerID,
+		Detail:       detail,
+	}
+}
+
+// expiringCandidates 读取 pending 审批中已到期的行（逐条审计的明细来源）。// List 无游标（契约 3.3/4.9），因此只取一页 expireCandidateLimit 条——
 // 有界读取，超出部分由聚合行的 count + detail_truncated 表达。
 func (s *Service) expiringCandidates(ctx context.Context, now time.Time) ([]store.Approval, error) {
 	items, err := s.st.Approvals().List(ctx, "", store.ApprovalPending, expireCandidateLimit)
@@ -636,6 +1181,11 @@ func (s *Service) Get(ctx context.Context, approvalID string) (store.Approval, e
 // expirePendingAfterRestart 把所有 pending 审批标记为 expired。
 //
 // 重启后没有等待者能接收决策，继续保留 pending 只会让前端误以为可以批准。
+//
+// 每条收敛都必须落 approval.expired 审计（走查第 3 轮 high：此前审计页
+// 只有 approval.created，重启把 pending 置 expired 后审计员无法证明该
+// 审批是被系统作废还是丢失）。审计与状态变更在同一事务内写 outbox；
+// 存储不支持 outbox 时在循环内回落到进程内 Enqueue。
 func (s *Service) expirePendingAfterRestart(ctx context.Context) {
 	now := s.clock().UTC()
 	for round := 0; round < pendingExpireMaxRounds; round++ {
@@ -648,12 +1198,7 @@ func (s *Service) expirePendingAfterRestart(ctx context.Context) {
 			return
 		}
 		for _, ap := range items {
-			expired, err := s.st.Approvals().Decide(ctx, store.DecideApprovalParams{
-				ID:        ap.ID,
-				Status:    store.ApprovalExpired,
-				Note:      cancelReasonShutdown,
-				DecidedAt: now,
-			})
+			expired, err := s.expireOneAfterRestart(ctx, ap, now)
 			if err != nil {
 				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
 					continue
@@ -666,6 +1211,65 @@ func (s *Service) expirePendingAfterRestart(ctx context.Context) {
 		if len(items) < pendingExpireBatchSize {
 			return
 		}
+	}
+}
+
+// expireOneAfterRestart 收敛单条 pending 审批并写审计（同一事务）。
+func (s *Service) expireOneAfterRestart(ctx context.Context, ap store.Approval, now time.Time) (store.Approval, error) {
+	var expired store.Approval
+	outboxUsed := false
+	apply := func(tx store.Store) error {
+		row, err := tx.Approvals().Decide(ctx, store.DecideApprovalParams{
+			ID:        ap.ID,
+			Status:    store.ApprovalExpired,
+			Note:      cancelReasonShutdown,
+			DecidedAt: now,
+		})
+		if err != nil {
+			return err
+		}
+		expired = row
+		used, err := s.emitAuditTx(ctx, tx, approvalExpiredEvent(row, cancelReasonShutdown))
+		outboxUsed = used
+		return err
+	}
+	var err error
+	if store.OutboxOf(s.st) != nil {
+		err = s.withOutboxTx(ctx, apply)
+	} else {
+		err = apply(s.st)
+	}
+	if err != nil {
+		return store.Approval{}, err
+	}
+	if !outboxUsed {
+		s.emitAudit(ctx, approvalExpiredEvent(expired, cancelReasonShutdown))
+	}
+	return expired, nil
+}
+
+// approvalExpiredEvent 构造审批作废的审计事件（reason 区分
+// server_shutting_down / rbac:user_revoked / ttl_expired / grant_expired）。
+func approvalExpiredEvent(ap store.Approval, reason string) audit.Event {
+	detail := map[string]any{
+		"approval_id":   ap.ID,
+		"reason":        reason,
+		"source":        ap.Source,
+		"command":       ap.Command,
+		"risk_level":    ap.RiskLevel,
+		"requested_by":  ap.RequestedBy,
+		"approval_mode": string(ap.ApprovalMode),
+		"server_name":   ap.ServerName,
+	}
+	return audit.Event{
+		ActorType:      "system",
+		ActorID:        "system",
+		Action:         actionExpired,
+		ResourceType:   "approval",
+		ResourceID:     ap.ID,
+		ConversationID: ap.ConversationID,
+		ServerID:       ap.ServerID,
+		Detail:         detail,
 	}
 }
 
@@ -739,4 +1343,71 @@ func strPtr(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// trackRequester 记录进程内审批发起人；表有硬上限，满时清空重建
+// （pending 审批受 TTL 约束，清空只会退化为「本进程内不再校验」，不会
+// 无界增长；DB 的 requested_by 列由 store 层持久化）。
+func (s *Service) trackRequester(approvalID, requestedBy string) {
+	if approvalID == "" || requestedBy == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.requesters == nil {
+		s.requesters = make(map[string]string, 64)
+	}
+	if len(s.requesters) >= maxTrackedRequesters {
+		s.requesters = make(map[string]string, 64)
+	}
+	s.requesters[approvalID] = requestedBy
+}
+
+// requesterOf 返回进程内记录的发起人；未记录时返回空串。
+func (s *Service) requesterOf(approvalID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requesters[approvalID]
+}
+
+// NotifyRevoked 唤醒该用户所有仍在等待的审批（账号被停用/降级/吊销会话时
+// 审批已由事务收敛为 expired，等待方必须立即结束，不能继续等到 TTL）。
+//
+// 只广播进程内已知道发起人的审批；不在 waiters 表中的审批无需通知。
+func (s *Service) NotifyRevoked(ctx context.Context, userID string) {
+	if userID == "" {
+		return
+	}
+	s.mu.Lock()
+	ids := make([]string, 0, 8)
+	for id := range s.waiters {
+		if s.requesters[id] == userID {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		ap, err := s.Get(ctx, id)
+		status := store.ApprovalExpired
+		note := revokeNote
+		if err == nil {
+			status = ap.Status
+			note = ap.Note
+		}
+		s.notify(id, Decision{ApprovalID: id, Status: status, Note: note})
+	}
+}
+
+// RequestedBy 返回审批发起人（供 decide 执行前复检权限）。
+func (s *Service) RequestedBy(approvalID string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.requesters[approvalID]
+	return v, ok && v != ""
+}
+
+func (s *Service) untrackRequester(approvalID string) {
+	s.mu.Lock()
+	delete(s.requesters, approvalID)
+	s.mu.Unlock()
 }

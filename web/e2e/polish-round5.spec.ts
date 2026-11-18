@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 import { AUTH_STATE_FILE } from './helpers';
 
@@ -81,13 +81,14 @@ test.describe('第 5 轮打磨：后端断连的错误提示', () => {
 test.describe('第 5 轮打磨：错误横幅标题中文化', () => {
   test('错误密码登录：标题是中文说明，AUTH_INVALID 降级为小字', async ({ page }) => {
     await page.goto('/login');
-    await page.getByPlaceholder('请输入管理员密码').fill('definitely-wrong-round5');
+    await page.getByPlaceholder('请输入用户名').fill('admin');
+    await page.getByPlaceholder('请输入密码').fill('definitely-wrong-round5');
     await page.getByRole('button', { name: /登\s*录/ }).click();
 
     // 修复前：Alert 标题是裸码 AUTH_INVALID，中文说明退居第二行。
-    const alert = page.locator('.ant-alert-error').filter({ hasText: '管理员密码错误' });
+    const alert = page.locator('.ant-alert-error').filter({ hasText: '用户名或密码错误' });
     await expect(alert).toBeVisible({ timeout: 20_000 });
-    await expect(alert.locator('.ant-alert-title')).toHaveText(/管理员密码错误/);
+    await expect(alert.locator('.ant-alert-title')).toHaveText(/用户名或密码错误/);
     await expect(alert.locator('.ant-alert-title')).not.toHaveText(/AUTH_INVALID/);
     await expect(alert.locator('.ant-alert-description')).toContainText('AUTH_INVALID');
   });

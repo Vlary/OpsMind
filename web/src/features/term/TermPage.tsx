@@ -13,6 +13,7 @@ import { api } from '../../api/client';
 import { qk } from '../../api/queryKeys';
 import type { components } from '../../api/schema';
 import { AdminLoading, QueryErrorState } from '../../components/admin/AdminStates';
+import { message } from '../../components/antdMessage';
 import {
   ApiRequestError,
   failureFromError,
@@ -58,12 +59,14 @@ export function sessionDuration(session: TerminalSession): number | null {
  * 创建会话失败的页内文案。TERM_SESSION_EXISTS 场景化改写：断开后立刻
  * 点「新建会话」时旧会话还在异步收尾（封盘+关行，秒级），通用文案
  * 「该服务器已有活动终端会话」会让刚断开的用户困惑——补充收尾时序的
- * 解释并引导稍候重试；其余错误码回落 describeTermFailure。
+ * 解释。第 4 轮走查 medium：服务端已把 409 判定放在 grant 消费之前
+ * （失败时 consumed_at 回滚/不消费），因此明确告知「本次授权未被消耗、
+ * 无需重新申请」，避免运维误以为要再找审批人。
  */
 // eslint-disable-next-line react-refresh/only-export-components -- 纯函数导出供单测
 export function describeTermCreateFailure(failure: ApiFailure): string {
   if (failure.code === 'TERM_SESSION_EXISTS') {
-    return '该服务器已有活动终端会话；若您刚断开上一会话，通常数秒内完成收尾，请稍候重试。';
+    return '该服务器已有活动终端会话；若您刚断开上一会话，通常数秒内完成收尾。本次授权未被消耗，关闭现有会话后可直接重试（无需重新申请）。';
   }
   return describeTermFailure(failure);
 }
@@ -73,6 +76,11 @@ export default function TermPage() {
   const [serverId, setServerId] = useState<string | null>(null);
   const [active, setActive] = useState<TerminalSession | null>(null);
   const [createError, setCreateError] = useState<ApiFailure | null>(null);
+  // 00012：JIT 终端 grant。没有他人批准的 grant 时服务端 403
+  // TERMINAL_APPROVAL_REQUIRED；这里提供「申请授权」并在批准后自动带上
+  // grant_id 重试。
+  const [grantApprovalId, setGrantApprovalId] = useState<string | null>(null);
+  const [grantServerId, setGrantServerId] = useState<string | null>(null);
   // 「时长」列对进行中会话用 Date.now() 计算（sessionDuration），列表页
   // 本身不随数据失效刷新——加 1s 心跳驱动重渲染，active 会话的时长不再
   // 冻结在首次渲染值（评审发现；与页头时长的心跳一致）。
@@ -106,11 +114,87 @@ export default function TermPage() {
     },
   });
 
-  const createMutation = useMutation({
+  const grantMutation = useMutation({
     mutationFn: async (targetServerId: string) => {
+      const { data, error, response } = await api.POST('/api/term/grants', {
+        params: { header: writeHeaders() },
+        body: { server_id: targetServerId },
+      });
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data;
+    },
+    onSuccess: (data, targetServerId) => {
+      const approvalId = data?.approval?.id ?? null;
+      setGrantApprovalId(approvalId);
+      setGrantServerId(targetServerId);
+      message.info('终端授权已提交，等待另一位审批者批准。');
+    },
+    onError: (error) => setCreateError(failureFromError(error)),
+  });
+
+  const grantQuery = useQuery({
+    queryKey: ['approvals', 'grant', grantApprovalId],
+    enabled: grantApprovalId !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'pending' ? 3000 : false;
+    },
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/api/approvals/{id}', {
+        params: { path: { id: grantApprovalId ?? '' } },
+      });
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data;
+    },
+  });
+
+  const grantApproved = grantQuery.data?.status === 'approved';
+  const grantRejected =
+    grantQuery.data?.status === 'denied' || grantQuery.data?.status === 'expired';
+
+  // 第 2 轮走查（low）：他人批准后审批队列里该行消失，发起人侧此前没有任何
+  // 「你有 1 条已批准、30 分钟内有效的授权」入口，只能自己去终端页盲试。
+  // 这里直接读 GET /api/term/grants（只返回本人 approved + 未消费 + 未过期）。
+  const availableGrantsQuery = useQuery({
+    queryKey: ['term', 'available-grants'],
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/api/term/grants', {});
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data?.items ?? [];
+    },
+    refetchInterval: 15_000,
+  });
+  const availableGrants = availableGrantsQuery.data ?? [];
+  // 本页刚批准的那条（申请 → 轮询到 approved → 点「打开终端」）：只有它
+  // 由 grantApproved 显式回传，保持既有交互不变（服务端在 id 为空时消费
+  // 该服务器上最新一条已批准 grant）。授权提示卡另带 grant_id，见下。
+  const approvedGrantIdFor = (targetServerId: string | null): string | undefined =>
+    targetServerId && grantApproved && grantServerId === targetServerId && grantApprovalId
+      ? grantApprovalId
+      : undefined;
+  // 该服务器上最早到期的一条可用授权（升序由后端保证）：「打开终端」按钮
+  // 在提示卡里消费这一条，避免用户面对「有授权但不知道点哪个」。
+  const earliestGrantIdFor = (targetServerId: string | null): string | undefined =>
+    targetServerId
+      ? availableGrants.find((grant) => grant.server_id === targetServerId)?.id
+      : undefined;
+
+  const createMutation = useMutation({
+    mutationFn: async (target: { serverId: string; grantId?: string }) => {
       const { data, error, response } = await api.POST('/api/term/sessions', {
         params: { header: writeHeaders() },
-        body: { server_id: targetServerId, cols: DEFAULT_COLS, rows: DEFAULT_ROWS },
+        body: {
+          server_id: target.serverId,
+          cols: DEFAULT_COLS,
+          rows: DEFAULT_ROWS,
+          grant_id: target.grantId ?? '',
+        },
       });
       if (error) {
         throw new ApiRequestError(toApiFailure(error, response));
@@ -119,6 +203,7 @@ export default function TermPage() {
     },
     onSuccess: async (created) => {
       setCreateError(null);
+      setGrantApprovalId(null);
       setActive(created.session);
       await queryClient.invalidateQueries({ queryKey: qk.termSessions({}) });
     },
@@ -159,7 +244,8 @@ export default function TermPage() {
   const handleNewSession = () => {
     setActive(null);
     if (effectiveServerId) {
-      createMutation.mutate(effectiveServerId);
+      const grantId = approvedGrantIdFor(effectiveServerId);
+      createMutation.mutate({ serverId: effectiveServerId, ...(grantId ? { grantId } : {}) });
     }
   };
 
@@ -334,7 +420,15 @@ export default function TermPage() {
               icon={<CodeOutlined />}
               loading={createMutation.isPending}
               disabled={!selectedServer || !selectedChannel?.ssh}
-              onClick={() => effectiveServerId && createMutation.mutate(effectiveServerId)}
+              onClick={() =>
+                effectiveServerId &&
+                createMutation.mutate({
+                  serverId: effectiveServerId,
+                  ...(approvedGrantIdFor(effectiveServerId) !== undefined
+                    ? { grantId: approvedGrantIdFor(effectiveServerId) as string }
+                    : {}),
+                })
+              }
             >
               打开终端
             </Button>
@@ -362,7 +456,59 @@ export default function TermPage() {
             />
           ) : null}
           {createError ? (
-            <Alert type="error" showIcon message={describeTermCreateFailure(createError)} />
+            <Alert
+              type="error"
+              showIcon
+              message={describeTermCreateFailure(createError)}
+              action={
+                createError.code === 'TERMINAL_APPROVAL_REQUIRED' ? (
+                  <Button
+                    size="small"
+                    loading={grantMutation.isPending}
+                    disabled={!effectiveServerId}
+                    onClick={() => effectiveServerId && grantMutation.mutate(effectiveServerId)}
+                  >
+                    申请终端授权
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : null}
+          {grantApprovalId && !grantApproved && !grantRejected ? (
+            <Alert type="info" showIcon message="终端授权审批中，批准后请点击「打开终端」。" />
+          ) : null}
+          {grantRejected ? (
+            <Alert type="warning" showIcon message="终端授权未获批准，请重新申请。" />
+          ) : null}
+          {/* 第 2 轮走查（low）：已批准、待消费的授权在审批队列里不再可见，
+              发起人侧需要明确入口，而不是自己去试「打开终端」。 */}
+          {availableGrants.length > 0 ? (
+            <Alert
+              type="success"
+              showIcon
+              data-testid="term-available-grants"
+              message={`你有 ${availableGrants.length} 条已批准、尚未使用的终端授权`}
+              description={`最早一条 ${formatDateTime(availableGrants[0]?.grant_expires_at ?? '')} 到期；点「使用该授权」即单次消费该服务器上的授权，用后失效。`}
+              action={
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<CodeOutlined />}
+                  disabled={!selectedServer || !selectedChannel?.ssh}
+                  onClick={() =>
+                    effectiveServerId &&
+                    createMutation.mutate({
+                      serverId: effectiveServerId,
+                      ...(earliestGrantIdFor(effectiveServerId) !== undefined
+                        ? { grantId: earliestGrantIdFor(effectiveServerId) as string }
+                        : {}),
+                    })
+                  }
+                >
+                  使用该授权
+                </Button>
+              }
+            />
           ) : null}
         </Flex>
       </Card>

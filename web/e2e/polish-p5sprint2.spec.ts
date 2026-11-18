@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 import {
   AUTH_STATE_FILE,

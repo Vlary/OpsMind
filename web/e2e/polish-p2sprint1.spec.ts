@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 
 import { AUTH_STATE_FILE } from './helpers';
 
@@ -227,13 +227,14 @@ test.describe('二期冲刺 1 打磨', () => {
     await expect(page.getByRole('heading', { name: '终端' })).toBeVisible();
     await page.getByRole('button', { name: /打开终端/ }).click();
 
-    // 修复后：409 的文案解释「上一会话正在收尾」并引导稍候重试
-    // （修复前：只显示「该服务器已有活动终端会话（server already has
-    // an active session）」）。
+    // 修复后：409 的文案解释「上一会话正在收尾」，并明确本次授权未被
+    // 消耗、关闭现有会话后可直接重试（第 4 轮走查 medium：服务端在消费
+    // grant 之前判定 409，重试不再需要重新审批）。
     const alert = page.locator('.ant-alert-error').first();
     await expect(alert).toBeVisible({ timeout: 20_000 });
-    await expect(alert).toContainText('稍候重试');
     await expect(alert).toContainText('收尾');
+    await expect(alert).toContainText('本次授权未被消耗');
+    await expect(alert).toContainText('无需重新申请');
   });
 
   test('终端 WS 异常断开显示「连接异常断开」提示', async ({ page }) => {

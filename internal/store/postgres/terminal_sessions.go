@@ -25,7 +25,8 @@ import (
 type terminalSessionStore struct{ q querier }
 
 const terminalSessionColumns = `t.id::text, t.server_id::text, coalesce(s.name, ''),
-	coalesce(s.os, 'linux'), coalesce(u.username, ''), t.status, t.cols, t.rows,
+	coalesce(s.os, 'linux'), t.user_id::text, coalesce(t.grant_id::text, ''), coalesce(u.username, ''),
+	t.status, t.cols, t.rows,
 	t.ended_reason, t.recording_file, t.bytes_written,
 	t.started_at, t.last_activity_at, t.ended_at, t.created_at, t.updated_at`
 
@@ -38,7 +39,7 @@ const terminalSessionFrom = ` FROM terminal_sessions t` + terminalSessionJoin
 
 func scanTerminalSession(row pgx.Row) (store.TerminalSession, error) {
 	var t store.TerminalSession
-	err := row.Scan(&t.ID, &t.ServerID, &t.ServerName, &t.ServerOS, &t.Username,
+	err := row.Scan(&t.ID, &t.ServerID, &t.ServerName, &t.ServerOS, &t.UserID, &t.GrantID, &t.Username,
 		&t.Status, &t.Cols, &t.Rows, &t.EndedReason, &t.RecordingFile, &t.BytesWritten,
 		&t.StartedAt, &t.LastActivityAt, &t.EndedAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
@@ -63,12 +64,12 @@ func (s terminalSessionStore) Create(ctx context.Context, p store.CreateTerminal
 	}
 	return scanTerminalSession(s.q.QueryRow(ctx, `
 		WITH inserted AS (
-			INSERT INTO terminal_sessions (server_id, user_id, cols, rows, started_at)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+			INSERT INTO terminal_sessions (server_id, user_id, cols, rows, started_at, grant_id)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, NULLIF($6::text, '')::uuid)
 			RETURNING *
 		)
 		SELECT `+terminalSessionColumns+` FROM inserted t`+terminalSessionJoin,
-		p.ServerID, p.UserID, p.Cols, p.Rows, utc(startedAt)))
+		p.ServerID, p.UserID, p.Cols, p.Rows, utc(startedAt), p.GrantID))
 }
 
 func (s terminalSessionStore) Get(ctx context.Context, id string) (store.TerminalSession, error) {

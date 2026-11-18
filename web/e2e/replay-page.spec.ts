@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
+import { expect, test, type Page, type Route } from './fixtures';
 import { AUTH_STATE_FILE, SCENARIO_LIST, conversationIdOf, sendMessage } from './helpers';
 
 // FE-R（八期）端到端：独立回放页 `/replays`（契约 9.4 八期 e2e 清单 ①–⑨）。

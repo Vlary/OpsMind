@@ -14,25 +14,26 @@ import (
 	"github.com/google/uuid"
 
 	"aiops/internal/apierr"
+	"aiops/internal/authz"
 	"aiops/internal/monitor"
 	"aiops/internal/store"
 )
 
 // RegisterAlertRoutes 注册 M1 告警路由（契约 2.5）。
 func (d *Deps) RegisterAlertRoutes(api *gin.RouterGroup) {
-	api.GET("/alert-rules", d.handleListAlertRules)
-	api.POST("/alert-rules", d.handleCreateAlertRule)
-	api.GET("/alert-rules/:id", d.handleGetAlertRule)
-	api.PATCH("/alert-rules/:id", d.handleUpdateAlertRule)
-	api.DELETE("/alert-rules/:id", d.handleDeleteAlertRule)
+	d.guard(api, http.MethodGet, "/alert-rules", authz.PermMetricsRead, d.handleListAlertRules)
+	d.guard(api, http.MethodPost, "/alert-rules", authz.PermAlertConfig, d.handleCreateAlertRule)
+	d.guard(api, http.MethodGet, "/alert-rules/:id", authz.PermMetricsRead, d.handleGetAlertRule)
+	d.guard(api, http.MethodPatch, "/alert-rules/:id", authz.PermAlertConfig, d.handleUpdateAlertRule)
+	d.guard(api, http.MethodDelete, "/alert-rules/:id", authz.PermAlertConfig, d.handleDeleteAlertRule)
 
-	api.GET("/alert-events", d.handleListAlertEvents)
+	d.guard(api, http.MethodGet, "/alert-events", authz.PermMetricsRead, d.handleListAlertEvents)
 
-	api.GET("/notification-channels", d.handleListChannels)
-	api.POST("/notification-channels", d.handleCreateChannel)
-	api.PATCH("/notification-channels/:id", d.handleUpdateChannel)
-	api.DELETE("/notification-channels/:id", d.handleDeleteChannel)
-	api.POST("/notification-channels/:id/test", d.handleTestChannel)
+	d.guard(api, http.MethodGet, "/notification-channels", authz.PermMetricsRead, d.handleListChannels)
+	d.guard(api, http.MethodPost, "/notification-channels", authz.PermAlertConfig, d.handleCreateChannel)
+	d.guard(api, http.MethodPatch, "/notification-channels/:id", authz.PermAlertConfig, d.handleUpdateChannel)
+	d.guard(api, http.MethodDelete, "/notification-channels/:id", authz.PermAlertConfig, d.handleDeleteChannel)
+	d.guard(api, http.MethodPost, "/notification-channels/:id/test", authz.PermAlertConfig, d.handleTestChannel)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { ADMIN_PASSWORD, AUTH_STATE_FILE } from './helpers';
 
 // 登录链路：失败提示、成功跳转、会话失效后的受保护页跳转。
@@ -6,21 +6,23 @@ import { ADMIN_PASSWORD, AUTH_STATE_FILE } from './helpers';
 test.describe('登录与会话守卫', () => {
   test('错误密码显示失败提示，且不跳转', async ({ page }) => {
     await page.goto('/login');
-    const input = page.getByPlaceholder('请输入管理员密码');
+    await page.getByPlaceholder('请输入用户名').fill('admin');
+    const input = page.getByPlaceholder('请输入密码');
     await expect(input).toBeVisible();
     await input.fill('definitely-wrong-password');
     // antd 对纯双字文本按钮自动插入空格（accessible name 为 “登 录”），用正则兼容。
     await page.getByRole('button', { name: /登\s*录/ }).click();
 
-    // ApiErrorAlert：message 为场景化中文提示（冲刺 5：登录页用户名固定
-    // admin 不可编辑，AUTH_INVALID 改写为「管理员密码错误」）。
-    await expect(page.getByText('管理员密码错误')).toBeVisible();
+    // ApiErrorAlert：00012 多用户后用户名/密码任一错误统一显示
+    // 「用户名或密码错误」（不区分账号是否存在，避免枚举）。
+    await expect(page.getByText('用户名或密码错误')).toBeVisible();
     await expect(page).toHaveURL(/\/login/);
   });
 
   test('正确密码登录成功并跳转到 /chat', async ({ page }) => {
     await page.goto('/login');
-    const input = page.getByPlaceholder('请输入管理员密码');
+    await page.getByPlaceholder('请输入用户名').fill('admin');
+    const input = page.getByPlaceholder('请输入密码');
     await expect(input).toBeVisible();
     await input.fill(ADMIN_PASSWORD);
     await page.getByRole('button', { name: /登\s*录/ }).click();
@@ -42,9 +44,15 @@ test.describe('登录与会话守卫', () => {
     await context.clearCookies();
     await page.goto('/audit');
 
-    // RequireAuth 检测 401 后跳 /login?next=%2Faudit。
-    await expect(page).toHaveURL(/\/login\?next=%2Faudit$/, { timeout: 30_000 });
-    await expect(page.getByPlaceholder('请输入管理员密码')).toBeVisible({ timeout: 30_000 });
+    // RequireAuth 检测 401 后跳 /login?next=%2Faudit，并带 reason 让登录页
+    // 明确提示会话已失效（RBAC 走查 sprint 1）。
+    await expect(page).toHaveURL(/\/login\?next=%2Faudit&reason=session_expired$/, {
+      timeout: 30_000,
+    });
+    await expect(
+      page.getByText('登录已失效（会话过期或角色/权限已变更），请重新登录。'),
+    ).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByPlaceholder('请输入用户名')).toBeVisible({ timeout: 30_000 });
     await context.close();
   });
 });

@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"aiops/internal/apierr"
+	"aiops/internal/authz"
 	"aiops/internal/monitor"
 	"aiops/internal/store"
 )
@@ -31,10 +32,10 @@ func mustMarshalSetting(cs monitor.CollectorSetting) json.RawMessage {
 
 // RegisterMonitorRoutes 注册 M1 监控路由（契约 2.5）。
 func (d *Deps) RegisterMonitorRoutes(api *gin.RouterGroup) {
-	api.GET("/monitor/overview", d.handleMonitorOverview)
-	api.GET("/monitor/collector", d.handleGetCollector)
-	api.PUT("/monitor/collector", d.handleUpdateCollector)
-	api.GET("/servers/:id/metrics", d.handleServerMetrics)
+	d.guard(api, http.MethodGet, "/monitor/overview", authz.PermMetricsRead, d.handleMonitorOverview)
+	d.guard(api, http.MethodGet, "/monitor/collector", authz.PermMetricsRead, d.handleGetCollector)
+	d.guard(api, http.MethodPut, "/monitor/collector", authz.PermAlertConfig, d.handleUpdateCollector)
+	d.guard(api, http.MethodGet, "/servers/:id/metrics", authz.PermMetricsRead, d.handleServerMetrics)
 }
 
 // firingCounts 是 overview 的 firing 计数（按等级）。

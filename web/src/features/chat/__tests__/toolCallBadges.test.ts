@@ -5,6 +5,7 @@ import {
   badgeInputOf,
   isCommandExecTool,
   isExemptExecution,
+  shouldShowApprovalCancelledNotice,
 } from '../toolCallBadges';
 import { approvedToolCallIds, isReplayExemptExecution } from '../../replay/replayPlayer';
 
@@ -154,5 +155,30 @@ describe('isReplayExemptExecution（回放侧等价判定）', () => {
       { seq: 4, timestamp: 't', kind: 'approval', tool_call_id: null },
     ]);
     expect([...ids]).toEqual(['tc-1']);
+  });
+});
+
+// RBAC 走查 sprint 3（刷新语义）：刷新/断开导致审批连带取消后，无
+// approvals:read 的角色在工具卡上看到明确的恢复指引。
+describe('shouldShowApprovalCancelledNotice', () => {
+  const base = { status: 'expired', errorCode: 'APPROVAL_CANCELLED', approvalCount: 0 };
+
+  it('expired + APPROVAL_CANCELLED + 无审批卡 → 展示「请重新发起」提示', () => {
+    expect(shouldShowApprovalCancelledNotice(base)).toBe(true);
+  });
+
+  it('TTL 真超时（APPROVAL_TIMEOUT）不冒充「回答流中断」', () => {
+    expect(shouldShowApprovalCancelledNotice({ ...base, errorCode: 'APPROVAL_TIMEOUT' })).toBe(
+      false,
+    );
+  });
+
+  it('非 expired 状态不展示', () => {
+    expect(shouldShowApprovalCancelledNotice({ ...base, status: 'awaiting_approval' })).toBe(false);
+    expect(shouldShowApprovalCancelledNotice({ ...base, status: 'succeeded' })).toBe(false);
+  });
+
+  it('已有审批卡（approvalCount>0）时由 ApprovalCard 提示，不重复', () => {
+    expect(shouldShowApprovalCancelledNotice({ ...base, approvalCount: 1 })).toBe(false);
   });
 });

@@ -166,7 +166,7 @@ func (d *Deps) requireAuth() gin.HandlerFunc {
 			writeError(c, apierr.AuthRequired, "authentication required")
 			return
 		}
-		user, err := d.Auth.Authenticate(c.Request.Context(), raw)
+		user, session, err := d.Auth.AuthenticateSession(c.Request.Context(), raw)
 		if err != nil {
 			if errors.Is(err, auth.ErrAuthRequired) {
 				writeError(c, apierr.AuthRequired, "authentication required")
@@ -178,6 +178,26 @@ func (d *Deps) requireAuth() gin.HandlerFunc {
 		}
 		c.Set("user", user)
 		c.Set("user_id", user.ID)
+		// 契约 12.3 第 13 条：注入 auth_session_id，logout 与交互连接
+		// 注册表按它精确关闭本次登录建立的 WS/SSE。
+		c.Set("auth_session_id", session.ID)
+		// 契约 12.3 第 2 条：must_change_password=true 时除
+		// me/logout/change-password 外一律 403。此前只有两个 WS
+		// handler 检查，REST 可调用其余全部 API（评审发现）。
+		if user.MustChangePassword && !mustChangeAllowedPath(c.Request.URL.Path) {
+			writeErrorStatus(c, http.StatusForbidden, "PASSWORD_CHANGE_REQUIRED", "password change required")
+			return
+		}
 		c.Next()
+	}
+}
+
+// mustChangeAllowedPath 是 must_change 门放行的三个端点（契约 12.3 第 2 条）。
+func mustChangeAllowedPath(path string) bool {
+	switch path {
+	case "/api/auth/me", "/api/auth/logout", "/api/auth/password":
+		return true
+	default:
+		return false
 	}
 }

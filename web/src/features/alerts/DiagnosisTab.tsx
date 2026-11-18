@@ -35,6 +35,11 @@ export default function DiagnosisTab({ onOpen }: DiagnosisTabProps) {
   const queryClient = useQueryClient();
   const [serverId, setServerId] = useState<string | null>(null);
 
+  // 第 11 轮走查 medium：列表由服务端按 owner-or-admin 收敛（非 admin 只
+  // 返回 created_by=自己，system 行仅 admin），因此这里返回的每一行都是
+  // 当前账号可读的；「查看报告」不会再打开他人会话后 404。详情抽屉的
+  // 「发起修复/标记完成」也只来自同一 owner-or-admin 的 GET 详情，未授权
+  // 时抽屉只显示「诊断会话不存在」而不渲染任何操作入口。
   const sessionsQuery = useQuery({
     queryKey: qk.diagnosisSessions({}),
     queryFn: async () => {

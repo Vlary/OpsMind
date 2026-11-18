@@ -17,11 +17,11 @@ func TestChangePasswordUpdatesHashAndRevokesSessions(t *testing.T) {
 	user := st.users[adminUsername]
 
 	// 两个并发会话（模拟多端登录）。
-	res1, err := svc.Login(context.Background(), "old-pw", "1.1.1.1", "ua-1")
+	res1, err := svc.Login(context.Background(), adminUsername, "old-pw", "1.1.1.1", "ua-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res2, err := svc.Login(context.Background(), "old-pw", "1.1.1.1", "ua-2")
+	res2, err := svc.Login(context.Background(), adminUsername, "old-pw", "1.1.1.1", "ua-2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,10 +42,10 @@ func TestChangePasswordUpdatesHashAndRevokesSessions(t *testing.T) {
 		t.Fatalf("session 2 still valid: %v", err)
 	}
 	// 新密码可登录，旧密码不行。
-	if _, err := svc.Login(context.Background(), "old-pw", "1.1.1.1", "ua"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := svc.Login(context.Background(), adminUsername, "old-pw", "1.1.1.1", "ua"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("old password accepted after change: %v", err)
 	}
-	if _, err := svc.Login(context.Background(), "new-pw-42", "1.1.1.1", "ua"); err != nil {
+	if _, err := svc.Login(context.Background(), adminUsername, "new-pw-42", "1.1.1.1", "ua"); err != nil {
 		t.Fatalf("new password rejected: %v", err)
 	}
 }
@@ -57,7 +57,7 @@ func TestChangePasswordWrongOldPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	user := st.users[adminUsername]
-	res, err := svc.Login(context.Background(), "old-pw", "1.1.1.1", "ua")
+	res, err := svc.Login(context.Background(), adminUsername, "old-pw", "1.1.1.1", "ua")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -78,6 +78,7 @@ func createEditApproval(t *testing.T, svc *Service, serverID string) store.Appro
 		RuleID:         "SERVICE_CHANGE",
 		Reason:         "service change",
 		RequestID:      "req-1",
+		RequestedBy:    "requester-1",
 	})
 	if err != nil {
 		t.Fatal(err)

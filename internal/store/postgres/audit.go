@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -16,7 +17,7 @@ type auditStore struct{ q querier }
 
 const auditColumns = `id, created_at, actor_type, actor_id, action, resource_type,
 	resource_id, request_id, coalesce(conversation_id::text, ''),
-	coalesce(server_id::text, ''), ip, detail, prev_hash, hash`
+	coalesce(server_id::text, ''), ip, detail, prev_hash, hash, legacy_hash`
 
 func scanAuditLog(row pgx.Row) (store.AuditLog, error) {
 	var a store.AuditLog
@@ -24,7 +25,7 @@ func scanAuditLog(row pgx.Row) (store.AuditLog, error) {
 	var detail []byte
 	err := row.Scan(&a.ID, &a.CreatedAt, &a.ActorType, &a.ActorID, &a.Action,
 		&a.ResourceType, &a.ResourceID, &a.RequestID, &conversationID,
-		&serverID, &a.IP, &detail, &a.PrevHash, &a.Hash)
+		&serverID, &a.IP, &detail, &a.PrevHash, &a.Hash, &a.LegacyHash)
 	if err != nil {
 		return store.AuditLog{}, mapError(err)
 	}
@@ -36,6 +37,20 @@ func scanAuditLog(row pgx.Row) (store.AuditLog, error) {
 	a.ServerID = nullableString(serverID)
 	a.CreatedAt = utc(a.CreatedAt)
 	return a, nil
+}
+
+// CanonicalAuditDetail 用 PostgreSQL 的 jsonb 输出规范明细文本：键顺序、
+// 空白与数字文本都与 INSERT 后读回的 detail 一致。审计写入在算哈希前调用，
+// 保证哈希输入与库内值逐字节相同（走查第 4 轮）。
+func (s auditStore) CanonicalAuditDetail(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		raw = []byte("{}")
+	}
+	var text string
+	if err := s.q.QueryRow(ctx, `SELECT $1::jsonb::text`, []byte(raw)).Scan(&text); err != nil {
+		return nil, mapError(err)
+	}
+	return json.RawMessage(text), nil
 }
 
 func (s auditStore) Append(ctx context.Context, p store.CreateAuditParams) error {
@@ -126,6 +141,36 @@ func (s auditStore) List(ctx context.Context, f store.AuditFilter) ([]store.Audi
 		items = items[:n]
 	}
 	return items, hasMore, nil
+}
+
+// ListAuditAsc 按 id ASC 返回 afterID 之后的一页审计（链校验专用）。
+// limit 硬上限 500（防单页无界读取）。
+func (s auditStore) ListAuditAsc(ctx context.Context, afterID int64, limit int) ([]store.AuditLog, error) {
+	if afterID < 0 {
+		return nil, store.ErrInvalid
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 500
+	}
+	rows, err := s.q.Query(ctx, `SELECT `+auditColumns+`
+		FROM audit_logs
+		WHERE id > $1
+		ORDER BY id ASC
+		LIMIT $2`, afterID, limit)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+
+	items := make([]store.AuditLog, 0, limit)
+	for rows.Next() {
+		item, err := scanAuditLog(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, mapError(rows.Err())
 }
 
 func (s auditStore) LastHash(ctx context.Context) (string, error) {

@@ -34,8 +34,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 管理员登录
-         * @description 密码校验成功后设置 `opsmind_session` Cookie。按 IP 限流（5 次/分钟）。必须携带 Origin。
+         * 用户登录
+         * @description 用户名 + 密码校验成功后设置 `opsmind_session` Cookie。未知用户名、停用用户与错误密码统一返回 401 AUTH_INVALID。按 IP 限流（5 次/分钟）。必须携带 Origin。
          */
         post: operations["login"];
         delete?: never;
@@ -71,7 +71,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 当前登录用户 */
+        /**
+         * 当前登录用户、角色与权限
+         * @description 返回当前用户（含 role/enabled/display_name/email/invite_pending）与服务端计算的 permissions 数组。客户端不得提交或覆盖 role/permissions。
+         */
         get: operations["getMe"];
         put?: never;
         post?: never;
@@ -91,7 +94,7 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 修改管理员密码
+         * 修改当前用户密码
          * @description 校验 `old_password` 后将密码更新为 `new_password`，写审计
          *     `auth.password_changed`；成功后吊销该用户全部会话（含当前会话），
          *     清除 `opsmind_session` Cookie，客户端须引导重新登录。
@@ -99,6 +102,126 @@ export interface paths {
          *     错误返回 401 并写审计 `auth.password_change_failed`。必须携带 Origin。
          */
         post: operations["changePassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/invite/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 接受邀请并设置密码
+         * @description 公开端点：使用一次性 invite/reset token 设置新密码。token 只存 SHA-256、30 分钟有效、单次使用；
+         *     invite 接受后启用已存在的停用用户行（enabled=true），reset 接受后重置已存在用户的密码。创建者 IP 兑换返回 403 SELF_REDEEM_FORBIDDEN。
+         *     必须携带 Origin；按 IP 限流。
+         */
+        post: operations["acceptInvite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用户列表
+         * @description 需要权限 `user:read`。不返回密码哈希或 token。
+         */
+        get: operations["listUsers"];
+        put?: never;
+        /**
+         * 创建用户并发送邀请（同名未激活账号重发邀请）
+         * @description 需要权限 `user:write`。请求不含密码；服务端生成一次性 invite token，
+         *     经 SMTP/IM 通知通道直达目标 email，**不在响应中返回 token**。新用户行 enabled=false，
+         *     invite_pending=true；目标接受邀请后 enabled=true。无可用投递通道返回 503 DELIVERY_UNAVAILABLE。
+         *     同名账号若尚未启用且仍持有未使用的 invite token（含已过期），视为「重发邀请」：
+         *     作废旧链接、重新签发并投递，返回同一用户行（201），不重复建行；已启用账号返回 409。
+         *     必须携带 Origin。
+         */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 用户详情
+         * @description 需要权限 `user:read`。
+         */
+        get: operations["getUser"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * 修改角色/启停/展示名
+         * @description 需要权限 `user:write`。`role`/`enabled`/`display_name` 至少一项。
+         *     不能停用自己或修改自己的 role；不能停用/降级最后一个 enabled admin（409 LAST_ADMIN）。
+         *     改 role 或 enabled 会在同一事务吊销目标全部 auth session、关闭 live 终端/RDP、取消 pending 审批。
+         *     停用（enabled=false）是唯一删除语义，不提供物理 DELETE。必须携带 Origin。
+         */
+        patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/api/users/{id}/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 签发一次性密码重置令牌
+         * @description 需要权限 `user:credential_reset`。不接收新密码、不在响应中返回 token；
+         *     服务端生成 reset token 并经 SMTP/IM 通道投递到目标 email。签发即吊销该用户全部
+         *     auth session、关闭 live 终端/RDP。不能重置自己（409 SELF_OPERATION）。必须携带 Origin。
+         */
+        post: operations["resetUserPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{id}/revoke-sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 吊销用户全部会话
+         * @description 需要权限 `user:write`。删除目标全部 auth session、关闭 live 终端/RDP、取消 pending 审批。必须携带 Origin。
+         */
+        post: operations["revokeUserSessions"];
         delete?: never;
         options?: never;
         head?: never;
@@ -616,7 +739,7 @@ export interface paths {
          *     承载动作串（UI 标注为「动作」）。新增第三道截断：`arguments` 装载
          *     总量超 6 MiB 或响应序列化超 8 MiB 时 `truncated_reason='payload'`
          *     （优先级 steps > payload > approvals，只报最高者）。
-         *     权限与 GET /api/conversations/{id}/messages 相同（登录态；v1 单管理员）。
+         *     权限与 GET /api/conversations/{id}/messages 相同（登录态；owner 或 audit:read 只读；其他用户 404）。
          */
         get: operations["conversationReplay"];
         put?: never;
@@ -646,7 +769,7 @@ export interface paths {
          *     `has_actions=true` 只返回至少有一个动作类工具调用（12 工具，契约 7.8）
          *     的会话。`truncated` 为该行步数上限预判（`tool_count + approval_count
          *     > 20000`），不预判 payload 预算。
-         *     权限同 GET /api/conversations（登录态；v1 单管理员）。
+         *     权限同 GET /api/conversations（登录态；非 audit:read 按 user_id 过滤，audit:read 全量只读）。
          */
         get: operations["listReplays"];
         put?: never;
@@ -716,6 +839,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/approvals/{id}/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * 有界审批上下文
+         * @description 需要权限 `approval:read`。返回审批对象、对应 tool_call、资产元数据与
+         *     审批前最多 20 条消息；不返回审批后的新消息，不授予 /conversations/{id}/replay。
+         *     跨用户读取写 approval.context_viewed 审计。
+         */
+        get: operations["getApprovalContext"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/approvals/{id}/decide": {
         parameters: {
             query?: never;
@@ -728,12 +875,16 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * 批准或拒绝审批（六期支持批准时改写命令）
-         * @description 只有 `pending` 可决策。批准后命令才会执行；拒绝或超时不执行。必须携带 Origin。
-         *     六期起请求体可带 `edited_command`（仅 decision=approve 时合法；1..2000 字符、
-         *     禁止 NUL）：服务端按审批目标重新 risk.Classify——改写后 forbidden 返回
-         *     403 COMMAND_FORBIDDEN 且审批保持 pending；否则落库 edited_* 并执行改写后
-         *     命令（契约 2.11 约定 3）。改写不改变「已批准」语义。
+         * 批准或拒绝审批/策略变更
+         * @description 只有 `pending` 可决策；需要权限 `approval:decide`。请求体只允许 `decision` 与
+         *     `note`，不得携带 edited_command 或任何目标字段（bindJSONStrict 未知字段 400）。
+         *     `requested_by == decided_by` 返回 403 APPROVAL_SELF_DECISION 且保持 pending；
+         *     legacy pending 且 edited_command<>'' 返回 409 APPROVAL_LEGACY_EDIT。
+         *     source=policy 只按创建时持久化的 policy_from/policy_to 生效，decide 不能改目标；
+         *     source=terminal 只落状态（session 创建时按 grant_kind 消费）；命令执行使用
+         *     approval.command，永不读取 edited_command。`:id` 必须是 UUID，非 UUID 返回
+         *     400 VALIDATION_FAILED（与 GET /api/approvals/{id} 一致，不得映射为 503/500）。
+         *     必须携带 Origin。
          */
         post: operations["decideApproval"];
         delete?: never;
@@ -754,6 +905,30 @@ export interface paths {
          * @description 按 id 降序分页（`before_id` 不含），返回后由前端按需反转。日志只追加。
          */
         get: operations["listAuditLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/audit/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 校验审计哈希链
+         * @description 需要权限 `audit:read`。重算指定区间（缺省最近 200 条）的 prev_hash/hash，
+         *     并与外部 anchor 比对。链完整返回 ok=true；篡改返回 409 AUDIT_CHAIN_BROKEN，
+         *     其 `error.details` 带 broken_at / checked / head_id / head_hash / legacy。
+         *     00014 迁移前的存量行按 legacy 规则只校验链接、不做哈希复算，计入 `legacy`；
+         *     新行必须完整复算。读取本身写 audit.verify 审计。
+         */
+        get: operations["verifyAuditChain"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1211,6 +1386,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/term/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 本人可用的 JIT 终端授权（00012 第 2 轮走查）
+         * @description 返回当前用户 `approved` 且未消费、未过期的 `source=terminal` 授权
+         *     （`grant_kind=term`），按 `grant_expires_at` 升序（最先到期在前）。
+         *     只按 `requested_by=当前用户` 过滤——他人授权即便有 `audit:read` 也不
+         *     可见（授权是个人凭据）。发起人据此在终端页提示「你有 N 条已批准授权」
+         *     并直接打开终端（会话创建时按 `grant_id` 单次消费）。
+         */
+        get: operations["listTerminalGrants"];
+        put?: never;
+        /**
+         * 申请 JIT 终端授权（00012）
+         * @description 创建 source=terminal/grant_kind=term 审批（grant 有效期 30 分钟），
+         *     由另一位有审批权限的用户经 POST /api/approvals/{id}/decide 批准；
+         *     创建会话时携带 grant_id 单次消费。必须携带 Origin。
+         */
+        post: operations["createTerminalGrant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/term/sessions": {
         parameters: {
             query?: never;
@@ -1308,6 +1513,30 @@ export interface paths {
         get: operations["downloadTerminalRecording"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/rdp/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 本人可用的 JIT RDP 授权（00012 第 2 轮走查）
+         * @description 同终端；`grant_kind=rdp`。
+         */
+        get: operations["listRdpGrants"];
+        put?: never;
+        /**
+         * 申请 JIT RDP 授权（00012）
+         * @description 同终端 grant；grant_kind=rdp，批准后由创建 RDP 会话单次消费。
+         */
+        post: operations["createRdpGrant"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1419,7 +1648,7 @@ export interface components {
          * @description 错误码。实现集中在 internal/apierr/codes.go。
          * @enum {string}
          */
-        ErrorCode: "AUTH_REQUIRED" | "AUTH_INVALID" | "AUTH_RATE_LIMITED" | "ORIGIN_FORBIDDEN" | "VALIDATION_FAILED" | "NOT_FOUND" | "CONFLICT" | "INTERNAL" | "SERVICE_UNAVAILABLE" | "TOO_MANY_STREAMS" | "STREAM_ACTIVE" | "CONVERSATION_NOT_FOUND" | "CONVERSATION_MODEL_LOCKED" | "NO_PROVIDER_CONFIGURED" | "PROVIDER_NOT_FOUND" | "PROVIDER_TEST_FAILED" | "PROVIDER_MODELS_FAILED" | "SERVER_NOT_FOUND" | "SERVER_TEST_FAILED" | "SSH_HOST_KEY_CHANGED" | "SSH_TIMEOUT" | "SSH_EXEC_FAILED" | "COMMAND_TOO_LARGE" | "COMMAND_INVALID" | "COMMAND_FORBIDDEN" | "DATABASE_NOT_FOUND" | "DATABASE_TEST_FAILED" | "SQL_NOT_READONLY" | "SQL_TIMEOUT" | "SQL_QUERY_FAILED" | "APPROVAL_NOT_FOUND" | "APPROVAL_NOT_PENDING" | "APPROVAL_DENIED" | "APPROVAL_TIMEOUT" | "APPROVAL_CANCELLED" | "TOOL_NOT_FOUND" | "TOOL_ARGS_INVALID" | "AGENT_MAX_ITERATIONS" | "LLM_UPSTREAM_ERROR" | "LLM_TIMEOUT" | "LLM_OUTPUT_TRUNCATED" | "LLM_STREAM_ERROR" | "AUDIT_WRITE_FAILED" | "STREAM_TIMEOUT" | "SERVER_SHUTTING_DOWN" | "APPROVAL_STREAM_CANCELLED" | "CLIENT_DISCONNECTED" | "TERM_SESSION_NOT_FOUND" | "TERM_SESSION_EXISTS" | "TERM_SESSION_LIMIT" | "TERM_CONNECT_FAILED" | "TERM_UNSUPPORTED" | "TERM_WS_PROTOCOL" | "RECORDING_NOT_FOUND" | "RECORDING_UNAVAILABLE" | "RDP_SESSION_NOT_FOUND" | "RDP_SESSION_EXISTS" | "RDP_SESSION_LIMIT" | "RDP_CONNECT_FAILED" | "RDP_UNSUPPORTED" | "RDP_NO_CREDENTIALS" | "GUACD_UNAVAILABLE" | "NETCLI_LOGIN_FAILED" | "NETCLI_EXEC_FAILED" | "CONTAINER_UNSUPPORTED" | "CONTAINER_NOT_FOUND" | "CONTAINER_CLI_FAILED";
+        ErrorCode: "AUTH_REQUIRED" | "AUTH_INVALID" | "AUTH_RATE_LIMITED" | "ORIGIN_FORBIDDEN" | "VALIDATION_FAILED" | "NOT_FOUND" | "CONFLICT" | "INTERNAL" | "SERVICE_UNAVAILABLE" | "TOO_MANY_STREAMS" | "STREAM_ACTIVE" | "CONVERSATION_NOT_FOUND" | "CONVERSATION_MODEL_LOCKED" | "NO_PROVIDER_CONFIGURED" | "PROVIDER_NOT_FOUND" | "PROVIDER_TEST_FAILED" | "PROVIDER_MODELS_FAILED" | "SERVER_NOT_FOUND" | "SERVER_TEST_FAILED" | "SSH_HOST_KEY_CHANGED" | "SSH_TIMEOUT" | "SSH_EXEC_FAILED" | "COMMAND_TOO_LARGE" | "COMMAND_INVALID" | "COMMAND_FORBIDDEN" | "DATABASE_NOT_FOUND" | "DATABASE_TEST_FAILED" | "SQL_NOT_READONLY" | "SQL_TIMEOUT" | "SQL_QUERY_FAILED" | "APPROVAL_NOT_FOUND" | "APPROVAL_NOT_PENDING" | "APPROVAL_DENIED" | "APPROVAL_TIMEOUT" | "APPROVAL_CANCELLED" | "APPROVAL_SELF_DECISION" | "APPROVAL_LEGACY_EDIT" | "APPROVAL_MODE_WIDENING_FORBIDDEN" | "POLICY_STALE" | "NO_SECOND_APPROVER" | "LAST_ADMIN" | "SELF_OPERATION" | "FORBIDDEN" | "PASSWORD_CHANGE_REQUIRED" | "SELF_REDEEM_FORBIDDEN" | "DELIVERY_UNAVAILABLE" | "TERMINAL_APPROVAL_REQUIRED" | "TERMINAL_GRANT_KIND_MISMATCH" | "AUDIT_CHAIN_BROKEN" | "TOOL_FORBIDDEN" | "TOOL_NOT_FOUND" | "TOOL_ARGS_INVALID" | "AGENT_MAX_ITERATIONS" | "LLM_UPSTREAM_ERROR" | "LLM_TIMEOUT" | "LLM_OUTPUT_TRUNCATED" | "LLM_STREAM_ERROR" | "AUDIT_WRITE_FAILED" | "STREAM_TIMEOUT" | "SERVER_SHUTTING_DOWN" | "APPROVAL_STREAM_CANCELLED" | "CLIENT_DISCONNECTED" | "TERM_SESSION_NOT_FOUND" | "TERM_SESSION_EXISTS" | "TERM_SESSION_LIMIT" | "TERM_CONNECT_FAILED" | "TERM_UNSUPPORTED" | "TERM_WS_PROTOCOL" | "RECORDING_NOT_FOUND" | "RECORDING_UNAVAILABLE" | "RDP_SESSION_NOT_FOUND" | "RDP_SESSION_EXISTS" | "RDP_SESSION_LIMIT" | "RDP_CONNECT_FAILED" | "RDP_UNSUPPORTED" | "RDP_NO_CREDENTIALS" | "GUACD_UNAVAILABLE" | "NETCLI_LOGIN_FAILED" | "NETCLI_EXEC_FAILED" | "CONTAINER_UNSUPPORTED" | "CONTAINER_NOT_FOUND" | "CONTAINER_CLI_FAILED";
         /** @description 错误码；空字符串表示无错误。 */
         MaybeErrorCode: components["schemas"]["ErrorCode"] | "";
         Error: {
@@ -1478,17 +1707,69 @@ export interface components {
         MessageStatus: "complete" | "error";
         /** @enum {string} */
         ToolCallStatus: "started" | "awaiting_approval" | "succeeded" | "failed" | "denied" | "expired" | "awaiting_user";
+        /**
+         * @description 固定角色；每用户恰一个。
+         * @enum {string}
+         */
+        Role: "admin" | "operator" | "approver" | "auditor";
+        /**
+         * @description 权限串（resource:action）；完整矩阵见 docs/CONTRACT.md 12.2。
+         * @enum {string}
+         */
+        Permission: "chat:use" | "asset:read" | "asset:write" | "asset:test" | "exec:read" | "exec:write" | "monitor:read" | "monitor:manage" | "inspection:manage" | "terminal:use" | "approval:read" | "approval:decide" | "approval:policy" | "audit:read" | "provider:manage" | "user:read" | "user:write" | "user:credential_reset" | "debug:read";
         User: {
             /** Format: uuid */
             id: string;
-            /** @constant */
-            username: "admin";
+            username: string;
+            role: components["schemas"]["Role"];
+            /** @description false=停用；登录与存量会话一律失效。 */
+            enabled: boolean;
+            display_name: string;
+            /** @description 邀请/重置 token 的独立投递地址；可为空串（历史 admin）。 */
+            email: string;
+            /** @description 派生字段：是否存在未使用的 invite token（含已过期）；不落列。为 true 时只能重发邀请，不能启用或重置密码。 */
+            invite_pending: boolean;
+            /** @description 离线 admin reset 后为 true；为 true 时除 me/logout/change-password 外全部 403 PASSWORD_CHANGE_REQUIRED。 */
+            must_change_password: boolean;
+            /** Format: uuid */
+            created_by?: string | null;
+            /** Format: date-time */
+            last_login_at?: string | null;
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
             updated_at: string;
         };
+        UserCreate: {
+            username: string;
+            /** Format: email */
+            email: string;
+            role: components["schemas"]["Role"];
+            display_name?: string;
+        };
+        UserUpdate: {
+            role?: components["schemas"]["Role"];
+            enabled?: boolean;
+            display_name?: string;
+        };
+        UserList: {
+            items: components["schemas"]["User"][];
+        };
+        InviteAcceptRequest: {
+            token: string;
+            new_password: string;
+            display_name?: string;
+        };
+        CredentialResetResponse: {
+            /** Format: uuid */
+            user_id: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** @description token 已投递到目标 email；响应不包含 token。 */
+            delivered: boolean;
+        };
         LoginRequest: {
+            username: string;
             password: string;
         };
         PasswordChangeRequest: {
@@ -1498,9 +1779,11 @@ export interface components {
         };
         LoginResponse: {
             user: components["schemas"]["User"];
+            permissions: components["schemas"]["Permission"][];
         };
         MeResponse: {
             user: components["schemas"]["User"];
+            permissions: components["schemas"]["Permission"][];
         };
         Server: {
             /** Format: uuid */
@@ -2122,10 +2405,10 @@ export interface components {
              */
             tool_call_id: string | null;
             /**
-             * @description 审批发起来源（四期 console、五期 batch；历史数据等价 chat）。
+             * @description 审批发起来源（console 四期、batch 五期、terminal/policy 00012）。
              * @enum {string}
              */
-            source: "chat" | "console" | "batch";
+            source: "chat" | "console" | "batch" | "terminal" | "policy";
             /** Format: uuid */
             server_id: string | null;
             server_name: string;
@@ -2144,18 +2427,42 @@ export interface components {
             expires_at: string;
             /** Format: date-time */
             decided_at: string | null;
+            /**
+             * Format: uuid
+             * @description 发起人（00012 必填）；chat=会话 owner，console=HTTP 用户，batch=batch_jobs.created_by，terminal/policy=请求用户。
+             */
+            requested_by: string;
+            /** @description 发起人 username/display_name（JOIN 派生，不落列）。 */
+            requested_by_name: string;
             /** Format: uuid */
             decided_by: string | null;
             note: string;
-            /** @description 用户改写后的命令（六期）；空串=未改写。执行（console/batch decide 或 chat 等待方）使用本字段非空时的值。 */
+            /** @description 历史字段（00012 起新行恒为空）；仅 legacy 行可非空，执行层永不读取。 */
             edited_command: string;
             /**
-             * @description 改写后命令的重新分类级别（六期）；空串=未改写。改写后 forbidden 在 decide 即被 403 拒绝，不落库。
+             * @description 历史字段；00012 起新行恒为空。
              * @enum {string}
              */
             edited_risk_level: "" | "safe" | "needs_approval";
-            /** @description 改写后命令命中的风险规则 ID（六期）；未改写为空串。 */
+            /** @description 历史字段；00012 起新行恒为空。 */
             edited_rule_id: string;
+            /**
+             * @description source=terminal 的 grant 类型。
+             * @enum {string|null}
+             */
+            grant_kind?: "term" | "rdp" | null;
+            /** Format: date-time */
+            grant_expires_at?: string | null;
+            /** Format: date-time */
+            consumed_at?: string | null;
+            /** @enum {string|null} */
+            policy_from?: "all" | "standard" | "high" | "none" | null;
+            /** @enum {string|null} */
+            policy_to?: "all" | "standard" | "high" | "none" | null;
+            /** @description 仅主机侧 aiops break-glass 置 true。 */
+            break_glass: boolean;
+            /** @description 迁移前历史行；应用不得写 true。 */
+            legacy: boolean;
         };
         ApprovalList: {
             items: components["schemas"]["Approval"][];
@@ -2164,12 +2471,35 @@ export interface components {
             /** @enum {string} */
             decision: "approve" | "deny";
             note?: string;
+        };
+        ApprovalContext: {
+            approval: components["schemas"]["Approval"];
+            tool_call: components["schemas"]["ToolCall"] | null;
+            server: components["schemas"]["Server"] | null;
+            /** @description 审批前最多 20 条消息；不含审批后的新消息。 */
+            messages: components["schemas"]["Message"][];
+        };
+        AuditVerifyResponse: {
+            ok: boolean;
+            checked: number;
             /**
-             * @description 六期：批准时改写命令（可选）。仅 decision=approve 时合法（deny 携带本字段
-             *     返回 400）；禁止 NUL；服务端按审批目标重新 risk.Classify——改写后
-             *     forbidden 返回 403 COMMAND_FORBIDDEN 且审批保持 pending。
+             * Format: int64
+             * @description 本次校验覆盖的最小审计 id（空区间为 0）。页面据此展示「#first–#head」
+             *     并声明更早记录未在本次范围内（第 2 轮走查：窗口是有界的，不能只报条数）。
              */
-            edited_command?: string;
+            first_id: number;
+            /** @description 本次实际生效的窗口上限（缺省与上限均为 200）。 */
+            window: number;
+            /** @description 本次区间内按 legacy 规则只校验链接的存量行数（00014 前，纳秒哈希输入不可恢复）。 */
+            legacy: number;
+            /** Format: int64 */
+            head_id: number;
+            head_hash: string;
+            /**
+             * Format: int64
+             * @description 链断点 id；ok=true 时为 null。
+             */
+            broken_at?: number | null;
         };
         AuditLog: {
             /** Format: int64 */
@@ -2293,7 +2623,7 @@ export interface components {
         };
         ApprovalDecisionResult: {
             approval: components["schemas"]["Approval"];
-            /** @description 仅 source=console|batch 且批准时非 null（四期容器/五期批量同步执行结果；执行命令为 edited_command 非空时的改写后命令）；chat 审批与拒绝/过期恒 null。 */
+            /** @description 仅 source=console|batch 且批准时非 null（四期容器/五期批量同步执行结果；执行命令恒为 approval.command——00012 起 edited_command 仅历史只读，永不参与执行）；chat 审批与拒绝/过期恒 null。 */
             execution: components["schemas"]["ApprovalExecution"] | null;
         };
         /** @description 六期起诊断 fix 统一 wrapper：需审批时 approval 非 null（execution=null）；门限判定直执行时 execution 非 null（approval=null）。五期裸 Approval 形态废弃。 */
@@ -2304,6 +2634,16 @@ export interface components {
         SettingsResponse: {
             /** @description 全局审批门限（settings['approval.mode']；键缺失兜底 standard）。 */
             approval_mode: components["schemas"]["ApprovalMode"];
+            /**
+             * @description 只读降级态：可承担第二人职责的启用账号（admin/approver）<= 1 时为 true。
+             *     此时审批批准、终端/RDP 授权与会话、policy 放宽都会被拒（409
+             *     NO_SECOND_APPROVER）。前端据此在点按钮前渲染中文说明并置灰按钮。
+             *     与启动告警 rbac_single_admin_warning 同一判定口径（CountEnabledApprovers）。
+             *     存储不可用时本字段缺省（未知状态，前端不得据此隐藏按钮）。
+             */
+            single_admin_degraded?: boolean;
+            /** @description 只读：当前启用且可审批的账号数（admin + approver），用于降级说明文案。 */
+            enabled_approvers?: number;
         };
         SettingsUpdate: {
             approval_mode: components["schemas"]["ApprovalMode"];
@@ -2380,7 +2720,7 @@ export interface components {
             status: "approved" | "denied" | "expired";
             /** Format: date-time */
             decided_at: string | null;
-            /** @description 六期：decide 批准时携带改写后命令则非 null（等待方按它执行）；未改写/拒绝/过期为 null。 */
+            /** @description 历史字段（00012 起 decide 禁止改写，新决策恒为 null）；等待方执行恒以 approval.command 为准。 */
             edited_command?: string | null;
         };
         SseDone: {
@@ -2406,9 +2746,39 @@ export interface components {
         InteractiveSessionStatus: "active" | "closed";
         /** @enum {string} */
         SessionEndReason: "" | "client_closed" | "idle_timeout" | "max_duration" | "server_shutdown" | "error";
+        TerminalGrantCreate: {
+            /** Format: uuid */
+            server_id: string;
+        };
+        TerminalGrantCreated: {
+            approval: components["schemas"]["Approval"];
+            grant: {
+                /** Format: uuid */
+                approval_id: string;
+                /** @enum {string} */
+                grant_kind: "term" | "rdp";
+                /** Format: uuid */
+                server_id: string;
+                /** Format: date-time */
+                grant_expires_at: string;
+            };
+        };
+        TerminalGrantList: {
+            items: components["schemas"]["Approval"][];
+            /** @description 本次返回的可用授权条数（与 items 长度一致，便于页面直接展示「N 条」）。 */
+            count: number;
+        };
         TerminalSessionCreate: {
             /** Format: uuid */
             server_id: string;
+            /**
+             * Format: uuid
+             * @description 已批准、未消费的 source=terminal/grant_kind=term 审批 id（00012）。
+             *     省略/空串表示消费该用户在该服务器上最新一条已批准 grant；没有
+             *     可消费 grant 返回 403 TERMINAL_APPROVAL_REQUIRED（仍要求他人批准
+             *     与单次消费）。
+             */
+            grant_id?: string;
             /** @default 120 */
             cols: number;
             /** @default 40 */
@@ -2427,7 +2797,7 @@ export interface components {
             /** @description 由 servers.name JOIN 填充；服务器删除后为空串。 */
             server_name: string;
             os: components["schemas"]["TargetOS"];
-            /** @description 发起终端的登录用户名（v1 恒为 admin）。 */
+            /** @description 发起终端的用户（users.username；RBAC 后随实际发起人，不再恒为 admin）。 */
             username: string;
             status: components["schemas"]["InteractiveSessionStatus"];
             cols: number;
@@ -2518,6 +2888,12 @@ export interface components {
         RdpSessionCreate: {
             /** Format: uuid */
             server_id: string;
+            /**
+             * Format: uuid
+             * @description 已批准、未消费的 source=terminal/grant_kind=rdp 审批 id（00012）；
+             *     省略/空串消费最新一条已批准 grant。
+             */
+            grant_id?: string;
             /** @default 1280 */
             width: number;
             /** @default 800 */
@@ -3039,6 +3415,16 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description 已登录但缺少所需权限（403 FORBIDDEN），或职责分离/自我操作等授权拒绝 */
+        Forbidden: {
+            headers: {
+                "X-Request-ID": components["headers"]["XRequestID"];
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description 资源不存在 */
         NotFound: {
             headers: {
@@ -3249,7 +3635,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 当前用户 */
+            /** @description 当前用户与权限 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3259,6 +3645,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3290,6 +3677,221 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["OriginForbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    acceptInvite: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InviteAcceptRequest"];
+            };
+        };
+        responses: {
+            /** @description 密码已设置；不创建会话，客户端应跳转登录 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description Origin 不允许，或创建者 IP 尝试兑换（SELF_REDEEM_FORBIDDEN） */
+            403: {
+                headers: {
+                    "X-Request-ID": components["headers"]["XRequestID"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            429: components["responses"]["TooManyRequests"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUsers: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 用户列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserCreate"];
+            };
+        };
+        responses: {
+            /** @description 已创建或已重发邀请（待邀请接受） */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 用户 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateUser: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpdate"];
+            };
+        };
+        responses: {
+            /** @description 更新后的用户 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    resetUserPassword: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已签发并投递 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialResetResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    revokeUserSessions: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 已吊销 */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -4452,6 +5054,32 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    getApprovalContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 有界上下文 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalContext"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     decideApproval: {
         parameters: {
             query?: never;
@@ -4470,7 +5098,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 决策后的审批；source=console/batch 且批准时携带同步执行结果 execution（chat 审批恒 null）。批准且携带 edited_command 时执行的是改写后命令，approval.edited_* 非空。 */
+            /** @description 决策后的审批；source=console/batch 且批准时携带同步执行结果 execution（chat 审批恒 null）。 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4481,7 +5109,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
-            /** @description Origin 不允许；或改写命令被风险规则禁止（COMMAND_FORBIDDEN，审批保持 pending） */
+            /** @description Origin 不允许；或缺少权限（FORBIDDEN）；或发起者自审（APPROVAL_SELF_DECISION） */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -4491,7 +5119,7 @@ export interface operations {
                 };
             };
             404: components["responses"]["NotFound"];
-            /** @description 审批已决策或已过期 */
+            /** @description 审批已决策/已过期；或 legacy edited（APPROVAL_LEGACY_EDIT）；或 policy 目标过期（POLICY_STALE） */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -4531,6 +5159,41 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyAuditChain: {
+        parameters: {
+            query?: {
+                from_id?: number;
+                to_id?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 校验结果 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditVerifyResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description 哈希链断裂（AUDIT_CHAIN_BROKEN） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };
@@ -5554,7 +6217,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 更新后的设置 */
+            /** @description 更新后的设置（收紧/同档直接生效） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -5563,9 +6226,76 @@ export interface operations {
                     "application/json": components["schemas"]["SettingsResponse"];
                 };
             };
+            /** @description 放宽门限已创建 source=policy 审批，等待第二位审批者批准；settings 未变更。 */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        approval_mode: components["schemas"]["ApprovalMode"];
+                        pending_approval: components["schemas"]["Approval"];
+                    };
+                };
+            };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["OriginForbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTerminalGrants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可用授权列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalGrantList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createTerminalGrant: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TerminalGrantCreate"];
+            };
+        };
+        responses: {
+            /** @description 已创建待批准 grant */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalGrantCreated"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -5708,6 +6438,61 @@ export interface operations {
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
             502: components["responses"]["BadGateway"];
+        };
+    };
+    listRdpGrants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 可用授权列表 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalGrantList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createRdpGrant: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description 必须精确匹配允许的 Origin；缺失或不匹配返回 403。 */
+                Origin: components["parameters"]["Origin"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TerminalGrantCreate"];
+            };
+        };
+        responses: {
+            /** @description 已创建待批准 grant */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalGrantCreated"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
         };
     };
     listRdpSessions: {

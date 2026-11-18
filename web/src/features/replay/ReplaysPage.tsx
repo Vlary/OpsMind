@@ -10,6 +10,7 @@ import { useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import PageHeader from '../../components/PageHeader';
+import AuditorReadOnlyNotice from '../../components/AuditorReadOnlyNotice';
 import ReplayCatalog from './ReplayCatalog';
 import ReplayPlayer from './ReplayPlayer';
 import './replay.css';
@@ -33,6 +34,8 @@ export default function ReplaysPage() {
         title="回放执行"
         description="按时间轴回放 AI 会话的消息、工具调用、审批与执行；左侧选择会话，右侧播放。"
       />
+
+      <AuditorReadOnlyNotice />
 
       <div className="opsmind-replay-layout">
         <ReplayCatalog activeId={activeId} onSelect={handleSelect} />

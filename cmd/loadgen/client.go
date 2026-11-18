@@ -136,7 +136,7 @@ func (c *loadClient) login(ctx context.Context, op, password string) error {
 	var lastErr error
 	for attempt := 0; attempt < 8; attempt++ {
 		start := time.Now()
-		status, raw, err := c.roundtrip(ctx, http.MethodPost, "/api/auth/login", map[string]string{"password": password})
+		status, raw, err := c.roundtrip(ctx, http.MethodPost, "/api/auth/login", map[string]string{"username": "admin", "password": password})
 		c.rec.record(op, time.Since(start))
 		if err != nil {
 			return err

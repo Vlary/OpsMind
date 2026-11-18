@@ -60,8 +60,8 @@ type ApprovalResolvedPayload struct {
 	ApprovalID string               `json:"approval_id"`
 	Status     store.ApprovalStatus `json:"status"`
 	DecidedAt  *time.Time           `json:"decided_at"`
-	// EditedCommand 是 decide 批准且用户改写时非空（六期 BE-P，契约 6.2）；
-	// 等待方（runner）执行该命令。
+	// EditedCommand 是历史只读字段（六期 BE-P；00012 起 decide 禁止改写，
+	// 新决策恒为空串）。等待方（runner）执行恒以 approval.command 为准。
 	EditedCommand string `json:"edited_command"`
 }
 
@@ -101,8 +101,13 @@ type RunInfo struct {
 }
 
 // RunInput 是 Run 入参。
+//
+// Role/Permissions 是服务端按登录用户计算的权限快照（契约 12.4 第 3 条）：
+// 工具列表按它们裁剪，工具执行前还会从 store 复读用户状态。
 type RunInput struct {
 	UserID         string
+	Role           store.Role
+	Permissions    []string
 	ConversationID string
 	ProviderID     string
 	Model          string

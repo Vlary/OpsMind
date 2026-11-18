@@ -17,6 +17,7 @@ import (
 
 	"aiops/internal/apierr"
 	"aiops/internal/audit"
+	"aiops/internal/authz"
 	"aiops/internal/containerx"
 	"aiops/internal/netdev"
 	"aiops/internal/sshx"
@@ -37,27 +38,33 @@ const maxJSONBodyBytes = 1 << 20
 // owned by BE2：router.go 属于 SCAFFOLD，由集成阶段在受保护路由组
 // （api := r.Group("/api", d.requireAuth())）上调用本函数。
 func (d *Deps) RegisterBE2Routes(api *gin.RouterGroup) {
-	api.GET("/servers", d.handleListServers)
-	api.POST("/servers", d.handleCreateServer)
-	api.GET("/servers/:id", d.handleGetServer)
-	api.PATCH("/servers/:id", d.handleUpdateServer)
-	api.DELETE("/servers/:id", d.handleDeleteServer)
-	api.POST("/servers/:id/test", d.handleTestServer)
+	d.guard(api, http.MethodGet, "/servers", authz.PermAssetsRead, d.handleListServers)
+	d.guard(api, http.MethodPost, "/servers", authz.PermAssetsWrite, d.handleCreateServer)
+	d.guard(api, http.MethodGet, "/servers/:id", authz.PermAssetsRead, d.handleGetServer)
+	d.guard(api, http.MethodPatch, "/servers/:id", authz.PermAssetsWrite, d.handleUpdateServer)
+	d.guard(api, http.MethodDelete, "/servers/:id", authz.PermAssetsWrite, d.handleDeleteServer)
+	d.guard(api, http.MethodPost, "/servers/:id/test", authz.PermConnectionTest, d.handleTestServer)
 
-	api.GET("/databases", d.handleListDatabases)
-	api.POST("/databases", d.handleCreateDatabase)
-	api.GET("/databases/:id", d.handleGetDatabase)
-	api.PATCH("/databases/:id", d.handleUpdateDatabase)
-	api.DELETE("/databases/:id", d.handleDeleteDatabase)
-	api.POST("/databases/:id/test", d.handleTestDatabase)
-	api.POST("/databases/:id/query", d.handleQueryDatabase)
+	d.guard(api, http.MethodGet, "/databases", authz.PermAssetsRead, d.handleListDatabases)
+	d.guard(api, http.MethodPost, "/databases", authz.PermAssetsWrite, d.handleCreateDatabase)
+	d.guard(api, http.MethodGet, "/databases/:id", authz.PermAssetsRead, d.handleGetDatabase)
+	d.guard(api, http.MethodPatch, "/databases/:id", authz.PermAssetsWrite, d.handleUpdateDatabase)
+	d.guard(api, http.MethodDelete, "/databases/:id", authz.PermAssetsWrite, d.handleDeleteDatabase)
+	d.guard(api, http.MethodPost, "/databases/:id/test", authz.PermConnectionTest, d.handleTestDatabase)
+	d.guard(api, http.MethodPost, "/databases/:id/query", authz.PermExecuteReadonly, d.handleQueryDatabase)
 
-	api.GET("/approvals", d.handleListApprovals)
-	api.GET("/approvals/:id", d.handleGetApproval)
-	api.POST("/approvals/:id/decide", d.handleDecideApproval)
+	d.guard(api, http.MethodGet, "/approvals", authz.PermApprovalRead, d.handleListApprovals)
+	// 发起人例外（契约 12.3 路由表 / openapi）：有 approval:read 读全部，
+	// 否则仅 requested_by=自己；其余 404，不泄露存在性。
+	d.guardInstance(api, http.MethodGet, "/approvals/:id", authz.PermApprovalRead, d.handleGetApproval)
+	d.guard(api, http.MethodGet, "/approvals/:id/context", authz.PermApprovalRead, d.handleGetApprovalContext)
+	d.guard(api, http.MethodPost, "/approvals/:id/decide", authz.PermApprovalDecide, d.handleDecideApproval)
 
-	api.GET("/audit", d.handleListAudit)
-	api.POST("/ops/preview-risk", d.handlePreviewRisk)
+	d.guard(api, http.MethodGet, "/audit", authz.PermAudit, d.handleListAudit)
+	// 00012：哈希链校验（此前只在权限表登记、从未注册路由 → AUDIT_CHAIN_BROKEN
+	// 不可达；评审发现）。
+	d.guard(api, http.MethodGet, "/audit/verify", authz.PermAudit, d.handleVerifyAudit)
+	d.guard(api, http.MethodPost, "/ops/preview-risk", authz.PermExecuteReadonly, d.handlePreviewRisk)
 }
 
 // now 返回 UTC 时钟时间。

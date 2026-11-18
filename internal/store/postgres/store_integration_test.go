@@ -17,13 +17,37 @@ var testDB *Store
 
 func cleanDB(t *testing.T) {
 	t.Helper()
+	// audit_outbox 与 audit_logs 一并清空：状态变更审计走 outbox（契约 12.3
+	// 第 19 条），只清 audit_logs 会让上一个用例的未处理载荷残留到下一个
+	// 用例的 outbox 断言里（误报「pending = N」）。
 	_, err := testDB.pool.Exec(context.Background(), `
 		TRUNCATE users, sessions, servers, databases, providers, conversations,
-		         messages, tool_calls, approvals, audit_logs, settings
+		         messages, tool_calls, approvals, audit_logs, audit_outbox, settings
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
+}
+
+// rbacUserID 返回（必要时创建）一个固定的会话 owner / 审批发起人。
+// 00012 起 conversations.user_id 与 approvals.requested_by 均 NOT NULL；
+// 与测试里的审批人（decider）保持不同，避免 SoD CHECK 误伤。
+func rbacUserID(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	if u, err := testDB.Users().ByUsername(ctx, "rbac-owner"); err == nil {
+		return u.ID
+	}
+	u, err := testDB.Users().Create(ctx, store.CreateUserParams{
+		Username:     "rbac-owner",
+		PasswordHash: "$2a$12$rbacowner",
+		Role:         store.RoleOperator,
+		Enabled:      true,
+	})
+	if err != nil {
+		t.Fatalf("create rbac owner: %v", err)
+	}
+	return u.ID
 }
 
 func mustUser(t *testing.T) store.User {
@@ -31,6 +55,8 @@ func mustUser(t *testing.T) store.User {
 	u, err := testDB.Users().Create(context.Background(), store.CreateUserParams{
 		Username:     "admin",
 		PasswordHash: "$2a$12$abcdefghijklmnopqrstuv",
+		Role:         store.RoleAdmin,
+		Enabled:      true,
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -277,7 +303,7 @@ func TestConversationProviderBindingAndPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{})
+	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{UserID: rbacUserID(t)})
 	if err != nil {
 		t.Fatalf("create conversation: %v", err)
 	}
@@ -308,7 +334,7 @@ func TestConversationProviderBindingAndPagination(t *testing.T) {
 	if err := testDB.Conversations().Touch(ctx, conv.ID, time.Now()); err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
-	list, _, err := testDB.Conversations().ListPage(ctx, store.ConversationListCursor{}, 0)
+	list, _, err := testDB.Conversations().ListPage(ctx, "", store.ConversationListCursor{}, 0)
 	if err != nil || len(list) != 1 || list[0].Title != "renamed" {
 		t.Fatalf("ListPage = %+v, %v", list, err)
 	}
@@ -405,7 +431,8 @@ func TestConversationListPageCursor(t *testing.T) {
 	var seeded []store.Conversation
 	for i := 0; i < 5; i++ {
 		conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{
-			Title: "cursor-" + strconv.Itoa(i),
+			Title:  "cursor-" + strconv.Itoa(i),
+			UserID: rbacUserID(t),
 		})
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
@@ -419,7 +446,7 @@ func TestConversationListPageCursor(t *testing.T) {
 	}
 
 	// 第一页 limit=2：最新两条 + has_more。
-	items, hasMore, err := testDB.Conversations().ListPage(ctx, store.ConversationListCursor{}, 2)
+	items, hasMore, err := testDB.Conversations().ListPage(ctx, "", store.ConversationListCursor{}, 2)
 	if err != nil || len(items) != 2 || !hasMore {
 		t.Fatalf("page1 = %d items, more=%v, err=%v", len(items), hasMore, err)
 	}
@@ -435,7 +462,7 @@ func TestConversationListPageCursor(t *testing.T) {
 			LastMessageAt: page[len(page)-1].LastMessageAt,
 			ID:            page[len(page)-1].ID,
 		}
-		page, hasMore, err = testDB.Conversations().ListPage(ctx, cursor, 2)
+		page, hasMore, err = testDB.Conversations().ListPage(ctx, "", cursor, 2)
 		if err != nil {
 			t.Fatalf("next page: %v", err)
 		}
@@ -464,7 +491,7 @@ func TestConversationListPageCursor(t *testing.T) {
 	}
 
 	// 游标早于所有会话 → 空页、无更多。
-	items, hasMore, err = testDB.Conversations().ListPage(ctx, store.ConversationListCursor{
+	items, hasMore, err = testDB.Conversations().ListPage(ctx, "", store.ConversationListCursor{
 		LastMessageAt: base.Add(-time.Hour), ID: uuid.NewString(),
 	}, 2)
 	if err != nil || len(items) != 0 || hasMore {
@@ -472,7 +499,7 @@ func TestConversationListPageCursor(t *testing.T) {
 	}
 
 	// limit 上限截断（fixedPageLimit：0 → 200）。
-	items, _, err = testDB.Conversations().ListPage(ctx, store.ConversationListCursor{}, 0)
+	items, _, err = testDB.Conversations().ListPage(ctx, "", store.ConversationListCursor{}, 0)
 	if err != nil || len(items) != 5 {
 		t.Fatalf("full list = %d items, err=%v", len(items), err)
 	}
@@ -489,7 +516,7 @@ func TestToolCallsAndApprovals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: "c"})
+	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: "c", UserID: rbacUserID(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,6 +604,7 @@ func TestToolCallsAndApprovals(t *testing.T) {
 		ConversationID: &conv.ID, ToolCallID: &calls[1].ID, ServerID: &server.ID,
 		ServerName: "srv", Command: "systemctl restart nginx", RiskLevel: "needs_approval",
 		Reason: "service change", ExpiresAt: requested.Add(2 * time.Minute), CreatedAt: requested,
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create approval: %v", err)
@@ -617,6 +645,7 @@ func TestToolCallsAndApprovals(t *testing.T) {
 		ConversationID: &conv.ID, ToolCallID: &calls[2].ID,
 		Command: "ls", RiskLevel: "safe", Reason: "r",
 		ExpiresAt: requested.Add(-time.Minute), CreatedAt: requested.Add(-2 * time.Minute),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create expiring approval: %v", err)
@@ -769,6 +798,7 @@ func TestApprovalConsoleNullableContext(t *testing.T) {
 		Command: "docker stop 9f2c", RiskLevel: "needs_approval",
 		RuleID: "CONTAINER_CHANGE", Reason: "container state change",
 		ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create console approval: %v", err)
@@ -794,6 +824,7 @@ func TestApprovalConsoleNullableContext(t *testing.T) {
 		Source: "console", ServerID: &server.ID,
 		Command: "docker start 9f2c", RiskLevel: "needs_approval",
 		RuleID: "CONTAINER_CHANGE", Reason: "r", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("second console approval with NULL tool_call_id: %v", err)
@@ -811,7 +842,7 @@ func TestApprovalConsoleNullableContext(t *testing.T) {
 	}
 
 	// chat 审批（既有语义回归）：上下文非 NULL。
-	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: "c"})
+	conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{Title: "c", UserID: rbacUserID(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -866,5 +897,82 @@ func TestApprovalConsoleNullableContext(t *testing.T) {
 	}
 	if _, err := testDB.Servers().UpdateContainerRuntime(ctx, nd.ID, store.ContainerRuntimeDocker, time.Now()); !errors.Is(err, store.ErrInvalid) {
 		t.Fatalf("network_device non-empty runtime = %v, want ErrInvalid", err)
+	}
+}
+
+// TestConversationListPageScopedByUser 覆盖第 2 轮走查 high 的 store 侧：
+// userID 条件下沉进 SQL（WHERE 先于 LIMIT）。他人较新会话占满窗口时，
+// 本人列表必须仍可见、hasaMore/游标仍可推进——Go 侧后过滤做不到这点。
+func TestConversationListPageScopedByUser(t *testing.T) {
+	cleanDB(t)
+	ctx := context.Background()
+	owner := rbacUserID(t)
+	other, err := testDB.Users().Create(ctx, store.CreateUserParams{
+		Username: "rbac-list-other", PasswordHash: "$2a$12$rbaclistother",
+		Role: store.RoleOperator, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 他人 6 条更新的会话 + 本人 3 条更旧的会话。
+	mk := func(userID, title string, at time.Time) store.Conversation {
+		t.Helper()
+		conv, err := testDB.Conversations().Create(ctx, store.CreateConversationParams{
+			Title: title, UserID: userID,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		if err := testDB.Conversations().Touch(ctx, conv.ID, at); err != nil {
+			t.Fatalf("touch %s: %v", title, err)
+		}
+		conv.LastMessageAt = at
+		return conv
+	}
+	for i := 0; i < 6; i++ {
+		mk(other.ID, "other-"+strconv.Itoa(i), base.Add(-time.Duration(i)*time.Minute))
+	}
+	var mine []store.Conversation
+	for i := 0; i < 3; i++ {
+		mine = append(mine, mk(owner, "mine-"+strconv.Itoa(i), base.Add(-time.Hour-time.Duration(i)*time.Minute)))
+	}
+
+	// 窗口 1：必须拿到本人最新那条（不是空页），且 has_more/游标成对。
+	items, hasMore, err := testDB.Conversations().ListPage(ctx, owner, store.ConversationListCursor{}, 1)
+	if err != nil {
+		t.Fatalf("page1: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != mine[0].ID || !hasMore {
+		t.Fatalf("page1 = %+v (more=%v), want [%s] with more", items, hasMore, mine[0].ID)
+	}
+
+	// 逐页翻完：恰好 3 条、无重复、末条是最旧的本人会话。
+	got := []string{items[0].ID}
+	cursor := store.ConversationListCursor{LastMessageAt: items[0].LastMessageAt, ID: items[0].ID}
+	for hasMore {
+		page, more, perr := testDB.Conversations().ListPage(ctx, owner, cursor, 1)
+		if perr != nil {
+			t.Fatalf("next page: %v", perr)
+		}
+		if len(page) == 0 {
+			t.Fatalf("empty page while has_more=true (cursor stuck)")
+		}
+		for _, c := range page {
+			got = append(got, c.ID)
+		}
+		last := page[len(page)-1]
+		cursor = store.ConversationListCursor{LastMessageAt: last.LastMessageAt, ID: last.ID}
+		hasMore = more
+	}
+	if len(got) != 3 || got[2] != mine[2].ID {
+		t.Fatalf("paged ids = %v, want 3 own ids ending %s", got, mine[2].ID)
+	}
+
+	// 不过滤（userID=""）仍返回全量 9 条（内部/审计场景）。
+	all, _, err := testDB.Conversations().ListPage(ctx, "", store.ConversationListCursor{}, 200)
+	if err != nil || len(all) != 9 {
+		t.Fatalf("unscoped list = %d, %v", len(all), err)
 	}
 }

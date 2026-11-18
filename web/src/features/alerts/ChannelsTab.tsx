@@ -20,6 +20,8 @@ import {
 import { formatDateTime } from '../../components/admin/format';
 import EmptyState from '../../components/EmptyState';
 import { message } from '../../components/antdMessage';
+import { hasAnyPermission, PERMS } from '../../lib/rbacPermissions';
+import { usePermissions } from '../auth/useMe';
 
 import { useNotificationChannels } from './useNotificationChannels';
 import { CHANNEL_KIND_LABELS } from './channelForm';
@@ -34,6 +36,10 @@ export interface ChannelsTabProps {
 
 export default function ChannelsTab({ onCreate, onEdit }: ChannelsTabProps) {
   const queryClient = useQueryClient();
+  // RBAC 走查 sprint 1（medium）：渠道 CRUD 要求 alerts:write
+  //（后端 authz.PermAlertConfig），只读角色不渲染入口。
+  const permissions = usePermissions();
+  const canConfigure = hasAnyPermission(permissions, [PERMS.alertsWrite]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const channelsQuery = useNotificationChannels();
 
@@ -99,37 +105,40 @@ export default function ChannelsTab({ onCreate, onEdit }: ChannelsTabProps) {
       title: '操作',
       key: 'actions',
       width: 96,
-      render: (_, channel) => (
-        <Space size={0}>
-          <Button
-            size="small"
-            type="text"
-            icon={<EditOutlined />}
-            aria-label={`编辑渠道 ${channel.name}`}
-            onClick={() => {
-              onEdit(channel);
-            }}
-          />
-          <Popconfirm
-            title="删除渠道"
-            description={`确定删除「${channel.name}」？引用它的规则将解除绑定。`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => {
-              deleteMutation.mutate(channel.id);
-            }}
-          >
+      render: (_, channel) =>
+        canConfigure ? (
+          <Space size={0}>
             <Button
               size="small"
               type="text"
-              danger
-              icon={<DeleteOutlined />}
-              aria-label={`删除渠道 ${channel.name}`}
-              loading={deletingId === channel.id}
+              icon={<EditOutlined />}
+              aria-label={`编辑渠道 ${channel.name}`}
+              onClick={() => {
+                onEdit(channel);
+              }}
             />
-          </Popconfirm>
-        </Space>
-      ),
+            <Popconfirm
+              title="删除渠道"
+              description={`确定删除「${channel.name}」？引用它的规则将解除绑定。`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => {
+                deleteMutation.mutate(channel.id);
+              }}
+            >
+              <Button
+                size="small"
+                type="text"
+                danger
+                icon={<DeleteOutlined />}
+                aria-label={`删除渠道 ${channel.name}`}
+                loading={deletingId === channel.id}
+              />
+            </Popconfirm>
+          </Space>
+        ) : (
+          <Typography.Text type="secondary">只读</Typography.Text>
+        ),
     },
   ];
 
@@ -147,9 +156,13 @@ export default function ChannelsTab({ onCreate, onEdit }: ChannelsTabProps) {
   return (
     <Flex vertical gap={12}>
       <Flex justify="flex-end">
-        <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>
-          新建渠道
-        </Button>
+        {canConfigure ? (
+          <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>
+            新建渠道
+          </Button>
+        ) : (
+          <Typography.Text type="secondary">当前角色只读，不能新建或修改通知渠道</Typography.Text>
+        )}
       </Flex>
       <Table<NotificationChannel>
         rowKey="id"

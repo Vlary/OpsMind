@@ -73,13 +73,17 @@ func TestConversationCRUD(t *testing.T) {
 		t.Fatalf("get deleted status = %d", rec.Code)
 	}
 	code, _ := errorBody(t, rec)
-	if code != "NOT_FOUND" {
+	// RBAC（00012）：缺失与无权访问统一 404 CONVERSATION_NOT_FOUND（不泄露存在性）。
+	if code != "CONVERSATION_NOT_FOUND" {
 		t.Fatalf("code = %s", code)
 	}
 }
 
 func TestConversationValidation(t *testing.T) {
 	env := newTestEnv(t)
+	// RBAC 后 PATCH/DELETE 先做 owner 校验：必须用自有会话验证参数校验，
+	// 否则不存在的 id 会先得到 404（不泄露存在性）。
+	owned := createConversation(t, env)
 
 	cases := []struct {
 		name   string
@@ -95,14 +99,14 @@ func TestConversationValidation(t *testing.T) {
 			`{"title":"   "}`, http.StatusCreated, ""}, // TrimSpace 后落默认标题
 		{"create unknown field", http.MethodPost, "/api/conversations",
 			`{"title":"x","nope":1}`, http.StatusBadRequest, "VALIDATION_FAILED"},
-		{"rename empty title", http.MethodPatch, "/api/conversations/xxx",
+		{"rename empty title", http.MethodPatch, "/api/conversations/" + owned,
 			`{"title":""}`, http.StatusBadRequest, "VALIDATION_FAILED"},
-		{"rename title too long", http.MethodPatch, "/api/conversations/xxx",
+		{"rename title too long", http.MethodPatch, "/api/conversations/" + owned,
 			`{"title":"` + strings.Repeat("a", 201) + `"}`, http.StatusBadRequest, "VALIDATION_FAILED"},
 		{"rename missing conversation", http.MethodPatch, "/api/conversations/missing",
-			`{"title":"t"}`, http.StatusNotFound, "NOT_FOUND"},
+			`{"title":"t"}`, http.StatusNotFound, "CONVERSATION_NOT_FOUND"},
 		{"delete missing conversation", http.MethodDelete, "/api/conversations/missing",
-			"", http.StatusNotFound, "NOT_FOUND"},
+			"", http.StatusNotFound, "CONVERSATION_NOT_FOUND"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,9 +234,9 @@ func TestMessageAndToolCallPagination(t *testing.T) {
 		t.Fatalf("tool page = %+v", tcPage)
 	}
 
-	// 缺少会话 → 空列表（ListPage 不校验会话存在性）。
+	// 缺少会话 → 404（RBAC 后归属守卫先于列表查询，不泄露存在性）。
 	rec = env.do(http.MethodGet, "/api/conversations/none/messages", "")
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"items":[]`) {
+	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing conversation messages = %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -294,6 +298,8 @@ func seedConversationsAt(t *testing.T, env *testEnv, n int, base time.Time, step
 		at := base.Add(-time.Duration(i) * step)
 		conv := store.Conversation{
 			ID: uuid.NewString(), Title: "seed-" + strconv.Itoa(i),
+			// RBAC（00012）：列表按 owner 过滤，夹具必须归属当前登录用户。
+			UserID:    "user-1",
 			CreatedAt: at, UpdatedAt: at, LastMessageAt: at,
 		}
 		env.st.conversations[conv.ID] = conv

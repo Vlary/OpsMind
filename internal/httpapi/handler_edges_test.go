@@ -443,7 +443,8 @@ func TestConversationEdgeResponses(t *testing.T) {
 	}
 
 	// 空会话的 tool calls：before_seq/limit 非法 → 400；合法空列表 → []。
-	convID := "00000000-0000-0000-0000-0000000000ee"
+	// RBAC 后归属守卫先于查询参数校验，必须使用自有会话。
+	convID := createConversation(t, env)
 	rec = env.do(http.MethodGet, "/api/conversations/"+convID+"/tool-calls?before_seq=bad", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad before_seq = %d, want 400", rec.Code)

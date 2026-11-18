@@ -36,6 +36,10 @@ const (
 	// 无需每秒查库。
 	orphanScanEvery = 5
 
+	// 交互会话授权复检间隔（契约 12.3 第 13 条：WS 每 30 秒复检用户
+	// enabled/权限仍在）。按 1s 治理 tick 计数。
+	authRecheckEvery = 30
+
 	// 收尾各阶段预算：Shutdown 同步封盘总预算 ≤5s（契约 2.1）。
 	auditEnqueueTimeout = 2 * time.Second
 	bridgeStopTimeout   = 2 * time.Second
@@ -69,6 +73,11 @@ var (
 	ErrNotActive     = errors.New("termx: session is not active")
 	ErrShuttingDown  = errors.New("termx: manager is shutting down")
 	ErrNoPTYSupport  = errors.New("termx: ssh executor has no PTY support")
+	// ErrConnectFailed 表示 WS 已升级、会话行已创建，但 PTY/SSH 拨号失败。
+	// 会话已按 error 收尾（error/closed 帧已由 manager 写出并关闭连接）；
+	// 调用方不得再写帧，只需回滚创建会话时消费的终端授权
+	//（契约 12.3 第 12 条：消费后会话 Open 失败要保留 grant 可重试）。
+	ErrConnectFailed = errors.New("termx: pty dial failed")
 )
 
 // pendingSession 是 Open 后、Attach 前的会话占位（归属校验用）。
@@ -76,6 +85,7 @@ type pendingSession struct {
 	id        string
 	serverID  string
 	userID    string
+	authID    string
 	startedAt time.Time
 }
 
@@ -84,6 +94,7 @@ type liveSession struct {
 	id         string
 	serverID   string
 	userID     string
+	authID     string
 	serverName string
 	os         store.ServerOS
 	requestID  string
@@ -127,6 +138,13 @@ type Manager struct {
 	live    map[string]*liveSession
 	servers map[string]string // serverID → sessionID（同服务器单会话）
 	closed  bool
+	// authorize 每 30 秒复检一次（用户 enabled/角色权限仍在）。由装配层
+	// 注入，nil 表示不做周期复检（单测/骨架）。
+	authorize func(ctx context.Context, userID string) error
+	// sessionAuthorize 是带 auth session id 的复检（契约 12.3 第 13 条：
+	// 每 30 秒用 Sessions.Get(sessionID) 复检会话仍存在且未过期）。设置后
+	// 优先于 authorize；nil 时回落到 authorize。
+	sessionAuthorize func(ctx context.Context, userID, authSessionID string) error
 
 	govWG   sync.WaitGroup
 	govStop chan struct{}
@@ -180,6 +198,15 @@ func NewManager(cfg Config, st store.Store, ssh sshx.Executor, audit *audit.Writ
 // WinRM 认证返回 ErrUnsupported。成功写审计 session.start。
 // 不建立 WS 连接；WS handler 随后调 Attach。
 func (m *Manager) Open(ctx context.Context, server store.Server, userID string, cols, rows int) (store.TerminalSession, error) {
+	return m.OpenForAuthSession(ctx, server, userID, "", "", cols, rows)
+}
+
+// OpenForAuthSession 与 Open 相同，额外记录发起本次会话的 auth session id
+// （契约 12.3 第 13 条：live session 按 auth_session_id 建键，logout 可精确
+// 关闭本次登录建立的 shell）。空 authSessionID 表示不追踪（单测/骨架）。
+// grantID 是本次会话消费的 terminal grant，持久化到会话行，WS 拨号失败时
+// 供 httpapi 回滚 consumed_at（空串=无来源授权）。
+func (m *Manager) OpenForAuthSession(ctx context.Context, server store.Server, userID, authSessionID, grantID string, cols, rows int) (store.TerminalSession, error) {
 	switch server.AuthMethod {
 	case store.AuthMethodPasswordNTLM, store.AuthMethodPasswordBasic:
 		return store.TerminalSession{}, ErrUnsupported
@@ -221,6 +248,7 @@ func (m *Manager) Open(ctx context.Context, server store.Server, userID string, 
 	session, err := m.st.TerminalSessions().Create(ctx, store.CreateTerminalSessionParams{
 		ServerID:  server.ID,
 		UserID:    userID,
+		GrantID:   grantID,
 		Cols:      cols,
 		Rows:      rows,
 		StartedAt: m.clock().UTC(),
@@ -232,6 +260,7 @@ func (m *Manager) Open(ctx context.Context, server store.Server, userID string, 
 		id:        session.ID,
 		serverID:  server.ID,
 		userID:    userID,
+		authID:    authSessionID,
 		startedAt: m.clock(),
 	}
 	m.enqueueAudit(session.ID, userID, server.ID, "session.start", map[string]any{
@@ -250,6 +279,12 @@ func (m *Manager) Open(ctx context.Context, server store.Server, userID string, 
 // target 携带调用方（httpapi）解密后的 SSH 目标：凭据仅在进程内传递，
 // 不落日志、不进审计、不进 WS。attachErr 非空时连接由本方法收尾关闭。
 func (m *Manager) Attach(ws Conn, sessionID, userID, requestID, ip string, target sshx.Target) error {
+	return m.AttachForAuthSession(ws, sessionID, userID, "", requestID, ip, target)
+}
+
+// AttachForAuthSession 与 Attach 相同，额外绑定 auth session id（logout 按
+// auth session 精确关闭；空串表示不追踪，单测/骨架路径）。
+func (m *Manager) AttachForAuthSession(ws Conn, sessionID, userID, authSessionID, requestID, ip string, target sshx.Target) error {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -274,6 +309,7 @@ func (m *Manager) Attach(ws Conn, sessionID, userID, requestID, ip string, targe
 		id:         sessionID,
 		serverID:   p.serverID,
 		userID:     userID,
+		authID:     authSessionID,
 		serverName: row.ServerName,
 		os:         row.ServerOS,
 		requestID:  requestID,
@@ -322,7 +358,9 @@ func (m *Manager) Attach(ws Conn, sessionID, userID, requestID, ip string, targe
 		// 不再写死英文技术串，用户可区分密码错与网络问题。
 		s.trySend(errorFrame("TERM_CONNECT_FAILED", DescribeDialError(err)))
 		m.finish(s, reasonError, pty)
-		return nil
+		// 会话已按 error 收尾并关闭 WS；把「拨号失败」作为哨兵返回，让
+		// httpapi 回滚创建会话时消费的 grant（不再重复写帧）。
+		return ErrConnectFailed
 	}
 	s.setPTY(pty)
 
@@ -582,6 +620,110 @@ func (m *Manager) emitEndAudit(s *liveSession, reason string, endAt time.Time, b
 	m.enqueueAudit(s.id, s.userID, s.serverID, "session.end", detail)
 }
 
+// SetAuthorizer 注入周期授权复检（装配期调用，之后只读）。
+func (m *Manager) SetAuthorizer(fn func(ctx context.Context, userID string) error) {
+	m.mu.Lock()
+	m.authorize = fn
+	m.mu.Unlock()
+}
+
+// SetSessionAuthorizer 注入带 auth session id 的周期复检（logout/TTL 后
+// 既有 WS 必须断开；nil 回落 SetAuthorizer 的仅用户复检）。
+func (m *Manager) SetSessionAuthorizer(fn func(ctx context.Context, userID, authSessionID string) error) {
+	m.mu.Lock()
+	m.sessionAuthorize = fn
+	m.mu.Unlock()
+}
+
+// CloseByAuthSession 结束某 auth session 名下的全部交互会话（登出）。
+// pending（Open 未 Attach）与 live 都关闭；live 走完整封盘与 session.end 审计。
+func (m *Manager) CloseByAuthSession(ctx context.Context, authSessionID, reason string) {
+	if authSessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	pendingTargets := make([]*pendingSession, 0, 1)
+	for id, p := range m.pending {
+		if p.authID == authSessionID {
+			pendingTargets = append(pendingTargets, p)
+			delete(m.pending, id)
+		}
+	}
+	targets := make([]*liveSession, 0, 1)
+	for _, s := range m.live {
+		if s.authID == authSessionID {
+			targets = append(targets, s)
+		}
+	}
+	m.mu.Unlock()
+
+	now := m.clock().UTC()
+	for _, p := range pendingTargets {
+		closeCtx, cancel := context.WithTimeout(ctx, dbCloseTimeout)
+		_, _ = m.st.TerminalSessions().Close(closeCtx, store.CloseInteractiveSessionParams{
+			ID: p.id, Reason: reason, EndedAt: now,
+		})
+		cancel()
+	}
+	m.finishAll(ctx, targets, reason)
+}
+
+// finishAll 并行收尾一组 live 会话，等待完成或超时（≤5s）。
+func (m *Manager) finishAll(ctx context.Context, targets []*liveSession, reason string) {
+	if len(targets) == 0 {
+		return
+	}
+	done := make(chan struct{}, len(targets))
+	for _, s := range targets {
+		go func(s *liveSession) {
+			m.finish(s, reason, s.currentPTY())
+			done <- struct{}{}
+		}(s)
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for range targets {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			return
+		}
+	}
+}
+
+// CloseByUser 结束某用户的全部交互会话（停用/改角色/吊销会话/重置密码时
+// 调用）。pending（已 Open 未 Attach）与 live（已建立 WS）都关闭；live 走
+// 完整封盘与 session.end 审计。
+func (m *Manager) CloseByUser(ctx context.Context, userID, reason string) {
+	m.mu.Lock()
+	pendingTargets := make([]*pendingSession, 0, 1)
+	for id, p := range m.pending {
+		if p.userID == userID {
+			pendingTargets = append(pendingTargets, p)
+			delete(m.pending, id)
+		}
+	}
+	targets := make([]*liveSession, 0, 1)
+	for _, s := range m.live {
+		if s.userID == userID {
+			targets = append(targets, s)
+		}
+	}
+	m.mu.Unlock()
+
+	now := m.clock().UTC()
+	for _, p := range pendingTargets {
+		closeCtx, cancel := context.WithTimeout(ctx, dbCloseTimeout)
+		_, _ = m.st.TerminalSessions().Close(closeCtx, store.CloseInteractiveSessionParams{
+			ID: p.id, Reason: reason, EndedAt: now,
+		})
+		cancel()
+	}
+	m.finishAll(ctx, targets, reason)
+}
+
 // CloseByServer 结束某服务器的全部活动会话（服务器删除前调用）。
 func (m *Manager) CloseByServer(ctx context.Context, serverID, reason string) {
 	m.mu.Lock()
@@ -657,13 +799,15 @@ func (m *Manager) governLoop() {
 			return
 		case now := <-ticker.C:
 			tick++
-			m.governOnce(now, tick%orphanScanEvery == 0)
+			m.governOnce(now, tick%orphanScanEvery == 0, tick%authRecheckEvery == 0)
 		}
 	}
 }
 
-func (m *Manager) governOnce(now time.Time, scanOrphans bool) {
+func (m *Manager) governOnce(now time.Time, scanOrphans, recheckAuth bool) {
 	m.mu.Lock()
+	authorize := m.authorize
+	sessionAuthorize := m.sessionAuthorize
 	live := make([]*liveSession, 0, len(m.live))
 	for _, s := range m.live {
 		live = append(live, s)
@@ -673,6 +817,41 @@ func (m *Manager) governOnce(now time.Time, scanOrphans bool) {
 		pending = append(pending, p)
 	}
 	m.mu.Unlock()
+
+	// 契约 12.3 第 13 条：每 30 秒按用户复检 enabled/角色权限；失败即结束
+	// 会话（停用/降级的用户在既有交互 shell 里不得继续执行命令）。
+	check := func(userID, authID string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if sessionAuthorize != nil {
+			return sessionAuthorize(ctx, userID, authID)
+		}
+		if authorize != nil {
+			return authorize(ctx, userID)
+		}
+		return nil
+	}
+	if recheckAuth && (authorize != nil || sessionAuthorize != nil) {
+		for _, p := range pending {
+			err := check(p.userID, p.authID)
+			if err == nil {
+				continue
+			}
+			m.mu.Lock()
+			delete(m.pending, p.id)
+			m.mu.Unlock()
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), dbCloseTimeout)
+			_, _ = m.st.TerminalSessions().Close(closeCtx, store.CloseInteractiveSessionParams{
+				ID: p.id, Reason: reasonError, EndedAt: now.UTC(),
+			})
+			closeCancel()
+		}
+		for _, s := range live {
+			if err := check(s.userID, s.authID); err != nil {
+				m.finish(s, reasonError, s.currentPTY())
+			}
+		}
+	}
 
 	for _, s := range live {
 		activity := time.Unix(0, s.activity.Load())

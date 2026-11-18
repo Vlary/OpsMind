@@ -35,7 +35,7 @@ func auditHas(env *testEnv, action string) bool {
 // rawLogin 不带会话 Cookie 直接登录，返回响应记录器。
 // password 必须是 JSON 安全的 ASCII 串（当前用例均满足）。
 func rawLogin(env *testEnv, password string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"`+password+`"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"`+password+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", testOrigin)
 	rec := httptest.NewRecorder()

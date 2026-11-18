@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 import { AUTH_STATE_FILE } from './helpers';
 
@@ -14,7 +14,7 @@ const PREVIEW_ORIGIN = 'http://localhost:4173';
 test.describe('走查三：页面标题随路由区分', () => {
   test('公开页：登录与 404', async ({ page }) => {
     await page.goto('/login');
-    await expect(page.getByPlaceholder('请输入管理员密码')).toBeVisible();
+    await expect(page.getByPlaceholder('请输入用户名')).toBeVisible();
     await expect(page).toHaveTitle('登录 · 云枢 OpsMind');
 
     // 未知路径是公开路由（NotFoundPage），未登录也显示 404 而非跳登录。

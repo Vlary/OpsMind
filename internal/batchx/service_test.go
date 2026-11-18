@@ -25,6 +25,10 @@ import (
 	"aiops/internal/store"
 )
 
+// testBatchRequester 是批量测试的发起人；RBAC 后 batch 审批的
+// requested_by = batch_jobs.created_by，且不得等于审批人（用例用 user-1 决策）。
+var testBatchRequester = "requester-1"
+
 // ---------------------------------------------------------------------------
 // fakes
 // ---------------------------------------------------------------------------
@@ -536,6 +540,7 @@ func TestDispatchPerServerRouting(t *testing.T) {
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
 		Description: "对所有 web 机器执行 df -h",
+		CreatedBy:   &testBatchRequester,
 		Command:     "ls -la",
 		ServerIDs:   []string{"srv-direct", "srv-approve", "srv-gone"},
 		Source:      store.BatchSourceConsole,
@@ -629,7 +634,8 @@ func TestDispatchForbiddenSkips(t *testing.T) {
 	fx.startAudit(t)
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "rm -rf /", ServerIDs: []string{"srv-evil"},
+		CreatedBy: &testBatchRequester,
+		Command:   "rm -rf /", ServerIDs: []string{"srv-evil"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -685,7 +691,8 @@ func TestApprovalDecideApproveExecutesAndBackfills(t *testing.T) {
 	ctx := context.Background()
 
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "df -h", ServerIDs: []string{"web-1"}, Source: store.BatchSourceConsole,
+		CreatedBy: &testBatchRequester,
+		Command:   "df -h", ServerIDs: []string{"web-1"}, Source: store.BatchSourceConsole,
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -729,7 +736,8 @@ func TestApprovalDecideDeny(t *testing.T) {
 	fx.addServer("web-1", false)
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "df -h", ServerIDs: []string{"web-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "df -h", ServerIDs: []string{"web-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -765,7 +773,8 @@ func TestApprovalIndependence(t *testing.T) {
 	fx.addServer("web-2", false)
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "systemctl status nginx", ServerIDs: []string{"web-1", "web-2"},
+		CreatedBy: &testBatchRequester,
+		Command:   "systemctl status nginx", ServerIDs: []string{"web-1", "web-2"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -808,7 +817,8 @@ func TestExpireScanConvergesExpiredApprovals(t *testing.T) {
 	fx.addServer("web-1", false)
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "df -h", ServerIDs: []string{"web-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "df -h", ServerIDs: []string{"web-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -845,7 +855,8 @@ func TestWorkerPoolLimit(t *testing.T) {
 	}
 	start := time.Now()
 	job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "ls", ServerIDs: ids,
+		CreatedBy: &testBatchRequester,
+		Command:   "ls", ServerIDs: ids,
 	})
 	elapsed := time.Since(start)
 	if err != nil {
@@ -883,7 +894,8 @@ func TestFailureIsolation(t *testing.T) {
 	fx.addServer("srv-ok-2", true)
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "ls", ServerIDs: []string{"srv-ok-1", "srv-bad", "srv-ok-2"},
+		CreatedBy: &testBatchRequester,
+		Command:   "ls", ServerIDs: []string{"srv-ok-1", "srv-bad", "srv-ok-2"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err) // 单台失败不中断编排
@@ -914,7 +926,8 @@ func TestCancelAwaitingApproval(t *testing.T) {
 	fx.addServer("web-2", false)
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "df -h", ServerIDs: []string{"web-1", "web-2"},
+		CreatedBy: &testBatchRequester,
+		Command:   "df -h", ServerIDs: []string{"web-1", "web-2"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -966,14 +979,16 @@ func TestMaxTargets(t *testing.T) {
 		fx.addServer(ids[i], true)
 	}
 	if _, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "ls", ServerIDs: ids,
+		CreatedBy: &testBatchRequester,
+		Command:   "ls", ServerIDs: ids,
 	}); !errors.Is(err, ErrTooManyTargets) {
 		t.Fatalf("51 targets err = %v, want ErrTooManyTargets", err)
 	}
 
 	// 50 台（合法上界）：Dispatch 异步分派后等待全部直执行台收敛 → done。
 	job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "ls", ServerIDs: ids[:50],
+		CreatedBy: &testBatchRequester,
+		Command:   "ls", ServerIDs: ids[:50],
 	})
 	if err != nil {
 		t.Fatalf("50 targets: %v", err)
@@ -1002,7 +1017,8 @@ func TestOutputTruncation(t *testing.T) {
 	fx.ssh.output = strings.Repeat("x", 1024*1024) // 1MB 原始输出
 	fx.addServer("srv-1", true)
 	job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "ls", ServerIDs: []string{"srv-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "ls", ServerIDs: []string{"srv-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1075,7 +1091,8 @@ func TestNetworkDeviceViaInjectedExecFunc(t *testing.T) {
 	})
 
 	job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "show version", ServerIDs: []string{"net-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "show version", ServerIDs: []string{"net-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1109,7 +1126,8 @@ func TestNetdevConfigChangeNeedsApproval(t *testing.T) {
 	})
 
 	job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "write memory", ServerIDs: []string{"net-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "write memory", ServerIDs: []string{"net-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1160,7 +1178,8 @@ func Test2_11BatchPolicyIntegration(t *testing.T) {
 
 	fx.startAudit(t)
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "ls -la", ServerIDs: []string{"srv-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "ls -la", ServerIDs: []string{"srv-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1183,7 +1202,8 @@ func Test2_11BatchPolicyIntegration(t *testing.T) {
 
 	fx.st.settings = stubSettings{mode: string(store.ApprovalModeAll)}
 	job2, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "cat /etc/hostname", ServerIDs: []string{"srv-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "cat /etc/hostname", ServerIDs: []string{"srv-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch(all): %v", err)
@@ -1249,7 +1269,8 @@ func Test2_11ChatBatchHonoursGlobalMode(t *testing.T) {
 
 			id := convID
 			job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-				Command: "uptime", ServerIDs: []string{"srv-1"},
+				CreatedBy: &testBatchRequester,
+				Command:   "uptime", ServerIDs: []string{"srv-1"},
 				Source: store.BatchSourceChat, ConversationID: &id,
 			})
 			if err != nil {
@@ -1283,14 +1304,16 @@ func Test2_11ChatBatchHonoursGlobalMode(t *testing.T) {
 // ptrApprovalMode 便捷取址。
 func ptrApprovalMode(m store.ApprovalMode) *store.ApprovalMode { return &m }
 
-// TestBatchApproveExecutesEditedCommand 契约 2.11 约定 3：批量审批批准时
-// 逐字节执行改写后命令（六期评审发现曾忽略用户改写、执行原始命令）。
-func TestBatchApproveExecutesEditedCommand(t *testing.T) {
+// TestBatchApproveExecutesCommandNotEdited 00012 执行层约束：批量审批批准时
+// 逐字节执行 approval.command，即使内部调用方填充了 edited_command 也
+// 不得执行改写文本（契约 12.3 第 7 条）。
+func TestBatchApproveExecutesCommandNotEdited(t *testing.T) {
 	fx := newFixture(t, ServiceConfig{})
 	fx.addServer("web-1", false) // needs_approval：逐台审批
 	ctx := context.Background()
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "systemctl restart nginx", ServerIDs: []string{"web-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "systemctl restart nginx", ServerIDs: []string{"web-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1310,8 +1333,8 @@ func TestBatchApproveExecutesEditedCommand(t *testing.T) {
 	}
 	fx.waitResultStatus(t, job.ID, "web-1", store.BatchResultExecuted)
 	commands := fx.ssh.commandsOf()
-	if len(commands) == 0 || commands[len(commands)-1] != "echo EDITED_ACTUAL" {
-		t.Fatalf("executed = %v, want edited command（逐字节）", commands)
+	if len(commands) == 0 || commands[len(commands)-1] != "systemctl restart nginx" {
+		t.Fatalf("executed = %v, want original approval.command（edited_command 永不被执行）", commands)
 	}
 }
 
@@ -1331,7 +1354,8 @@ func TestBatchDirectExecutionCarriesClassifiedRiskLevel(t *testing.T) {
 	fx.startAudit(t)
 
 	job, err := fx.svc.Dispatch(context.Background(), store.CreateBatchJobParams{
-		Command: "rm -rf /tmp/aiops-riskcol", ServerIDs: []string{"wt-host"},
+		CreatedBy: &testBatchRequester,
+		Command:   "rm -rf /tmp/aiops-riskcol", ServerIDs: []string{"wt-host"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1380,9 +1404,9 @@ func TestBatchDirectExecutionCarriesClassifiedRiskLevel(t *testing.T) {
 	}
 }
 
-// TestBatchApprovalExecutionAuditCarriesCommand 契约 9.7（六期打磨 sprint 3）：
-// 审批执行路径的 command.executed 也必须带实际执行命令文本——改写时是
-// 改写后命令。审计页「命令摘要」列据此从恒「—」变为可读。
+// TestBatchApprovalExecutionAuditCarriesCommand 契约 9.7 / 12.3 第 7 条：
+// 审批执行路径的 command.executed 带实际执行命令文本；执行层永不读取
+// edited_command，因此这里恒为原 approval.command。
 func TestBatchApprovalExecutionAuditCarriesCommand(t *testing.T) {
 	fx := newFixture(t, ServiceConfig{})
 	fx.ssh.output = "WT-EXEC-RECEIVED"
@@ -1391,7 +1415,8 @@ func TestBatchApprovalExecutionAuditCarriesCommand(t *testing.T) {
 	ctx := context.Background()
 
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "systemctl restart nginx", ServerIDs: []string{"web-1"},
+		CreatedBy: &testBatchRequester,
+		Command:   "systemctl restart nginx", ServerIDs: []string{"web-1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)
@@ -1428,8 +1453,8 @@ func TestBatchApprovalExecutionAuditCarriesCommand(t *testing.T) {
 	if detail == nil {
 		t.Fatalf("audit actions = %v, want command.executed", fx.auditActions())
 	}
-	if detail["command"] != "uptime" {
-		t.Fatalf("audit command = %v, want uptime（改写后实际执行）", detail["command"])
+	if detail["command"] != "systemctl restart nginx" {
+		t.Fatalf("audit command = %v, want original approval.command", detail["command"])
 	}
 	if detail["risk_level"] != string(risk.LevelNeedsApproval) {
 		t.Fatalf("audit risk_level = %v, want needs_approval", detail["risk_level"])
@@ -1451,7 +1476,8 @@ func TestBatchApprovalAuditCarriesCommandAndApproved(t *testing.T) {
 	ctx := context.Background()
 
 	job, err := fx.svc.Dispatch(ctx, store.CreateBatchJobParams{
-		Command: "rm -rf /tmp/audit5/sandbox/batchdeny", ServerIDs: []string{"web-approve", "web-deny"},
+		CreatedBy: &testBatchRequester,
+		Command:   "rm -rf /tmp/audit5/sandbox/batchdeny", ServerIDs: []string{"web-approve", "web-deny"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch: %v", err)

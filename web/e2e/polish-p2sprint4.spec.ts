@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { createApprovedGrant, expect, test, type Page } from './fixtures';
 import { AUTH_STATE_FILE } from './helpers';
 
 // 二期冲刺第 4 轮打磨的端到端验证（实测缺陷 w4-rdp2）：
@@ -33,7 +33,7 @@ test.describe('RDP 断开后秒点新建会话（真链路）', () => {
   test('409 场景化文案引导稍候重试；列表行立即结束不与页头矛盾；稍候后重连成功', async ({
     page,
   }) => {
-    await createServer(page, {
+    const rdpServer = await createServer(page, {
       name: 'p2s4-win-fast-retry',
       host: '127.0.0.1',
       port: 3389,
@@ -44,6 +44,7 @@ test.describe('RDP 断开后秒点新建会话（真链路）', () => {
       auto_exec_enabled: false,
     });
 
+    await createApprovedGrant(page, rdpServer.id, 'rdp');
     await page.goto('/rdp');
     await expect(page.getByRole('heading', { name: '桌面', exact: true })).toBeVisible();
     // 显式选择本用例的服务器：并行跑时 p2s3 的 RDP 用例已建了自己的
@@ -77,18 +78,22 @@ test.describe('RDP 断开后秒点新建会话（真链路）', () => {
     // 校验返回 409 RDP_SESSION_EXISTS，页面给出场景化文案而非裸通用
     // 报错（修复前：「该服务器已有活动 RDP 会话（server already has
     // an active rdp session）」，无任何引导）。
+    await createApprovedGrant(page, rdpServer.id, 'rdp');
     await page.getByRole('button', { name: /新建会话/ }).click();
     const alert = page.locator('.ant-alert-error');
     await expect(alert).toBeVisible({ timeout: 20_000 });
     await expect(alert).toContainText('该服务器已有活动 RDP 会话');
     await expect(alert).toContainText('若您刚断开上一会话');
     await expect(alert).toContainText('数秒内完成收尾');
-    await expect(alert).toContainText('稍候重试');
+    // 第 4 轮走查 medium：409 不再消费 grant，文案明确授权未消耗、无需重新申请。
+    await expect(alert).toContainText('本次授权未被消耗');
+    await expect(alert).toContainText('无需重新申请');
     await expect(alert).not.toContainText('server already has an active rdp session');
 
-    // 文案引导的「稍候重试」真实可行：越过服务端收尾窗口（约 2.3s）后
+    // 文案引导的直接重试真实可行：越过服务端收尾窗口（约 2.3s）后
     // 重连（409 已把 active 会话视图收起，「连接」按钮重新可用）。
     await page.waitForTimeout(4000);
+    await createApprovedGrant(page, rdpServer.id, 'rdp');
     await page.getByRole('button', { name: /连\s*接/ }).click();
     await expect(page.locator('.ant-tag', { hasText: '已连接' }).first()).toBeVisible({
       timeout: 20_000,
@@ -102,7 +107,7 @@ test.describe('终端断开后会话列表乐观结束（真链路：假 sshd）
     // 服务端收尾（约 2.3s）完成前的任何 refetch 之前就把该行置为已结束
     // ——修复前断开只 invalidate 一次，收尾窗口内 refetch 拿回 active 行
     // 盖掉状态，列表与页头「已结束」矛盾残留 2-3 秒。
-    await createServer(page, {
+    const termServer = await createServer(page, {
       name: 'p2s4-term-optimistic',
       host: '127.0.0.1',
       port: 18083,
@@ -113,6 +118,7 @@ test.describe('终端断开后会话列表乐观结束（真链路：假 sshd）
       auto_exec_enabled: false,
     });
 
+    await createApprovedGrant(page, termServer.id, 'term');
     await page.goto('/term');
     await expect(page.getByRole('heading', { name: '终端' })).toBeVisible();
     await page.getByRole('combobox', { name: '选择服务器' }).click();

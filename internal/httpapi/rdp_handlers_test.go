@@ -51,6 +51,7 @@ func (t *memRdpTable) Create(_ context.Context, p store.CreateRdpSessionParams) 
 	s := store.RdpSession{
 		ID:             uuid.NewString(),
 		ServerID:       p.ServerID,
+		UserID:         p.UserID,
 		ServerName:     "mem-server",
 		Width:          p.Width,
 		Height:         p.Height,
@@ -343,8 +344,10 @@ func newRdpTestEnv(t *testing.T, guacdAddr string) *rdpTestEnv {
 	st := newMemStore()
 	st.users["admin"] = store.User{
 		ID: "user-1", Username: "admin", PasswordHash: getAdminHash(),
+		Role: store.RoleAdmin, Enabled: true,
 		CreatedAt: time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC),
 	}
+	seedSecondAdmin(st)
 	cipher, err := cryptox.New([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)
@@ -381,7 +384,7 @@ func newRdpTestEnv(t *testing.T, guacdAddr string) *rdpTestEnv {
 
 func (e *rdpTestEnv) login() string {
 	e.t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"`+testPassword+`"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"admin","password":"`+testPassword+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", testOrigin)
 	rec := httptest.NewRecorder()
@@ -437,8 +440,30 @@ func (e *rdpTestEnv) createServer(t *testing.T, osName string, authMethod store.
 	return id
 }
 
+// grant 注入一条已批准、未消费的 RDP terminal grant（请求人为 admin）。
+func (e *rdpTestEnv) grant(t *testing.T, serverID, kind string) string {
+	t.Helper()
+	id := uuid.NewString()
+	now := time.Now().UTC()
+	expires := now.Add(30 * time.Minute)
+	holder := serverID
+	e.st.mu.Lock()
+	e.st.approvals[id] = store.Approval{
+		ID: id, Source: "terminal", ServerID: &holder, ServerName: "mem-server",
+		Status: store.ApprovalApproved, RequestedBy: "user-1",
+		GrantKind: &kind, GrantExpiresAt: &expires, RequestedAt: now, ExpiresAt: expires,
+	}
+	e.st.mu.Unlock()
+	return id
+}
+
 func (e *rdpTestEnv) createSession(t *testing.T, serverID, body string) (int, string) {
 	t.Helper()
+	grantID := e.grant(t, serverID, "rdp")
+	body = strings.TrimSpace(body)
+	if strings.HasSuffix(body, "}") {
+		body = strings.TrimSuffix(body, "}") + `,"grant_id":"` + grantID + `"}`
+	}
 	rec := e.do(http.MethodPost, "/api/rdp/sessions", body)
 	var out struct {
 		Session store.RdpSession `json:"session"`
@@ -462,21 +487,21 @@ func TestRdpCreateValidation(t *testing.T) {
 
 	// 非 windows 服务器 → 400 RDP_UNSUPPORTED。
 	linuxID := env.createServer(t, "linux", store.AuthMethodPassword, true)
-	rec := env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+linuxID+`"}`)
+	rec := env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+linuxID+`","grant_id":"`+env.grant(t, linuxID, "rdp")+`"}`)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "RDP_UNSUPPORTED") {
 		t.Fatalf("linux create: %d %s", rec.Code, rec.Body.String())
 	}
 
 	// windows 无密码凭据 → 400 RDP_NO_CREDENTIALS。
 	winNoPw := env.createServer(t, "windows", store.AuthMethodPassword, false)
-	rec = env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winNoPw+`"}`)
+	rec = env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winNoPw+`","grant_id":"`+env.grant(t, winNoPw, "rdp")+`"}`)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "RDP_NO_CREDENTIALS") {
 		t.Fatalf("no credential: %d %s", rec.Code, rec.Body.String())
 	}
 
 	// windows private_key 认证 → 400 RDP_NO_CREDENTIALS。
 	winKey := env.createServer(t, "windows", store.AuthMethodPrivateKey, false)
-	rec = env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winKey+`"}`)
+	rec = env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winKey+`","grant_id":"`+env.grant(t, winKey, "rdp")+`"}`)
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "RDP_NO_CREDENTIALS") {
 		t.Fatalf("private key: %d %s", rec.Code, rec.Body.String())
 	}
@@ -509,7 +534,7 @@ func TestRdpCreateGuacdUnavailable(t *testing.T) {
 	// GuacdAddr 空 = RDP 禁用 → 503 GUACD_UNAVAILABLE（S19）。
 	env := newRdpTestEnv(t, "")
 	winID := env.createServer(t, "windows", store.AuthMethodPassword, true)
-	rec := env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winID+`"}`)
+	rec := env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winID+`","grant_id":"`+env.grant(t, winID, "rdp")+`"}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "GUACD_UNAVAILABLE") {
 		t.Fatalf("guacd unavailable: %d %s", rec.Code, rec.Body.String())
 	}
@@ -521,7 +546,7 @@ func TestRdpCreateSuccessAndConflict(t *testing.T) {
 	env.connect = connect
 	winID := env.createServer(t, "windows", store.AuthMethodPasswordNTLM, true)
 
-	rec := env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winID+`","width":1600,"height":900,"dpi":120}`)
+	rec := env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winID+`","grant_id":"`+env.grant(t, winID, "rdp")+`","width":1600,"height":900,"dpi":120}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
 	}
@@ -546,10 +571,20 @@ func TestRdpCreateSuccessAndConflict(t *testing.T) {
 		t.Fatal("credential leaked in create response")
 	}
 
-	// 同服务器第二个活动会话 → 409 RDP_SESSION_EXISTS。
-	rec = env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winID+`"}`)
+	// 同服务器第二个活动会话 → 409 RDP_SESSION_EXISTS（新 grant 有效，
+	// 冲突来自会话占位而非授权）。
+	//
+	// 第 4 轮走查 medium：409 判定前不得消费 grant（否则重试注定 403）。
+	conflictGrant := env.grant(t, winID, "rdp")
+	rec = env.do(http.MethodPost, "/api/rdp/sessions", `{"server_id":"`+winID+`","grant_id":"`+conflictGrant+`"}`)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "RDP_SESSION_EXISTS") {
 		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+	}
+	env.st.mu.Lock()
+	unused := env.st.approvals[conflictGrant]
+	env.st.mu.Unlock()
+	if unused.ConsumedAt != nil {
+		t.Fatalf("conflict 409 consumed grant %s at %v; retry would need re-approval", conflictGrant, unused.ConsumedAt)
 	}
 
 	// 列表 200 且含该会话。

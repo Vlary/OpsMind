@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"aiops/internal/apierr"
+	"aiops/internal/authz"
 	"aiops/internal/batchx"
 	"aiops/internal/risk"
 	"aiops/internal/store"
@@ -29,10 +30,10 @@ type createBatchJobRequest struct {
 
 // RegisterBatchRoutes 注册 M3 批量任务路由（契约 2.5）。
 func (d *Deps) RegisterBatchRoutes(api *gin.RouterGroup) {
-	api.POST("/batch/jobs", d.handleCreateBatchJob)
-	api.GET("/batch/jobs", d.handleListBatchJobs)
-	api.GET("/batch/jobs/:id", d.handleGetBatchJob)
-	api.POST("/batch/jobs/:id/cancel", d.handleCancelBatchJob)
+	d.guard(api, http.MethodPost, "/batch/jobs", authz.PermExecuteWrite, d.handleCreateBatchJob)
+	d.guard(api, http.MethodGet, "/batch/jobs", authz.PermExecuteReadonly, d.handleListBatchJobs)
+	d.guard(api, http.MethodGet, "/batch/jobs/:id", authz.PermExecuteReadonly, d.handleGetBatchJob)
+	d.guard(api, http.MethodPost, "/batch/jobs/:id/cancel", authz.PermExecuteWrite, d.handleCancelBatchJob)
 }
 
 func (d *Deps) handleCreateBatchJob(c *gin.Context) {
@@ -104,6 +105,17 @@ func (d *Deps) handleListBatchJobs(c *gin.Context) {
 		d.writeStoreError(c, err, apierr.BatchJobNotFound)
 		return
 	}
+	// 契约 12.4 第 2 条：非 admin 只列自己创建的任务。
+	if !isAdmin(c) {
+		me := c.GetString("user_id")
+		own := make([]store.BatchJob, 0, len(jobs))
+		for _, job := range jobs {
+			if job.CreatedBy != nil && *job.CreatedBy == me {
+				own = append(own, job)
+			}
+		}
+		jobs = own
+	}
 	if jobs == nil {
 		jobs = []store.BatchJob{}
 	}
@@ -117,6 +129,11 @@ func (d *Deps) handleGetBatchJob(c *gin.Context) {
 	job, results, err := d.Store.BatchJobs().Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		d.writeStoreError(c, err, apierr.BatchJobNotFound)
+		return
+	}
+	// 越权访问按不存在处理（不泄露任务是否存在）。
+	if !ownerOrAdmin(c, job.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.BatchJobNotFound, "batch job not found")
 		return
 	}
 	if results == nil {
@@ -133,7 +150,16 @@ func (d *Deps) handleCancelBatchJob(c *gin.Context) {
 		writeAPIError(c, http.StatusServiceUnavailable, apierr.ServiceUnavailable, "batch service unavailable")
 		return
 	}
-	job, err := d.Batch.Cancel(c.Request.Context(), c.Param("id"))
+	job, _, err := d.Store.BatchJobs().Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		d.writeStoreError(c, err, apierr.BatchJobNotFound)
+		return
+	}
+	if !ownerOrAdmin(c, job.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.BatchJobNotFound, "batch job not found")
+		return
+	}
+	job, err = d.Batch.Cancel(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeAPIError(c, http.StatusNotFound, apierr.BatchJobNotFound, "batch job not found")

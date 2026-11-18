@@ -83,7 +83,7 @@ func newSeedClient(baseURL, password string) (*seedClient, error) {
 		origin: base,
 		hc:     &http.Client{Jar: jar, Timeout: 60 * time.Second},
 	}
-	if err := c.do("POST", "/api/auth/login", map[string]string{"password": password}, nil, http.StatusOK); err != nil {
+	if err := c.do("POST", "/api/auth/login", map[string]string{"username": "admin", "password": password}, nil, http.StatusOK); err != nil {
 		return nil, fmt.Errorf("登录失败（检查 -password / ADMIN_PASSWORD）: %w", err)
 	}
 	return c, nil

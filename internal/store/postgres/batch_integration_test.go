@@ -48,6 +48,7 @@ func TestBatchJobsCRUD(t *testing.T) {
 		Command:     "systemctl restart nginx",
 		ServerIDs:   []string{srv1.ID, srv2.ID},
 		Source:      store.BatchSourceChat,
+		CreatedBy:   strPtr(rbacUserID(t)),
 	})
 	if err != nil {
 		t.Fatalf("create job: %v", err)
@@ -65,6 +66,7 @@ func TestBatchJobsCRUD(t *testing.T) {
 		Command: "systemctl restart nginx", RiskLevel: "needs_approval",
 		RuleID: "DEFAULT_ASK", Reason: "批量操作",
 		ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create approval: %v", err)
@@ -208,6 +210,7 @@ func TestBatchResultsCarryEditedCommand(t *testing.T) {
 	}
 	job, err := testDB.BatchJobs().Create(ctx, store.CreateBatchJobParams{
 		Command: "rm -rf /tmp/x", ServerIDs: []string{srv.ID}, Source: store.BatchSourceConsole,
+		CreatedBy: strPtr(rbacUserID(t)),
 	})
 	if err != nil {
 		t.Fatalf("create job: %v", err)
@@ -217,16 +220,29 @@ func TestBatchResultsCarryEditedCommand(t *testing.T) {
 		Command: "rm -rf /tmp/x", RiskLevel: "needs_approval",
 		RuleID: "RM_ANY", Reason: "dangerous",
 		ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create approval: %v", err)
+	}
+	// 00012：新审批行禁止改写命令（CHECK edited_command='' OR legacy）。
+	if _, err := testDB.Approvals().Decide(ctx, store.DecideApprovalParams{
+		ID: ap.ID, Status: store.ApprovalApproved, DecidedBy: decider.ID,
+		EditedCommand: "uptime", EditedRiskLevel: "safe", EditedRuleID: "READ_ONLY",
+		DecidedAt: time.Now(),
+	}); !errors.Is(err, store.ErrInvalid) {
+		t.Fatalf("edited non-legacy approval = %v, want ErrInvalid", err)
+	}
+	// 历史行（legacy=true，应用不得写）用于验证 edited_command 只读回填语义。
+	if _, err := testDB.pool.Exec(ctx, `UPDATE approvals SET legacy = true WHERE id = $1::uuid`, ap.ID); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := testDB.Approvals().Decide(ctx, store.DecideApprovalParams{
 		ID: ap.ID, Status: store.ApprovalApproved, DecidedBy: decider.ID,
 		EditedCommand: "uptime", EditedRiskLevel: "safe", EditedRuleID: "READ_ONLY",
 		DecidedAt: time.Now(),
 	}); err != nil {
-		t.Fatalf("decide: %v", err)
+		t.Fatalf("decide legacy: %v", err)
 	}
 	created, err := testDB.BatchJobs().CreateResult(ctx, store.CreateBatchResultParams{
 		BatchJobID: job.ID, ServerID: srv.ID, RiskLevel: "needs_approval",
@@ -271,6 +287,7 @@ func TestBatchResultsCarryEditedCommand(t *testing.T) {
 		Source: "batch", ServerID: &srv.ID, ServerName: srv.Name,
 		Command: "df -h", RiskLevel: "needs_approval", RuleID: "DEFAULT_ASK",
 		ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		RequestedBy: rbacUserID(t),
 	})
 	if err != nil {
 		t.Fatalf("create approval 2: %v", err)

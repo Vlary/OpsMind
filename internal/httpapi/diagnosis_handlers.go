@@ -16,6 +16,7 @@ import (
 
 	"aiops/internal/apierr"
 	"aiops/internal/approvals"
+	"aiops/internal/authz"
 	"aiops/internal/diagnosis"
 	"aiops/internal/risk"
 	"aiops/internal/store"
@@ -23,11 +24,11 @@ import (
 
 // RegisterDiagnosisRoutes 注册 M2 诊断路由（契约 2.5）。
 func (d *Deps) RegisterDiagnosisRoutes(api *gin.RouterGroup) {
-	api.GET("/diagnosis/sessions", d.handleListDiagnosis)
-	api.POST("/diagnosis/sessions", d.handleCreateDiagnosis)
-	api.GET("/diagnosis/sessions/:id", d.handleGetDiagnosis)
-	api.POST("/diagnosis/sessions/:id/fix", d.handleDiagnosisFix)
-	api.POST("/diagnosis/sessions/:id/complete", d.handleDiagnosisComplete)
+	d.guard(api, http.MethodGet, "/diagnosis/sessions", authz.PermExecuteReadonly, d.handleListDiagnosis)
+	d.guard(api, http.MethodPost, "/diagnosis/sessions", authz.PermExecuteReadonly, d.handleCreateDiagnosis)
+	d.guard(api, http.MethodGet, "/diagnosis/sessions/:id", authz.PermExecuteReadonly, d.handleGetDiagnosis)
+	d.guard(api, http.MethodPost, "/diagnosis/sessions/:id/fix", authz.PermExecuteReadonly, d.handleDiagnosisFix)
+	d.guard(api, http.MethodPost, "/diagnosis/sessions/:id/complete", authz.PermExecuteReadonly, d.handleDiagnosisComplete)
 }
 
 // createDiagnosisRequest 是 POST /api/diagnosis/sessions 请求体。
@@ -49,11 +50,14 @@ func (d *Deps) handleCreateDiagnosis(c *gin.Context) {
 		writeAPIError(c, http.StatusBadRequest, apierr.ValidationFailed, "invalid request body")
 		return
 	}
+	userID := c.GetString("user_id")
 	sess, err := d.Diagnosis.Create(c.Request.Context(), store.CreateDiagnosisParams{
 		ServerID:     req.ServerID,
 		AlertEventID: req.AlertEventID,
 		Trigger:      store.DiagnosisTriggerManual,
 		ExpiresAt:    time.Now().UTC().Add(30 * time.Minute),
+		// 00012：手工诊断归属当前用户（complete/fix 的 owner 规则依据）。
+		CreatedBy: &userID,
 	})
 	if err != nil {
 		switch {
@@ -92,7 +96,21 @@ func (d *Deps) handleListDiagnosis(c *gin.Context) {
 	if !ok {
 		return
 	}
-	items, err := d.Store.DiagnosisSessions().List(c.Request.Context(), status, serverID, limit)
+	// 契约 12.3 第 16 条 / 12.4 第 2 条（第 11 轮走查 medium）：会话列表与
+	// GET /diagnosis/sessions/:id 必须同源——admin 看全量；其他账号在 SQL
+	// 层只取 created_by=自己（created_by IS NULL 的 system 行仅 admin 可见）。
+	// 先取全量再在 Go 侧过滤会让他人较新的会话占满 limit，把自己的会话挤出
+	// 列表，前端还会出现「可见摘要但点开 404」的错位。
+	createdBy := ""
+	if !isAdmin(c) {
+		createdBy = c.GetString("user_id")
+		if createdBy == "" {
+			// 失败关闭：拿不到当前用户时不得退化为「不过滤」。
+			writeAPIError(c, http.StatusUnauthorized, apierr.AuthRequired, "authentication required")
+			return
+		}
+	}
+	items, err := d.Store.DiagnosisSessions().List(c.Request.Context(), status, serverID, createdBy, limit)
 	if err != nil {
 		d.handleStoreError(c, err, apierr.DiagnosisSessionNotFound)
 		return
@@ -110,6 +128,11 @@ func (d *Deps) handleGetDiagnosis(c *gin.Context) {
 	sess, err := d.Store.DiagnosisSessions().Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		d.handleStoreError(c, err, apierr.DiagnosisSessionNotFound)
+		return
+	}
+	// 契约 12.4 第 2 条：非 owner 且非 admin 按不存在处理。
+	if !ownerOrAdmin(c, sess.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.DiagnosisSessionNotFound, "diagnosis session not found")
 		return
 	}
 	c.JSON(http.StatusOK, sess)
@@ -136,6 +159,11 @@ func (d *Deps) handleDiagnosisFix(c *gin.Context) {
 	sess, err := d.Store.DiagnosisSessions().Get(ctx, c.Param("id"))
 	if err != nil {
 		d.handleStoreError(c, err, apierr.DiagnosisSessionNotFound)
+		return
+	}
+	// 契约 12.4 第 2 条：fix 仅 created_by=user 或 admin。
+	if !ownerOrAdmin(c, sess.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.DiagnosisSessionNotFound, "diagnosis session not found")
 		return
 	}
 	if sess.Status != store.DiagnosisAwaitingFix {
@@ -219,6 +247,7 @@ func (d *Deps) handleDiagnosisFix(c *gin.Context) {
 		Reason:       "diagnosis fix suggestion (session " + sess.ID + ")",
 		ApprovalMode: string(mode),
 		RequestID:    c.GetString("request_id"),
+		RequestedBy:  c.GetString("user_id"),
 	})
 	if err != nil {
 		d.handleStoreError(c, err, apierr.Conflict)
@@ -245,8 +274,13 @@ func (d *Deps) handleDiagnosisComplete(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	id := c.Param("id")
-	if _, err := d.Store.DiagnosisSessions().Get(ctx, id); err != nil {
+	existing, err := d.Store.DiagnosisSessions().Get(ctx, id)
+	if err != nil {
 		d.handleStoreError(c, err, apierr.DiagnosisSessionNotFound)
+		return
+	}
+	if !ownerOrAdmin(c, existing.CreatedBy) {
+		writeAPIError(c, http.StatusNotFound, apierr.DiagnosisSessionNotFound, "diagnosis session not found")
 		return
 	}
 	sess, err := d.Store.DiagnosisSessions().UpdateStatus(ctx, store.UpdateDiagnosisStatusParams{

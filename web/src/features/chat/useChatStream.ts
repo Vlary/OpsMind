@@ -18,6 +18,27 @@ type ToolCallSchema = components['schemas']['ToolCall'];
 
 export type StreamPhase = 'idle' | 'connecting' | 'streaming';
 
+/**
+ * 页面级「回答仍在进行」判定（ChatPage 的 streaming / 离开守卫 / Composer
+ * 共用）。
+ *
+ * 走查第 3 轮 medium：done 帧处理与 `finally` 置 idle 之间隔着一次渲染
+ * （空载实测 30–45ms，负载下秒级），这段时间正文已完整上屏、停止按钮却还
+ * 在，点「新建会话」会被弹「当前回答仍在进行」。因此 done 帧一到（或
+ * live.done 非空）就必须视为已结束——流关闭与回答结束解耦。
+ */
+export function isStreamActive(phase: StreamPhase, live: LiveTurn | null): boolean {
+  if (phase !== 'connecting' && phase !== 'streaming') {
+    return false;
+  }
+  // live 已进入终态（done/error/stopped）即视为回答结束：SSE 流的关闭与
+  // 「回答仍在进行」解耦，不再受一次 React 渲染/微任务排空的延迟影响。
+  if (live && (live.done || live.error || live.stopped)) {
+    return false;
+  }
+  return true;
+}
+
 type TimeoutHandle = ReturnType<typeof setTimeout>;
 
 /**
@@ -272,8 +293,10 @@ const ERROR_TEXT: Record<string, string> = {
   APPROVAL_DENIED: '命令审批被拒绝。',
   APPROVAL_TIMEOUT: '命令审批超时。',
   // 六期打磨 sprint 3：审批随回答流中断被连带取消（tool_calls.error_code）。
-  // 与 APPROVAL_TIMEOUT 区分——后者是等满 TTL 的真实超时。
-  APPROVAL_CANCELLED: '回答流已中断，本轮审批已取消。',
+  // 与 APPROVAL_TIMEOUT 区分——后者是等满 TTL 的真实超时。RBAC 走查
+  // sprint 3：刷新/断开同样走此终态，文案补「请重新发起」给出恢复动作
+  //（刷新后工具卡直接展示，见 ToolCallCard）。
+  APPROVAL_CANCELLED: '回答流已中断，本轮审批已取消，请重新发起。',
   COMMAND_FORBIDDEN: '该命令被风险规则禁止。',
   COMMAND_INVALID: '命令不合法，未执行。',
   // 三期网络设备通道（契约 9.6）：与 termCodes.ts 的既有中文口径一致。
@@ -298,7 +321,27 @@ const ERROR_TEXT: Record<string, string> = {
   SSE_DISCONNECTED: '连接已断开，回答可能不完整。',
   NETWORK_ERROR: '网络异常，请检查连接后重试。',
   SERVER_SHUTTING_DOWN: '服务正在关闭，请稍后重试。',
+  // 00012：must_change_password 会话的 REST/WS 全部 403 该码。此前只有管理页
+  // Alert 有中文，聊天页把原始英文串直接上屏，看起来像系统故障。
+  PASSWORD_CHANGE_REQUIRED: '首次登录或管理员重置后必须先修改密码。',
   CLIENT_DISCONNECTED: '回答已停止。',
+  // RBAC 00012 审批/授权相关错误码。走查第 3 轮 medium：审批卡用
+  // describeError 渲染，此前这张表没有这些码，审批人看到的是后端英文
+  // message（如 "system is in single-admin degraded mode; create a second
+  // admin or approver first"），中文管理员既读不懂也不知道该找谁。
+  NO_SECOND_APPROVER:
+    '可承担审批职责的启用账号（管理员 + 审批者合计）不足 2 个，无法批准或放宽；请联系管理员补充账号，或用主机侧 aiops break-glass 单次批准。',
+  DELIVERY_UNAVAILABLE: '通知通道不可用，邀请或重置令牌无法投递；请先配置 SMTP。',
+  APPROVAL_SELF_DECISION: '不能审批自己发起的请求，请由另一位审批者处理。',
+  APPROVAL_LEGACY_EDIT: '该历史审批包含命令改写，已失效；请拒绝后重新发起。',
+  POLICY_STALE: '策略目标已变化，请重新发起变更。',
+  APPROVAL_MODE_WIDENING_FORBIDDEN: '会话门限不能比全局门限更宽。',
+  TERMINAL_APPROVAL_REQUIRED: '终端/桌面会话需要他人批准的单次授权。',
+  TERMINAL_GRANT_KIND_MISMATCH: '授权类型与终端/桌面不匹配。',
+  LAST_ADMIN: '不能停用或降级最后一个管理员。',
+  SELF_OPERATION: '不能对自己执行该操作。',
+  FORBIDDEN: '无权执行该操作。',
+  AUDIT_CHAIN_BROKEN: '审计哈希链校验失败。',
 };
 
 export function describeError(code: string, fallback?: string): string {
@@ -849,7 +892,8 @@ export function useChatStream(
               result && typeof result['risk_level'] === 'string' ? result['risk_level'] : '';
             // 六期（契约 4210）：tool_result 携带 approval_mode（命令执行类
             // 工具）——前端消费展示门限徽标（此前未读取，六期评审发现）。
-            const approvalMode = typeof payload.approval_mode === 'string' ? payload.approval_mode : '';
+            const approvalMode =
+              typeof payload.approval_mode === 'string' ? payload.approval_mode : '';
             mutate((current) => {
               let found = false;
               current.tools = current.tools.map((tool) => {
@@ -945,6 +989,13 @@ export function useChatStream(
               });
             }
             terminal = true;
+            // 走查第 3 轮 medium：done 帧即回答结束，立刻结束 streaming
+            // 状态（正文与「新建会话」守卫都据此判定）。此前要等
+            // for-await 读完流 + finally 才置 idle，间隙内点「新建会话」
+            // 会弹「当前回答仍在进行」。
+            if (runId === runIdRef.current) {
+              setPhaseState({ cid, phase: 'idle' });
+            }
             invalidateAfterStream(cid);
             break;
           }
@@ -964,6 +1015,10 @@ export function useChatStream(
               };
             });
             terminal = true;
+            // 错误帧同样是本轮终态：立即结束 streaming（与 done 同口径）。
+            if (runId === runIdRef.current) {
+              setPhaseState({ cid, phase: 'idle' });
+            }
             invalidateAfterStream(cid);
             if (code === 'AUTH_REQUIRED') {
               onUnauthorizedRef.current?.();

@@ -99,7 +99,7 @@ func TestConsoleApprovalClosedLoop(t *testing.T) {
 	}
 
 	// 2) 批准：decide 同步逐字节执行。
-	rec = env.do(http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
+	rec = env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -173,7 +173,7 @@ func TestConsoleApprovalDeny(t *testing.T) {
 		_ = json.Unmarshal(raw, &ap)
 	}
 
-	rec = env.do(http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"deny"}`)
+	rec = env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"deny"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide = %d %s", rec.Code, rec.Body.String())
 	}
@@ -209,7 +209,7 @@ func TestConsoleApprovalExpired(t *testing.T) {
 	env.st.approvals[ap.ID] = e
 	env.st.mu.Unlock()
 
-	rec = env.do(http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
+	rec = env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expired decide = %d, want 409", rec.Code)
 	}
@@ -237,7 +237,7 @@ func TestConsoleApprovalExecFailureNotRolledBack(t *testing.T) {
 		_ = json.Unmarshal(raw, &ap)
 	}
 
-	rec = env.do(http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
+	rec = env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide = %d %s", rec.Code, rec.Body.String())
 	}
@@ -257,18 +257,23 @@ func TestConsoleApprovalExecFailureNotRolledBack(t *testing.T) {
 // 且行为与既有一致。
 func TestChatApprovalDecideHasNoExecution(t *testing.T) {
 	env := newTestEnv(t)
+	env.ensureRequester(t)
 	id := seedContainerServerForAPI(t, env, store.ContainerRuntimeDocker, store.DeviceKindServer)
 	convID := "11111111-1111-1111-1111-111111111111"
 	toolID := "22222222-2222-2222-2222-222222222222"
+	// 第 8 轮走查 low：decide 入口要求审批 id 为 uuid，种子行随之使用
+	// 合法 UUID（此前用 "ap-chat"，会先被入口 400 拦下）。
+	chatApprovalID := uuid.NewString()
 	env.st.mu.Lock()
-	env.st.approvals["ap-chat"] = store.Approval{
-		ID: "ap-chat", ConversationID: &convID, ToolCallID: &toolID, Source: "chat",
+	env.st.approvals[chatApprovalID] = store.Approval{
+		ID: chatApprovalID, ConversationID: &convID, ToolCallID: &toolID, Source: "chat",
 		ServerID: &id, Command: "systemctl restart nginx", RiskLevel: "needs_approval",
-		Status: store.ApprovalPending, ExpiresAt: time.Now().Add(time.Hour),
+		RequestedBy: testRequesterID,
+		Status:      store.ApprovalPending, ExpiresAt: time.Now().Add(time.Hour),
 	}
 	env.st.mu.Unlock()
 
-	rec := env.do(http.MethodPost, "/api/approvals/ap-chat/decide", `{"decision":"approve"}`)
+	rec := env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+chatApprovalID+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide = %d %s", rec.Code, rec.Body.String())
 	}
@@ -494,7 +499,7 @@ func TestContainerRouteChannelErrorMapsSSHExecFailed(t *testing.T) {
 	if raw, err := json.Marshal(approvalOf(t, decodeBodyMap(t, rec))); err == nil {
 		_ = json.Unmarshal(raw, &ap)
 	}
-	rec = env.do(http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
+	rec = env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+ap.ID+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide = %d %s", rec.Code, rec.Body.String())
 	}
@@ -572,24 +577,26 @@ func TestContainerUnsupportedDetailRuntime(t *testing.T) {
 // 空的 container.action——应落 command.executed（带完整命令与门限快照）。
 func TestNonContainerConsoleApprovalAuditsCommandExecuted(t *testing.T) {
 	env := newTestEnv(t)
+	env.ensureRequester(t)
 	id := seedContainerServerForAPI(t, env, store.ContainerRuntimeDocker, store.DeviceKindServer)
 	env.sshExec.execFn = func(context.Context, sshx.Target, sshx.RunRequest) (sshx.RunResult, error) {
 		return sshx.RunResult{ExitCode: 0, Combined: "ok"}, nil
 	}
 
 	// 手工插入 source=console、command 为非容器形态的 pending 审批。
-	apID := "ap-noncontainer"
+	// 第 8 轮走查 low：decide 入口要求审批 id 为 uuid。
+	apID := uuid.NewString()
 	env.st.mu.Lock()
 	srvID := id
 	env.st.approvals[apID] = store.Approval{
 		ID: apID, Source: "console", ServerID: &srvID,
 		Command: "systemctl restart nginx", RiskLevel: "needs_approval",
-		RuleID: "SERVICE_CHANGE", Status: store.ApprovalPending,
+		RuleID: "SERVICE_CHANGE", Status: store.ApprovalPending, RequestedBy: testRequesterID,
 		ExpiresAt: time.Now().Add(time.Hour), ApprovalMode: store.ApprovalModeNone,
 	}
 	env.st.mu.Unlock()
 
-	rec := env.do(http.MethodPost, "/api/approvals/"+apID+"/decide", `{"decision":"approve"}`)
+	rec := env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+apID+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("decide = %d %s", rec.Code, rec.Body.String())
 	}

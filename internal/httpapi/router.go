@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"aiops/internal/apierr"
+	"aiops/internal/authz"
 	"aiops/internal/config"
 )
 
@@ -47,12 +48,24 @@ func NewRouter(d *Deps) *gin.Engine {
 
 	api := r.Group("/api")
 	api.POST("/auth/login", d.handleLogin)
+	// RBAC（00012）：公开邀请兑换，Origin 由全局中间件校验，handler 内按 IP 限流。
+	api.POST("/auth/invite/accept", d.handleAcceptInvite)
 
 	protected := api.Group("")
 	protected.Use(d.requireAuth())
 	protected.POST("/auth/logout", d.handleLogout)
 	protected.GET("/auth/me", d.handleMe)
 	protected.POST("/auth/password", d.handleChangePassword)
+
+	// 用户管理（00012，契约 12.6）。经 d.guard 注册并进入守卫表对账
+	// （route_guards_test 遍历 gin.Routes()，未登记即失败）。
+	d.guard(protected, http.MethodGet, "/users", authz.PermUsersRead, d.handleListUsers)
+	d.guard(protected, http.MethodPost, "/users", authz.PermUsersWrite, d.handleCreateUser)
+	d.guard(protected, http.MethodGet, "/users/:id", authz.PermUsersRead, d.handleGetUser)
+	d.guard(protected, http.MethodPatch, "/users/:id", authz.PermUsersWrite, d.handleUpdateUser)
+	d.guard(protected, http.MethodPost, "/users/:id/password", authz.PermCredentialReset, d.handleResetUserPassword)
+	d.guard(protected, http.MethodPost, "/users/:id/revoke-sessions", authz.PermUsersWrite, d.handleRevokeUserSessions)
+
 	protected.GET("/conversations", d.handleListConversations)
 	protected.POST("/conversations", d.handleCreateConversation)
 	protected.GET("/conversations/:id", d.handleGetConversation)

@@ -340,6 +340,7 @@ func newMonitorTestEnv(t *testing.T) (*gin.Engine, *Deps) {
 	d := &Deps{Store: st, Cipher: testCipherForMonitor(t), Clock: func() time.Time { return time.Now().UTC() }}
 	r := gin.New()
 	protected := r.Group("/api")
+	protected.Use(withTestAdminIdentity())
 	d.RegisterMonitorRoutes(protected)
 	d.RegisterAlertRoutes(protected)
 	return r, d

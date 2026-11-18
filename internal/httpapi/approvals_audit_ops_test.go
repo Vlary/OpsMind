@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"aiops/internal/approvals"
 	"aiops/internal/audit"
@@ -22,9 +23,11 @@ import (
 
 func createPendingApproval(t *testing.T, env *testEnv) store.Approval {
 	t.Helper()
+	env.ensureRequester(t)
 	ap, err := env.apprSvc.Create(context.Background(), approvals.CreateRequest{
 		ConversationID: testConvPtr("conv-1"), ToolCallID: testConvPtr("tc-1"), Command: "systemctl restart nginx",
 		RiskLevel: "needs_approval", RuleID: "SERVICE_CHANGE", Reason: "service state change",
+		RequestedBy: testRequesterID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,8 +88,8 @@ func TestApprovalListAndDecide(t *testing.T) {
 		t.Fatalf("code = %s", code)
 	}
 
-	// 决策不存在 → 404。
-	rec = env.do(http.MethodPost, "/api/approvals/missing/decide", `{"decision":"approve"}`)
+	// 决策不存在 → 404（用合法 UUID，避免与「非 UUID → 400」混淆）。
+	rec = env.do(http.MethodPost, "/api/approvals/"+uuid.NewString()+"/decide", `{"decision":"approve"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("decide missing = %d", rec.Code)
 	}
@@ -125,6 +128,54 @@ func TestApprovalDecideValidation(t *testing.T) {
 	}
 	if fresh.Status != store.ApprovalPending {
 		t.Fatalf("status = %s, want pending", fresh.Status)
+	}
+}
+
+// 第 8 轮走查 low：非 UUID 的审批 id 必须在入口 400。修复前 approve 经
+// recheckRequester 把 store 的 UUID 转换错误映射成 503「approval store
+// unavailable」，deny 则落 decide 兜底 500 INTERNAL——调用方会误判服务
+// 故障并触发 5xx 告警；同一 id 的 GET 详情却是 400。approve/deny 两条
+// 路径都必须与 GET 同口径。
+func TestApprovalDecideRejectsNonUUIDID(t *testing.T) {
+	env := newTestEnv(t)
+	for _, decision := range []string{"approve", "deny"} {
+		t.Run(decision, func(t *testing.T) {
+			rec := env.do(http.MethodPost, "/api/approvals/not-a-uuid/decide",
+				`{"decision":"`+decision+`"}`)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			code, msg := errorBody(t, rec)
+			if code != "VALIDATION_FAILED" || !strings.Contains(msg, "uuid") {
+				t.Fatalf("code = %q msg = %q", code, msg)
+			}
+		})
+	}
+}
+
+// 守卫层兜底：真实 Postgres 对非法 UUID 返回 ErrInvalid（22P02），
+// approvalRequesterID 不能把它当存储故障映射成 503（否则批准前的发起人
+// 复检会误导调用方以为服务不可用）。
+func TestApprovalRequesterLookupMapsInvalidIDTo400(t *testing.T) {
+	env := newTestEnv(t)
+	env.st.errApprovalsGet = store.ErrInvalid
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	id := uuid.NewString()
+	c.Request = httptestPost("/api/approvals/"+id+"/decide", `{"decision":"approve"}`)
+	c.Params = gin.Params{{Key: "id", Value: id}}
+
+	deps := &Deps{Approvals: env.apprSvc, Store: env.st}
+	if _, ok := deps.approvalRequesterID(c, id); ok {
+		t.Fatal("store ErrInvalid must not authorize execution")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if code, _ := errorBody(t, rec); code != "VALIDATION_FAILED" {
+		t.Fatalf("code = %q", code)
 	}
 }
 
@@ -330,6 +381,82 @@ func TestAuditListActorName(t *testing.T) {
 	}
 	if !emptyIDNull {
 		t.Fatal("no login_failed audit item")
+	}
+}
+
+// TestApprovalDecideRejectsExpiredAndDoesNotExecute 第 11 轮走查 high：
+// sweeper 尚未把过期 pending 行置为 expired 的窗口内，POST decide 必须
+// 409 且不进入 console 同步执行——用户看到倒计时归零后不能再点到批准。
+func TestApprovalDecideRejectsExpiredAndDoesNotExecute(t *testing.T) {
+	env := newTestEnv(t)
+	env.ensureRequester(t)
+	serverID := seedContainerServerForAPI(t, env, store.ContainerRuntimeDocker, store.DeviceKindServer)
+
+	apID := uuid.NewString()
+	expiredAt := time.Now().UTC().Add(-2 * time.Second)
+	env.st.mu.Lock()
+	env.st.approvals[apID] = store.Approval{
+		ID: apID, Source: "console", ServerID: &serverID,
+		Command: "systemctl restart nginx", RiskLevel: "needs_approval",
+		RuleID: "SERVICE_CHANGE", Status: store.ApprovalPending,
+		RequestedBy: testRequesterID,
+		RequestedAt: expiredAt.Add(-2 * time.Minute),
+		ExpiresAt:   expiredAt, ApprovalMode: store.ApprovalModeNone,
+	}
+	env.st.mu.Unlock()
+
+	rec := env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+apID+"/decide", `{"decision":"approve"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("decide expired = %d %s", rec.Code, rec.Body.String())
+	}
+	if code, _ := errorBody(t, rec); code != "APPROVAL_NOT_PENDING" {
+		t.Fatalf("code = %s", code)
+	}
+	if n := env.sshExec.callCount(); n != 0 {
+		t.Fatalf("expired approval executed command %d time(s)", n)
+	}
+	got, err := env.st.Approvals().Get(context.Background(), apID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.ApprovalExpired || got.DecidedBy != nil {
+		t.Fatalf("expired approval = status %s decided_by %v", got.Status, got.DecidedBy)
+	}
+}
+
+// TestApprovalDecideRejectsExpiredPolicyWithoutApplying 第 11 轮走查 high
+// 的 policy 分支：过期后批准不得把全局门限从 standard 放宽到 none。
+func TestApprovalDecideRejectsExpiredPolicyWithoutApplying(t *testing.T) {
+	env := newTestEnv(t)
+	env.ensureRequester(t)
+
+	from, to := string(store.ApprovalModeStandard), string(store.ApprovalModeNone)
+	apID := uuid.NewString()
+	expiredAt := time.Now().UTC().Add(-time.Second)
+	env.st.mu.Lock()
+	env.st.approvals[apID] = store.Approval{
+		ID: apID, Source: "policy", Status: store.ApprovalPending,
+		Command: "", RiskLevel: "needs_approval",
+		RequestedBy: testRequesterID, RequestedAt: expiredAt.Add(-2 * time.Minute),
+		ExpiresAt: expiredAt, PolicyFrom: &from, PolicyTo: &to,
+		ApprovalMode: store.ApprovalModeStandard,
+	}
+	env.st.mu.Unlock()
+
+	rec := env.doAs(env.approverCookie(t), http.MethodPost, "/api/approvals/"+apID+"/decide", `{"decision":"approve"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("decide expired policy = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = env.do(http.MethodGet, "/api/settings", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("settings = %d %s", rec.Code, rec.Body.String())
+	}
+	var settings struct {
+		ApprovalMode string `json:"approval_mode"`
+	}
+	decodeBody(t, rec, &settings)
+	if settings.ApprovalMode != string(store.ApprovalModeStandard) {
+		t.Fatalf("approval_mode = %q, want standard (expired policy must not apply)", settings.ApprovalMode)
 	}
 }
 

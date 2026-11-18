@@ -45,6 +45,24 @@ type Config struct {
 	RdpMaxSessions   int           // AIOPS_RDP_MAX_SESSIONS，默认 2，1..8
 	RdpIdleTimeout   time.Duration // AIOPS_RDP_IDLE_TIMEOUT，默认 30m
 	RdpMaxDuration   time.Duration // AIOPS_RDP_MAX_DURATION，默认 8h
+	// 00012：invite/reset token 的 SMTP 投递通道（契约 12.3 第 18 条）。
+	// 未配置 SMTPHost 时保持无通道（POST /users 与 reset 返回 503
+	// DELIVERY_UNAVAILABLE），绝不签发无法送达的 token。
+	SmtpHost     string // AIOPS_SMTP_HOST
+	SmtpPort     int    // AIOPS_SMTP_PORT，默认 587（STARTTLS；465 走 implicit TLS）
+	SmtpUsername string // AIOPS_SMTP_USERNAME
+	SmtpPassword string // AIOPS_SMTP_PASSWORD
+	SmtpFrom     string // AIOPS_SMTP_FROM，默认取 SmtpUsername
+	// SmtpUseTLS 默认 true：465 走 implicit TLS，其余端口明文连接后强制
+	// STARTTLS。走查 high：旧实现把任意端口的 UseTLS=true 都当 implicit
+	// TLS，默认 587 的提交服务器必投递失败。
+	SmtpUseTLS bool // AIOPS_SMTP_USE_TLS
+	// SmtpImplicitTLS 强制 implicit TLS（非 465 的自建 SMTPS 端口）。
+	SmtpImplicitTLS bool // AIOPS_SMTP_IMPLICIT_TLS，默认 false
+	// 00012：单管理员降级模式的第二人引导（契约 5.10 / 12.3 第 25 条）。
+	// 非空时首次启动为该地址创建 approver 邀请；为空则进入降级模式并写
+	// rbac_single_admin_warning。
+	BootstrapApproverEmail string // AIOPS_BOOTSTRAP_APPROVER_EMAIL
 }
 
 // Load 从环境变量读取配置并校验。
@@ -128,6 +146,27 @@ func Load() (*Config, error) {
 	if c.RdpMaxSessions, err = parseInt("AIOPS_RDP_MAX_SESSIONS", c.RdpMaxSessions); err != nil {
 		return nil, err
 	}
+	// 00012：SMTP 投递（未设置 host 即无通道）。
+	c.SmtpHost = strings.TrimSpace(os.Getenv("AIOPS_SMTP_HOST"))
+	c.SmtpPort = 587
+	if c.SmtpPort, err = parseInt("AIOPS_SMTP_PORT", c.SmtpPort); err != nil {
+		return nil, err
+	}
+	c.SmtpUsername = strings.TrimSpace(os.Getenv("AIOPS_SMTP_USERNAME"))
+	c.SmtpPassword = os.Getenv("AIOPS_SMTP_PASSWORD")
+	c.SmtpFrom = strings.TrimSpace(os.Getenv("AIOPS_SMTP_FROM"))
+	if c.SmtpFrom == "" {
+		c.SmtpFrom = c.SmtpUsername
+	}
+	c.SmtpUseTLS = true
+	if c.SmtpUseTLS, err = parseBool("AIOPS_SMTP_USE_TLS", c.SmtpUseTLS); err != nil {
+		return nil, err
+	}
+	c.SmtpImplicitTLS = false
+	if c.SmtpImplicitTLS, err = parseBool("AIOPS_SMTP_IMPLICIT_TLS", c.SmtpImplicitTLS); err != nil {
+		return nil, err
+	}
+	c.BootstrapApproverEmail = strings.TrimSpace(os.Getenv("AIOPS_BOOTSTRAP_APPROVER_EMAIL"))
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -186,6 +225,26 @@ func (c *Config) validate() error {
 	}
 	if c.RdpMaxDuration <= 0 {
 		return errors.New("config: AIOPS_RDP_MAX_DURATION must be positive")
+	}
+	// 00012：SMTP 通道（可选）。配置了 host 就必须有合法端口与发件人，
+	// 否则宁可启动失败，也不要运行时静默 503。
+	if c.BootstrapApproverEmail != "" {
+		// 引导 approver 只经 SMTP 投递；未配置 SMTP 时该变量无法生效，
+		// 必须在启动时失败而不是静默降级（管理员会以为第二人已创建）。
+		if c.SmtpHost == "" {
+			return errors.New("config: AIOPS_BOOTSTRAP_APPROVER_EMAIL requires AIOPS_SMTP_HOST")
+		}
+		if !strings.Contains(c.BootstrapApproverEmail, "@") {
+			return errors.New("config: AIOPS_BOOTSTRAP_APPROVER_EMAIL must be an email address")
+		}
+	}
+	if c.SmtpHost != "" {
+		if c.SmtpPort < 1 || c.SmtpPort > 65535 {
+			return errors.New("config: AIOPS_SMTP_PORT must be between 1 and 65535")
+		}
+		if c.SmtpFrom == "" {
+			return errors.New("config: AIOPS_SMTP_FROM or AIOPS_SMTP_USERNAME is required when AIOPS_SMTP_HOST is set")
+		}
 	}
 	if c.GuacdAddr != "" {
 		if _, _, err := net.SplitHostPort(c.GuacdAddr); err != nil {

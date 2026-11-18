@@ -1,6 +1,7 @@
 import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query';
 
 import { ApiRequestError } from '../components/admin/apiError';
+import { loginRedirectPath } from './loginRedirect';
 
 // 401 统一处理：任何经过 TanStack Query 的请求返回 AUTH_REQUIRED 时，
 // 清空 me 并跳转登录页（CONTRACT.md 8.4）。放在 query cache 层，避免每个
@@ -31,8 +32,9 @@ function redirectToLogin(): void {
   if (typeof window === 'undefined' || window.location.pathname.startsWith('/login')) {
     return;
   }
-  const next = `${window.location.pathname}${window.location.search}`;
-  window.location.assign(`/login?next=${encodeURIComponent(next)}`);
+  // 与 RequireAuth 同源（reason=session_expired）：登录页据此提示会话已失效，
+  // 而不是普通登录页（RBAC 走查 sprint 1）。
+  window.location.assign(loginRedirectPath(window.location.pathname, window.location.search));
 }
 
 function handleAuthError(error: unknown): void {

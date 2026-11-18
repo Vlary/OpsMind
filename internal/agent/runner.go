@@ -43,6 +43,7 @@ const (
 	codeClientDisconnected   = "CLIENT_DISCONNECTED"
 	codeInternal             = "INTERNAL"
 	codeToolNotFound         = "TOOL_NOT_FOUND"
+	codeToolForbidden        = "TOOL_FORBIDDEN"
 	codeToolArgsInvalid      = "TOOL_ARGS_INVALID"
 	codeCommandForbidden     = "COMMAND_FORBIDDEN"
 	codeCommandInvalid       = "COMMAND_INVALID"
@@ -129,6 +130,10 @@ type Runner struct {
 	// agent 不 import diagnosis/inspection——契约 2.3 依赖表）。
 	phase5Diagnosis  DiagnosisStarter
 	phase5Inspection InspectionRunner
+
+	// RBAC（契约 12.4 第 3 条）：每个 tool call 执行前复读用户 enabled/role。
+	// nil 时只依赖 RunInput 的服务端快照（单测/未装配环境）。
+	userState UserAuthStateLookup
 }
 
 // RunnerConfig 是执行器上限配置。
@@ -374,6 +379,22 @@ func (s *runState) reasoningDurationMS() *int64 {
 	return &ms
 }
 
+// SetUserAuthStateLookup 注入执行期用户状态复读器（装配层在构造后调用）。
+func (r *Runner) SetUserAuthStateLookup(l UserAuthStateLookup) { r.userState = l }
+
+// userStateDenied 在执行每个 tool call 前复读用户；停用/降权/查询失败一律
+// 视为无权（fail-closed）。
+func (r *Runner) userStateDenied(ctx context.Context, in RunInput, tool string) bool {
+	if r.userState == nil {
+		return false
+	}
+	role, enabled, err := r.userState.UserAuthState(ctx, in.UserID)
+	if err != nil || !enabled {
+		return true
+	}
+	return !toolAllowed(role, nil, tool)
+}
+
 // Run 写 user 消息、执行工具循环、写 assistant 消息。
 // 开始后所有失败都通过 emit(Event{Type:EventError}) 发送，并返回非 nil error。
 func (r *Runner) Run(ctx context.Context, in RunInput, emit func(Event) error) error {
@@ -399,6 +420,11 @@ func (r *Runner) Run(ctx context.Context, in RunInput, emit func(Event) error) e
 			return r.emitOnly(runCtx, emit, in.RequestID, codeConversationNotFound, "conversation not found", false, true)
 		}
 		return r.emitOnly(runCtx, emit, in.RequestID, codeInternal, "failed to load conversation", false, true)
+	}
+	// 会话私有（契约 12.3 第 3 条 / 12.4 第 2 条）：runner 也校验 owner，
+	// 不把归属完全托付给 HTTP 层；非 owner 与不存在同码（不泄露存在性）。
+	if in.UserID == "" || conv.UserID != in.UserID {
+		return r.emitOnly(runCtx, emit, in.RequestID, codeConversationNotFound, "conversation not found", false, true)
 	}
 	info, err := r.resolve(runCtx, conv, in.ProviderID, in.Model)
 	if err != nil {
@@ -450,7 +476,7 @@ loop:
 		streamErr := client.Stream(callCtx, llm.Request{
 			Model:       info.Model,
 			Messages:    messages,
-			Tools:       ToolDefinitions(),
+			Tools:       ToolDefinitionsForRole(in.Role, in.Permissions),
 			Temperature: 0.2,
 			MaxTokens:   4096,
 		}, func(ev llm.StreamEvent) error {
@@ -1018,6 +1044,12 @@ func (r *Runner) executeToolCall(ctx context.Context, conv store.Conversation, i
 		out = toolOutcome{Err: &ToolError{Code: codeToolNotFound, Message: "unknown tool"}, Status: store.ToolFailed}
 	case !argsOK:
 		out = toolOutcome{Err: &ToolError{Code: codeToolArgsInvalid, Message: "invalid tool arguments"}, Status: store.ToolFailed}
+	case !toolAllowed(in.Role, in.Permissions, call.Name):
+		// 模型硬调无权工具：与普通工具错误同路径落 tool_calls 与 tool.error。
+		out = toolOutcome{Err: &ToolError{Code: codeToolForbidden, Message: "tool forbidden"}, Status: store.ToolFailed}
+	case r.userStateDenied(ctx, in, call.Name):
+		// 审批等待/长会话期间被停用或降权：执行前复检失败，不执行。
+		out = toolOutcome{Err: &ToolError{Code: codeToolForbidden, Message: "tool forbidden"}, Status: store.ToolFailed}
 	case call.Name == ToolAskUser:
 		out = r.runAskUser(ctx, args)
 	case call.Name == ToolListServers:
@@ -1049,7 +1081,7 @@ func (r *Runner) executeToolCall(ctx context.Context, conv store.Conversation, i
 	case call.Name == ToolBatchExecute:
 		out = r.runBatchExecute(ctx, conv, rec, in, args)
 	case call.Name == ToolRunDiagnosis:
-		out = r.runRunDiagnosis(ctx, conv, args)
+		out = r.runRunDiagnosis(ctx, conv, in, args)
 	case call.Name == ToolRunInspection:
 		out = r.runRunInspection(ctx, args)
 	case call.Name == ToolGetInspectionReport:
@@ -1060,6 +1092,12 @@ func (r *Runner) executeToolCall(ctx context.Context, conv store.Conversation, i
 		return out
 	}
 	if out.Fatal != nil {
+		// 第 6 轮走查 medium：审批已批准、命令执行中客户端断流时，各执行器
+		// 直接返回 Fatal，这里跳过 Finish——tool_call 会永久停在
+		// awaiting_approval（审批已是 approved 并从队列消失，发起人只能
+		// 重发）。兜底收敛仍处于等待态的行；审批仍 pending 的路径已由
+		// 执行器先走 cancelApprovalAndConverge（APPROVAL_CANCELLED）。
+		r.convergeToolCallStatus(ctx, rec.ID, codeClientDisconnected)
 		return out
 	}
 
@@ -1424,9 +1462,9 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 	})
 
 	approvalID := ""
-	// editedCommand 是 decide 批准时的用户改写命令（六期 BE-P，契约 2.11
-	// 约定 3）：非空时逐字节执行它，不再回读模型原始参数。
-	editedCommand := ""
+	// 执行命令的唯一来源：模型原始命令；批准后重置为审批行的
+	// approval.command（契约 12.3 第 7 条——永不读取 edited_command）。
+	execCommand := command
 	if needsApproval {
 		if r.approvals == nil {
 			return toolOutcome{Err: &ToolError{Code: codeInternal, Message: "approval service is not configured"}, Status: store.ToolFailed}
@@ -1434,6 +1472,7 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 		approval, err := r.approvals.Create(ctx, approvals.CreateRequest{
 			ConversationID: &conv.ID,
 			ToolCallID:     &rec.ID,
+			RequestedBy:    in.UserID,
 			ServerID:       &srv.ID,
 			ServerName:     srv.Name,
 			Command:        command,
@@ -1494,8 +1533,13 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 		}
 		switch decisionResult.Status {
 		case store.ApprovalApproved:
-			// 继续执行；批准且用户改写时改执行改写后命令（契约 2.11 约定 3）。
-			editedCommand = decisionResult.EditedCommand
+			// 契约 12.4 第 4 条：等待期间用户可能被停用/降权，执行前
+			// 从 store 再复读一次；失败则不执行命令。
+			if r.userStateDenied(ctx, in, ToolSSHExec) {
+				return toolOutcome{Err: &ToolError{Code: codeToolForbidden, Message: "tool forbidden"}, Status: store.ToolFailed}
+			}
+			// 执行层无条件使用审批行落库的命令（12.3 第 7 条）。
+			execCommand = approval.Command
 		case store.ApprovalDenied:
 			// 契约 9.7（六期打磨 sprint 6）：detail 补 command 与 risk_level
 			// ——与 batchx 的拒绝行同口径（internal/batchx/execute.go）。
@@ -1531,12 +1575,8 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// 六期 BE-P：实际执行命令=改写后命令（decide 批准且用户改写时），
-	// 否则模型原始命令。
-	execCommand := command
-	if editedCommand != "" {
-		execCommand = editedCommand
-	}
+	// 契约 12.3 第 7 条：execCommand 只可能是模型原始命令或持久化的
+	// approval.command；edited_command 永不参与执行。
 
 	// 契约 2.7 双轨路由：WinRM 认证走 winrmx（PowerShell 端点 + exit
 	// $LASTEXITCODE）；SSH 通道保持登录 shell（Linux）或包装 PowerShell
@@ -1610,6 +1650,11 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 	}
 	if execErr != nil {
 		if ctx.Err() != nil {
+			// 第 6 轮走查 medium：审批已批准、命令执行中客户端断流，命令
+			// 不会完成。本函数返回 Fatal 后 executeToolCall 不写 Finish，
+			// 必须先把仍在 awaiting_approval 的行收敛为 expired；审批已
+			// 决策（approved），不能再 Cancel。
+			r.convergeToolCallStatus(ctx, rec.ID, codeClientDisconnected)
 			return toolOutcome{Fatal: ctx.Err()}
 		}
 		code, msg := classifySSHError(runCtx, execErr)
@@ -1625,8 +1670,8 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 		approvalPtr = &approvalID
 	}
 	// 函数签名的命名返回值也叫 out，此处序列化结果改名避免遮蔽。
-	// 六期 BE-P（契约 2.11 约定 3/4）：result 记录实际执行——command 为
-	// 改写后命令（未改写=模型原始命令），回放的 execution 步据此重建。
+	// 00012：result 记录实际执行命令（approval.command / 模型原始命令），
+	// 回放的 execution 步据此重建；永不读取 edited_command。
 	resultPayload := map[string]any{
 		"server_id":   srv.ID,
 		"command":     execCommand,
@@ -1644,13 +1689,10 @@ func (r *Runner) runSSHExec(ctx context.Context, conv store.Conversation, rec st
 	resultJSON, _ := json.Marshal(resultPayload)
 	// 契约 9.7：command.executed 携带实际执行的命令文本（免审批档下这是
 	// 事后复原「跑了什么」的唯一途径）、approval_mode（直执行/审批执行均
-	// 携带）；改写时另增 original_command（原命令）。
+	// 携带）。00012 起不存在改写，命令恒为 approval.command/模型原始命令。
 	executedDetail := map[string]any{
 		"tool_call_id": rec.ID, "risk_level": string(decision.Level), "exit_code": res.exitCode,
 		"approval_mode": string(approvalMode), "command": execCommand,
-	}
-	if editedCommand != "" {
-		executedDetail["original_command"] = command
 	}
 	if res.cleartextWarning != "" {
 		executedDetail["cleartext_warning"] = true
@@ -1692,11 +1734,19 @@ func (r *Runner) convergeToolCallStatus(ctx context.Context, toolCallID, errorCo
 // cancelApprovalAndConverge 取消审批并把对应 tool_call 收敛为 expired。
 // 「审批作废」与「工具状态收敛」是同一个语义动作，放在一处完成，避免
 // 只做一半留下状态矛盾（六期打磨 sprint 3）。
+//
+// 第 6 轮走查 medium：Cancel 只在审批仍 pending 时成功。若与审批者的
+// decide 竞争失败（store.ErrConflict：已 approved/denied），审批已从审批
+// 队列消失，不能再报「流取消连带作废」——命令未执行，按断流口径收敛。
 func (r *Runner) cancelApprovalAndConverge(ctx context.Context, toolCallID, approvalID, requestID string) {
 	cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), convergedWriteTimeout)
-	_, _ = r.approvals.Cancel(cancelCtx, approvalID, "stream_cancelled", requestID)
+	_, cancelErr := r.approvals.Cancel(cancelCtx, approvalID, "stream_cancelled", requestID)
 	cancel()
-	r.convergeToolCallStatus(ctx, toolCallID, codeApprovalCancelled)
+	code := codeApprovalCancelled
+	if errors.Is(cancelErr, store.ErrConflict) {
+		code = codeClientDisconnected
+	}
+	r.convergeToolCallStatus(ctx, toolCallID, code)
 }
 
 // convergeResolvedToolCall 用于「审批已决策、但 approval_resolved 事件发不

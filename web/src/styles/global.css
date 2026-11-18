@@ -768,6 +768,16 @@ a:active {
   gap: 8px;
 }
 
+/* RBAC 走查 sprint 2：审批上下文抽屉内单条历史消息，左侧细线区分轮次。 */
+.opsmind-approval-context-message {
+  padding-left: 10px;
+  border-left: 2px solid var(--color-border);
+}
+
+.opsmind-approval-context-message .ant-typography {
+  overflow-wrap: anywhere;
+}
+
 /* 门限四档中的危险档（免审批）：统一红字（契约 8.7）。 */
 .approval-mode-danger-text {
   color: var(--color-danger);

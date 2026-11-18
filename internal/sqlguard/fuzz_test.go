@@ -72,6 +72,10 @@ func FuzzCheck(f *testing.F) {
 		"SELECT 'pg_read_file' AS fn",
 		"SELECT $$a;b$$ AS body",
 		"SELECT 1 -- DROP TABLE users\n",
+		// 重叠 `--` 序列（fuzz 回归）：`--- DROP` 里只有第三个 '-' 与空格
+		// 构成 MySQL 注释，前两个不是；骨架剥离必须逐字符推进，不能整体
+		// 吞掉 "--" 而把后面的 `-- DROP` 误当代码/漏剥。
+		"SELECT --- DROP",
 		"SELECT /* DELETE FROM users */ 1",
 		"SELECT 1 # comment ; DROP TABLE t",
 		"SELECT * FROM `delete`",
@@ -189,8 +193,11 @@ func mysqlSkeleton(sql string) string {
 					i++
 				}
 			} else {
-				b.WriteString("--")
-				i += 2
+				// 不是注释：只推进一个 '-'，让重叠的 `--` 对（如 `--- `）在
+				// 下一位置重新判断（与 lexSQL/MySQL 的词法一致）。整体写
+				// "--" 会吞掉第二个 '-'，把真正的 `-- 注释` 当普通文本。
+				b.WriteByte('-')
+				i++
 			}
 		case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
 			if i+2 < len(sql) && sql[i+2] == '!' {

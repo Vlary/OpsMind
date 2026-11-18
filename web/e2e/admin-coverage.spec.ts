@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 import { ADMIN_PASSWORD, AUTH_STATE_FILE } from './helpers';
 
@@ -277,7 +277,7 @@ test.describe('审计与全局交互补充覆盖', () => {
     // 退出只影响本用例的会话。
     const login = await request.post('/api/auth/login', {
       headers: { Origin: PREVIEW_ORIGIN },
-      data: { password: ADMIN_PASSWORD },
+      data: { username: 'admin', password: ADMIN_PASSWORD },
     });
     expect(login.status()).toBe(200);
     const setCookie = login.headers()['set-cookie'] ?? '';
@@ -294,6 +294,6 @@ test.describe('审计与全局交互补充覆盖', () => {
     await page.getByRole('button', { name: /admin/ }).click();
     await page.getByRole('menuitem', { name: '退出登录' }).click();
     await expect(page).toHaveURL(/\/login/, { timeout: 20_000 });
-    await expect(page.getByPlaceholder('请输入管理员密码')).toBeVisible();
+    await expect(page.getByPlaceholder('请输入用户名')).toBeVisible();
   });
 });

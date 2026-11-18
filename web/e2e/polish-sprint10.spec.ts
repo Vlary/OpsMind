@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, installApproverIdentity, test, type Page } from './fixtures';
 
 import {
   AUTH_STATE_FILE,
@@ -153,6 +153,7 @@ test.describe('冲刺 10 打磨', () => {
     // B 窗：同一会话的第二个浏览器窗口（无 SSE 流连接，审批卡来自
     // approvals 列表查询渲染）。
     const pageB = await context.newPage();
+    await installApproverIdentity(pageB);
     try {
       await pageB.goto(`/c/${cid}`);
       const approvalCardB = pageB.locator('.chat-approval', { hasText: '命令审批' }).first();

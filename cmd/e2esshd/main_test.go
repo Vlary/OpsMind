@@ -50,10 +50,7 @@ func startTestServer(t *testing.T) (sshAddr, httpAddr string, stop func()) {
 	go serveSSH(sshLn, cfg, rec)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(rec.snapshot())
-	})
+	mux.HandleFunc("GET /status", statusHandler(rec))
 	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen http: %v", err)
@@ -68,10 +65,10 @@ func startTestServer(t *testing.T) (sshAddr, httpAddr string, stop func()) {
 
 // dialPty 按后端 sshx 的顺序建立 PTY 会话（RequestPty → 可选
 // WindowChange → Shell），返回会话与 stdout 管道。
-func dialPty(t *testing.T, addr string, cols, rows int, resize *struct{ Cols, Rows int }) (*ssh.Session, chan string) {
+func dialPty(t *testing.T, addr, user string, cols, rows int, resize *struct{ Cols, Rows int }) (*ssh.Session, chan string) {
 	t.Helper()
 	config := &ssh.ClientConfig{
-		User:            "e2e",
+		User:            user,
 		Auth:            []ssh.AuthMethod{ssh.Password(e2eSSHPassword)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
@@ -112,7 +109,16 @@ func dialPty(t *testing.T, addr string, cols, rows int, resize *struct{ Cols, Ro
 
 func httpStatus(t *testing.T, addr string) map[string]any {
 	t.Helper()
-	response, err := http.Get("http://" + addr + "/status")
+	return httpStatusFor(t, addr, "")
+}
+
+func httpStatusFor(t *testing.T, addr, user string) map[string]any {
+	t.Helper()
+	url := "http://" + addr + "/status"
+	if user != "" {
+		url += "?user=" + user
+	}
+	response, err := http.Get(url)
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
@@ -128,7 +134,7 @@ func TestFakeSshdRecordsPtySizeAndWindowChange(t *testing.T) {
 	sshAddr, httpAddr, stop := startTestServer(t)
 	defer stop()
 
-	session, output := dialPty(t, sshAddr, 96, 25, &struct{ Cols, Rows int }{80, 20})
+	session, output := dialPty(t, sshAddr, "e2e", 96, 25, &struct{ Cols, Rows int }{80, 20})
 	defer session.Close()
 
 	// banner 可读（PTY 输出链路建立）。
@@ -171,6 +177,51 @@ func TestFakeSshdRecordsPtySizeAndWindowChange(t *testing.T) {
 		return
 	}
 	t.Fatal("status never reflected pty records within 3s")
+}
+
+// TestFakeSshdPerUserIsolation 锁定按 SSH 用户名分桶：并行 e2e 中另一条
+// 终端会话的 window-change 不得污染本用例的 initial/changes/final。
+func TestFakeSshdPerUserIsolation(t *testing.T) {
+	sshAddr, httpAddr, stop := startTestServer(t)
+	defer stop()
+
+	a, _ := dialPty(t, sshAddr, "user-a", 100, 30, &struct{ Cols, Rows int }{80, 20})
+	defer a.Close()
+	b, _ := dialPty(t, sshAddr, "user-b", 120, 40, nil)
+	defer b.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		sa := httpStatusFor(t, httpAddr, "user-a")
+		sb := httpStatusFor(t, httpAddr, "user-b")
+		ia, _ := sa["initial"].(map[string]any)
+		ib, _ := sb["initial"].(map[string]any)
+		if ia == nil || ib == nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		changesA, _ := sa["changes"].([]any)
+		if len(changesA) != 1 {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		fa, _ := sa["final"].(map[string]any)
+		fb, _ := sb["final"].(map[string]any)
+		changesB, _ := sb["changes"].([]any)
+		if ia["cols"] != float64(100) || ia["rows"] != float64(30) ||
+			fa["cols"] != float64(80) || fa["rows"] != float64(20) {
+			t.Fatalf("user-a initial/final = %v/%v, want 100x30/80x20", ia, fa)
+		}
+		if ib["cols"] != float64(120) || ib["rows"] != float64(40) ||
+			fb["cols"] != float64(120) || fb["rows"] != float64(40) {
+			t.Fatalf("user-b initial/final = %v/%v, want 120x40（不被 user-a 污染）", ib, fb)
+		}
+		if len(changesB) != 0 {
+			t.Fatalf("user-b changes = %v, want empty", changesB)
+		}
+		return
+	}
+	t.Fatal("per-user pty records not available within 3s")
 }
 
 func TestFakeSshdRejectsWrongPassword(t *testing.T) {

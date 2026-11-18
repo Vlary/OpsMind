@@ -24,9 +24,14 @@ func (f *txErrUsersStore) WithTx(_ context.Context, fn func(store.Store) error) 
 	return fn(f)
 }
 
-func (f *txErrUsersStore) Users() store.UserStore { return txErrUsers{f} }
+func (f *txErrUsersStore) Users() store.UserStore {
+	return txErrUsers{UserStore: f.fakeStore.Users(), s: f}
+}
 
-type txErrUsers struct{ s *txErrUsersStore }
+type txErrUsers struct {
+	store.UserStore
+	s *txErrUsersStore
+}
 
 func (u txErrUsers) Count(ctx context.Context) (int64, error) {
 	if u.s.inTx && u.s.txCountErr != nil {

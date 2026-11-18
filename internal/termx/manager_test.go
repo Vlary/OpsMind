@@ -209,6 +209,8 @@ func (f *fakeTerminalStore) Create(_ context.Context, p store.CreateTerminalSess
 	s := &store.TerminalSession{
 		ID:             uuid.NewString(),
 		ServerID:       p.ServerID,
+		UserID:         p.UserID,
+		GrantID:        p.GrantID,
 		ServerName:     "test-server",
 		ServerOS:       store.ServerOSLinux,
 		Username:       "admin",
@@ -887,6 +889,33 @@ func TestAttachRejectsWrongUserAndUnknownSession(t *testing.T) {
 	waitForRow(t, f.term, s.ID, reasonClientClosed)
 }
 
+// TestAttachDialFailureReturnsErrConnectFailed 验证 WS 已升级但 PTY 拨号
+// 失败时 Attach 返回 ErrConnectFailed（第 10 轮走查 medium）：httpapi 据此
+// 回滚创建会话时消费的 grant；会话行必须已按 error 收尾，调用方不再写帧。
+func TestAttachDialFailureReturnsErrConnectFailed(t *testing.T) {
+	f := newTestFixture(t, Config{MaxSessions: 2})
+	srv := store.Server{ID: uuid.NewString(), OS: store.ServerOSLinux, AuthMethod: store.AuthMethodPassword}
+	s, err := f.manager.Open(context.Background(), srv, "user-1", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	conn := newFakeConn()
+	defer conn.Close()
+	// 127.0.0.1:1 无监听：拨号快速失败，不依赖外部网络。
+	target := sshx.Target{
+		ServerID:   srv.ID,
+		Host:       "127.0.0.1",
+		Port:       1,
+		Username:   "tester",
+		AuthMethod: store.AuthMethodPassword,
+		Password:   "any",
+	}
+	if err := f.manager.Attach(conn, s.ID, "user-1", "req-dial", "127.0.0.1", target); !errors.Is(err, ErrConnectFailed) {
+		t.Fatalf("dial failure: want ErrConnectFailed, got %v", err)
+	}
+	waitForRow(t, f.term, s.ID, reasonError)
+}
+
 // sshTarget 构造指向测试 SSH server 的连接目标。
 func (f *testFixture) sshTarget(srv store.Server) sshx.Target {
 	return sshx.Target{
@@ -1226,4 +1255,54 @@ func TestShutdownEndsSessions(t *testing.T) {
 		t.Fatalf("shutdown exceeded 5s budget: %v", elapsed)
 	}
 	waitForRow(t, f.term, s.ID, reasonServerShutdown)
+}
+
+// TestCloseByUserEndsSessions 00012：停用/降级/吊销售后必须关闭该用户
+// 已建立的交互 shell，而不只是删 auth session（评审 high）。
+func TestCloseByUserEndsSessions(t *testing.T) {
+	f := newTestFixture(t, Config{MaxSessions: 2})
+	srv := store.Server{ID: uuid.NewString(), OS: store.ServerOSLinux, AuthMethod: store.AuthMethodPassword}
+	s, err := f.manager.Open(context.Background(), srv, "user-cbu", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	conn := newFakeConn()
+	defer conn.Close()
+	if err := f.manager.Attach(conn, s.ID, "user-cbu", "req-cbu", "127.0.0.1", f.sshTarget(srv)); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	waitReady(t, conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	f.manager.CloseByUser(ctx, "user-cbu", reasonError)
+	waitForRow(t, f.term, s.ID, reasonError)
+}
+
+// TestAuthorizerRecheckEndsRevokedSession 契约 12.3 第 13 条：每 30 秒复检
+// enabled/角色权限；复检失败立即结束 live 会话。
+func TestAuthorizerRecheckEndsRevokedSession(t *testing.T) {
+	f := newTestFixture(t, Config{MaxSessions: 2})
+	srv := store.Server{ID: uuid.NewString(), OS: store.ServerOSLinux, AuthMethod: store.AuthMethodPassword}
+	s, err := f.manager.Open(context.Background(), srv, "user-revoked", 0, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	conn := newFakeConn()
+	defer conn.Close()
+	if err := f.manager.Attach(conn, s.ID, "user-revoked", "req-rev", "127.0.0.1", f.sshTarget(srv)); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	waitReady(t, conn)
+
+	checked := false
+	f.manager.SetAuthorizer(func(context.Context, string) error {
+		checked = true
+		return errors.New("permission revoked")
+	})
+	f.manager.governOnce(time.Now(), false, true)
+	if !checked {
+		t.Fatal("authorizer was not invoked")
+	}
+	waitForRow(t, f.term, s.ID, reasonError)
 }

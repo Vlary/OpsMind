@@ -20,6 +20,7 @@ import (
 	"aiops/internal/approvals"
 	"aiops/internal/audit"
 	"aiops/internal/auth"
+	"aiops/internal/authz"
 	"aiops/internal/batchx"
 	"aiops/internal/config"
 	"aiops/internal/cryptox"
@@ -40,6 +41,17 @@ import (
 )
 
 func main() {
+	// 主机侧离线恢复子命令：必须在加载配置/启动监听之前判定，且解析失败
+	// 直接退出——评审 high 实测 break-glass 曾被当成普通启动又起了一个服务
+	// 进程（不写审计、不改任何状态）（契约 12.3 第 11/25 条）。
+	cmd, err := parseOfflineCommand(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aiops: %v\n\n%s", err, offlineUsage)
+		os.Exit(2)
+	}
+	if cmd != nil {
+		os.Exit(runOfflineCommand(cmd, os.Args[1:], os.Stdout))
+	}
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "aiops: %v\n", err)
 		os.Exit(1)
@@ -79,12 +91,25 @@ func run() error {
 
 	clock := time.Now
 	authSvc := auth.NewService(st, auth.Config{SessionTTL: cfg.SessionTTL, Clock: clock})
+	// 00012：invite/reset token 的独立 SMTP 投递通道。此前生产装配从未注入
+	// → POST /api/users 恒 503、管理员无法创建第二个账号（评审发现）。
+	if derr := configureTokenDelivery(authSvc, cfg, log); derr != nil {
+		st.Close()
+		return derr
+	}
 	if err := authSvc.EnsureAdmin(startupCtx, cfg.AdminPassword, os.Stdout); err != nil {
 		st.Close()
 		return fmt.Errorf("ensure admin: %w", err)
 	}
 
 	auditWriter := audit.NewWriter(st, log, clock)
+	// 00012（契约 12.3 第 25 条 / 5.10）：首次启动引导第二个审批者账号；
+	// 否则写 rbac_single_admin_warning，让管理员知道系统处于降级模式
+	// （不能执行 needs_approval、不能开终端/RDP、不能放宽 policy）。
+	if err := bootstrapSecondApprover(startupCtx, st, auditWriter, authSvc, cfg, log); err != nil {
+		st.Close()
+		return err
+	}
 	limiter := auth.NewLoginLimiter(5, 12*time.Second, clock)
 	approvalsSvc := approvals.NewService(st, auditWriter, cfg.ApprovalTTL, clock, log)
 	registry := llm.NewRegistry(st, cipher, newLLMHTTPClient(), log)
@@ -112,6 +137,44 @@ func run() error {
 		MaxDuration:   cfg.RdpMaxDuration,
 		RecordingsDir: cfg.RdpRecordingsDir,
 	}, st, auditWriter, cipher, clock, log)
+	// 00012：交互会话每 30 秒复检用户 enabled/terminal 权限——停用/降级后
+	// 既有 WS 必须断开（评审发现：仅删 auth session 不够）。
+	interactiveAuthorizer := func(ctx context.Context, userID string) error {
+		u, err := st.Users().ByID(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if !u.Enabled {
+			return errors.New("user disabled")
+		}
+		if !authz.Has(u.Role, authz.PermTerminal) {
+			return errors.New("permission revoked")
+		}
+		return nil
+	}
+	// 契约 12.3 第 13 条：WS 每 30 秒用 Sessions.Get(sessionID) 复检会话
+	// 仍存在且未过期（logout/TTL 后既有 shell 必须断开）。
+	interactiveSessionAuthorizer := func(ctx context.Context, userID, authSessionID string) error {
+		if err := interactiveAuthorizer(ctx, userID); err != nil {
+			return err
+		}
+		if authSessionID == "" {
+			return nil
+		}
+		session, err := st.Sessions().Get(ctx, authSessionID)
+		if err != nil {
+			return errors.New("auth session is gone")
+		}
+		if !session.ExpiresAt.After(clock().UTC()) {
+			return errors.New("auth session expired")
+		}
+		return nil
+	}
+	termManager.SetAuthorizer(interactiveAuthorizer)
+	rdpGateway.SetAuthorizer(interactiveAuthorizer)
+	termManager.SetSessionAuthorizer(interactiveSessionAuthorizer)
+	rdpGateway.SetSessionAuthorizer(interactiveSessionAuthorizer)
+
 	runner := agent.NewRunner(
 		st, registry, sshPool, dbPool, approvalsSvc, auditWriter, cipher,
 		agent.RunnerConfig{StreamMaxDuration: cfg.StreamMaxDuration}, clock, log,
@@ -337,6 +400,138 @@ func version() string {
 	return "dev"
 }
 
+// bootstrapSecondApprover 在启动时确保存在第二个可用审批者（契约 12.3 第
+// 25 条 / 5.10）：
+//
+//   - 配置了 AIOPS_BOOTSTRAP_APPROVER_EMAIL 时，为它创建 approver 邀请并经
+//     SMTP 投递（已存在同名/同邮箱账号则跳过）；
+//   - 否则（或投递失败）写 rbac_single_admin_warning 审计，管理员在审计页
+//     能看到「当前为单管理员降级模式」。
+//
+// 引导失败不阻断启动：恢复路径是主机侧 CLI，而进程起不来会让唯一管理员
+// 连登录都做不到。失败原因写日志。
+func bootstrapSecondApprover(ctx context.Context, st store.Store, aw *audit.Writer,
+	authSvc *auth.Service, cfg *config.Config, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	approvers, err := st.Users().CountEnabledApprovers(ctx)
+	if err != nil {
+		log.Warn("rbac_bootstrap_approver_count_failed", "error", err.Error())
+		return nil
+	}
+	if approvers >= 2 {
+		return nil
+	}
+	created := ""
+	if cfg.BootstrapApproverEmail != "" && authSvc != nil && authSvc.CanDeliver() {
+		username := approverUsernameFromEmail(cfg.BootstrapApproverEmail)
+		if _, uerr := st.Users().ByUsername(ctx, username); uerr == nil {
+			log.Info("rbac_bootstrap_approver_exists", "username", username)
+		} else {
+			raw, _, terr := auth.NewSessionToken()
+			if terr == nil {
+				hash, herr := auth.HashPassword(raw)
+				if herr == nil {
+					if cerr := st.WithTx(ctx, func(tx store.Store) error {
+						u, cerr := tx.Users().Create(ctx, store.CreateUserParams{
+							Username: username, PasswordHash: hash, Role: store.RoleApprover,
+							Enabled: false, Email: cfg.BootstrapApproverEmail, DisplayName: username,
+						})
+						if cerr != nil {
+							return cerr
+						}
+						if _, ierr := authSvc.IssueInviteTokenTx(ctx, tx, u, store.RoleApprover, "", ""); ierr != nil {
+							return ierr
+						}
+						created = u.ID
+						return nil
+					}); cerr != nil {
+						log.Warn("rbac_bootstrap_approver_failed", "username", username, "error", cerr.Error())
+					} else {
+						log.Info("rbac_bootstrap_approver_invited", "username", username, "email", cfg.BootstrapApproverEmail)
+					}
+				}
+			}
+		}
+	}
+	if created != "" {
+		return nil
+	}
+	// 未配置/引导失败：如实写降级告警（审计页可检索）。
+	detail := map[string]any{
+		"reason":            "single_admin_degraded",
+		"enabled_approvers": approvers,
+		"bootstrap_email":   cfg.BootstrapApproverEmail,
+		"hint":              "create a second admin/approver, or use aiops break-glass / aiops admin reset",
+	}
+	ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if aw != nil {
+		if err := aw.Enqueue(ctx2, audit.Event{
+			ActorType: "system", ActorID: "system",
+			Action: "rbac_single_admin_warning", ResourceType: "system", Detail: detail,
+		}); err != nil {
+			log.Warn("rbac_single_admin_warning_audit_failed", "error", err.Error())
+		}
+	}
+	log.Warn("rbac_single_admin_warning",
+		"reason", "only one enabled admin/approver",
+		"enabled_approvers", approvers,
+		"effect", "needs_approval execution, terminal/RDP and policy widening are disabled")
+	return nil
+}
+
+// approverUsernameFromEmail 由邮箱生成合法 username（契约 4.1 字符集）。
+func approverUsernameFromEmail(email string) string {
+	base := strings.ToLower(strings.TrimSpace(email))
+	if i := strings.Index(base, "@"); i > 0 {
+		base = base[:i]
+	}
+	out := make([]rune, 0, len(base))
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			out = append(out, r)
+		default:
+			out = append(out, '-')
+		}
+	}
+	s := strings.Trim(string(out), ".-_")
+	if s == "" || !(s[0] >= 'a' && s[0] <= 'z' || s[0] >= '0' && s[0] <= '9') {
+		s = "approver-" + s
+	}
+	if len(s) > 64 {
+		s = s[:64]
+	}
+	return s
+}
+
+// configureTokenDelivery 按配置注入 invite/reset token 投递通道。
+// 未配置 SMTP 时保持无通道（API 503），绝不签发无法送达的 token。
+func configureTokenDelivery(svc *auth.Service, cfg *config.Config, log *slog.Logger) error {
+	if cfg.SmtpHost == "" {
+		log.Warn("invite/reset token delivery not configured; POST /api/users will return 503 until AIOPS_SMTP_HOST is set")
+		return nil
+	}
+	deliverer, err := auth.NewSMTPDeliverer(auth.SMTPConfig{
+		Host: cfg.SmtpHost, Port: cfg.SmtpPort,
+		Username: cfg.SmtpUsername, Password: cfg.SmtpPassword,
+		From: cfg.SmtpFrom, UseTLS: cfg.SmtpUseTLS, ImplicitTLS: cfg.SmtpImplicitTLS,
+		PublicOrigin: cfg.PublicOrigin,
+	})
+	if err != nil {
+		return fmt.Errorf("configure smtp delivery: %w", err)
+	}
+	svc.SetDeliverer(deliverer)
+	// 启动日志必须写明实际 TLS 模式（走查 high：运维按 README 配 587，
+	// 旧实现却按 implicit TLS 握手，失败时无从判断）。
+	log.Info("invite/reset token delivery configured",
+		"channel", "smtp", "host", cfg.SmtpHost, "port", cfg.SmtpPort,
+		"tls_mode", string(deliverer.TLSMode()))
+	return nil
+}
+
 // pprofEnabled 读取 AIOPS_PPROF；默认关闭，生产行为不变。
 func pprofEnabled() bool {
 	v, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("AIOPS_PPROF")))
@@ -355,9 +550,20 @@ func withPprof(next http.Handler, authSvc *auth.Service) http.Handler {
 	return mux
 }
 
-// requireSession 校验 opsmind_session Cookie 后放行；authSvc 为 nil 时端点
-// 直接视为不存在（404）。
-func requireSession(next http.Handler, authSvc *auth.Service) http.Handler {
+// sessionAuthenticator 是 requireSession 的最小依赖（*auth.Service 实现），
+// 便于单测覆盖 pprof 权限门。
+type sessionAuthenticator interface {
+	Authenticate(ctx context.Context, rawToken string) (store.User, error)
+}
+
+// requireSession 校验 opsmind_session Cookie + pprof 权限后放行：
+//   - 无会话/会话失效 → 401；
+//   - must_change_password=true → 403（契约 12.3 第 2 条）；
+//   - 角色没有 debug:read（auditor/approver/operator）
+//     → 403 —— pprof 暴露堆、goroutine、cmdline、trace，等同管理员排障面。
+//
+// authSvc 为 nil 时端点视为不存在（404）。
+func requireSession(next http.Handler, authSvc sessionAuthenticator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if authSvc == nil {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -368,8 +574,17 @@ func requireSession(next http.Handler, authSvc *auth.Service) http.Handler {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		if _, err := authSvc.Authenticate(r.Context(), cookie.Value); err != nil {
+		user, err := authSvc.Authenticate(r.Context(), cookie.Value)
+		if err != nil {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		if user.MustChangePassword {
+			http.Error(w, "password change required", http.StatusForbidden)
+			return
+		}
+		if !authz.Has(user.Role, authz.PermPprof) {
+			http.Error(w, "permission denied", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

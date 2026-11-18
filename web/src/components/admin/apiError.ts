@@ -85,9 +85,33 @@ export function failureFromError(error: unknown): ApiFailure {
 // 中文口径（仅加 export，映射内容与一期一致，不改行为）。
 export const CODE_MESSAGES: Record<string, string> = {
   AUTH_REQUIRED: '登录已过期，请重新登录',
+  // 契约 12.4 第 7 条：未知用户名/停用/密码错误统一 AUTH_INVALID，禁止
+  // 通过文案区分（账号枚举通道）。角色变更/会话过期走 AUTH_REQUIRED。
   AUTH_INVALID: '用户名或密码错误',
   AUTH_RATE_LIMITED: '登录尝试过于频繁，请稍后再试',
   ORIGIN_FORBIDDEN: '请求来源校验失败',
+  // 00012：已登录但缺少所需权限（CONTRACT.md 9.6 FORBIDDEN）。
+  // 不展示原始错误码/英文 message，统一由 api 层归一化为该文案。
+  FORBIDDEN: '无权访问',
+  // RBAC 走查 sprint 2：创建者出口 IP 兑换自己的 invite/reset token 被拒
+  //（internal/httpapi 返回英文原文 "token cannot be redeemed by its creator"）。
+  // 中文文案必须可操作：说明「谁该在哪里打开」，而不是让用户猜。
+  SELF_REDEEM_FORBIDDEN: '邀请链接不能由创建者本人兑换，请让受邀者在自己的设备或网络打开',
+  PASSWORD_CHANGE_REQUIRED: '首次登录或管理员重置后必须先修改密码',
+  APPROVAL_MODE_WIDENING_FORBIDDEN: '会话门限不能比全局门限更宽',
+  NO_SECOND_APPROVER:
+    '可承担审批职责的启用账号（管理员 + 审批者合计）不足 2 个，无法执行需第二人批准的操作',
+  POLICY_STALE: '策略目标已变化，请重新发起变更',
+  TERMINAL_APPROVAL_REQUIRED: '终端/桌面会话需要他人批准的单次授权',
+  TERMINAL_GRANT_KIND_MISMATCH: '授权类型与终端/桌面不匹配',
+  AUDIT_CHAIN_BROKEN: '审计哈希链校验失败',
+  LAST_ADMIN: '不能停用或降级最后一个管理员',
+  SELF_OPERATION: '不能对自己执行该操作',
+  // 第 9 轮走查 low：错误态必须告诉管理员下一步做什么。未配置 SMTP 时
+  // 创建用户/重置密码恒 503，只显示「通知通道不可用」+ 英文 detail 会让
+  // 管理员无处下手；这里给出需要设置的环境变量与 README 章节。
+  DELIVERY_UNAVAILABLE:
+    '通知通道不可用：请在服务端配置 AIOPS_SMTP_HOST / AIOPS_SMTP_PORT / AIOPS_SMTP_FROM 后重试（详见 README 的「主要环境变量」与「生产部署」章节）',
   VALIDATION_FAILED: '表单校验未通过',
   NOT_FOUND: '资源不存在',
   CONFLICT: '资源冲突或当前状态不允许该操作',
@@ -186,6 +210,18 @@ const GENERIC_STORE_MESSAGES = new Set([
 ]);
 
 export function describeFailure(failure: ApiFailure): string {
+  // 403 已在 api/client.ts 归一化为 { code: 'FORBIDDEN', message: '无权访问' }；
+  // message 与中文映射相同，不能再作为 detail 拼成「无权访问（无权访问）」。
+  if (failure.code === 'FORBIDDEN') {
+    return CODE_MESSAGES.FORBIDDEN ?? '无权访问';
+  }
+  // DELIVERY_UNAVAILABLE 的后端 message 是英文操作说明（no delivery
+  // channel available / invite delivery failed; retry is safe），对管理员
+  // 没有额外信息量；中文映射已包含配置项与下一步，忽略原始 detail 避免
+  // 错误块中英混杂。
+  if (failure.code === 'DELIVERY_UNAVAILABLE') {
+    return CODE_MESSAGES.DELIVERY_UNAVAILABLE ?? '通知通道不可用，请先配置 SMTP 后重试';
+  }
   const message = failure.message.trim();
   let localized = CODE_MESSAGES[failure.code];
   // 二期 2.7：连接测试按 os/auth_method 路由 SSH 或 WinRM，两通道同用
@@ -251,18 +287,26 @@ export function describeChangePasswordFailure(failure: ApiFailure): string {
   return informative ? `旧密码不正确（${message}）` : '旧密码不正确';
 }
 
-// 冲刺 5 打磨：登录页（LoginPage）的用户名输入框 disabled 固定为内置
-// admin，用户唯一可输入的凭据是管理员密码；该场景下 AUTH_INVALID 同样
-// 只可能是密码错误，通用映射「用户名或密码错误」会让用户去找并不存在
-// 的可编辑用户名字段。按场景改写为「管理员密码错误」，其余错误码走
-// describeFailure 原映射。
+// 00012 多用户：登录页的用户名与密码都可输入，后端对「用户不存在 /
+// 已停用 / 密码错误」统一返回 AUTH_INVALID（12.4 第 7 条）——前端文案必须
+// 保持同一个口径，不能因错误码细节或后端 message 区分这两类失败，否则
+// 会成为账号枚举通道。这里固定「用户名或密码错误」，忽略底层 message。
 export function describeLoginFailure(failure: ApiFailure): string {
   if (failure.code !== 'AUTH_INVALID') {
     return describeFailure(failure);
   }
-  const message = failure.message.trim();
-  const informative = message !== '' && !GENERIC_STORE_MESSAGES.has(message.toLowerCase());
-  return informative ? `管理员密码错误（${message}）` : '管理员密码错误';
+  return '用户名或密码错误';
+}
+
+// RBAC 走查 sprint 2：邀请落地页的 SELF_REDEEM_FORBIDDEN 必须只给中文
+// 可操作文案。后端 message 是英文原文（token cannot be redeemed by its
+// creator），describeFailure 的「中文（原文）」格式仍会让页面出现英文；
+// 该码的语义在中文文案里已完整表达，忽略底层 message。
+export function describeInviteFailure(failure: ApiFailure): string {
+  if (failure.code === 'SELF_REDEEM_FORBIDDEN') {
+    return CODE_MESSAGES.SELF_REDEEM_FORBIDDEN ?? '邀请链接不能由创建者本人兑换';
+  }
+  return describeFailure(failure);
 }
 
 function normalizeFieldName(name: string): string {

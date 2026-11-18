@@ -263,7 +263,9 @@ func newInspectionTestEnv(t *testing.T) (*gin.Engine, *Deps) {
 		cipher, nil, func() time.Time { return time.Now().UTC() }, nil)
 	d := &Deps{Store: st, Cipher: cipher, Inspect: mgr, Clock: func() time.Time { return time.Now().UTC() }}
 	r := gin.New()
-	d.RegisterInspectionRoutes(r.Group("/api"))
+	api := r.Group("/api")
+	api.Use(withTestAdminIdentity())
+	d.RegisterInspectionRoutes(api)
 	return r, d
 }
 

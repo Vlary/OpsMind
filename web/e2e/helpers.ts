@@ -5,6 +5,10 @@ import { expect, type Page } from '@playwright/test';
 
 export const ADMIN_PASSWORD = 'e2e-admin-pass-123';
 export const AUTH_STATE_FILE = 'e2e/.auth/user.json';
+// RBAC 走查 sprint 1：globalSetup 额外播种的审批者/运维工程师/审计员会话。
+export const REVIEWER_STATE_FILE = 'e2e/.auth/reviewer.json';
+export const OPERATOR_STATE_FILE = 'e2e/.auth/operator.json';
+export const AUDITOR_STATE_FILE = 'e2e/.auth/auditor.json';
 
 export const SCENARIO_LIST = '__scenario_list__';
 export const SCENARIO_RISKY = '__scenario_risky__';
@@ -73,7 +77,9 @@ export const DEFAULT_FINAL =
 
 export async function loginViaUI(page: Page, password: string) {
   await page.goto('/login');
-  const input = page.getByPlaceholder('请输入管理员密码');
+  // 00012：登录页用户名与密码都可输入（admin 为既有部署的默认管理员）。
+  await page.getByPlaceholder('请输入用户名').fill('admin');
+  const input = page.getByPlaceholder('请输入密码');
   await expect(input).toBeVisible();
   await input.fill(password);
   // antd 对纯双字文本按钮自动插空格（accessible name “登 录”），正则兼容。

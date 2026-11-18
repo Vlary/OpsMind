@@ -1081,3 +1081,49 @@ func TestConnectPortDefaultsTo3389(t *testing.T) {
 	}
 	t.Fatal("connect params not observed")
 }
+
+// TestCloseByUser 00012：停用/降级/吊销售后必须关闭该用户已建立的 RDP
+// 桌面，而不只是删 auth session（评审 high）。
+func TestCloseByUser(t *testing.T) {
+	f := newTestFixture(t, Config{}, func(conn net.Conn, r *bufio.Reader) {
+		_, _ = io.Copy(io.Discard, r)
+	})
+	s, err := f.gateway.Open(context.Background(), f.server, "user-cbu", 1280, 800, 96)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ws := newFakeWSConn()
+	if err := f.gateway.Attach(ws, s.ID, "user-cbu", "req-cbu", testSessionIP); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	f.gateway.CloseByUser(ctx, "user-cbu", reasonError)
+	waitForRow(t, f.rdp, s.ID, reasonError)
+}
+
+// TestAuthorizerRecheckEndsRevokedSession 契约 12.3 第 13 条：30 秒复检
+// enabled/角色权限，失败立即断开。
+func TestAuthorizerRecheckEndsRevokedSession(t *testing.T) {
+	f := newTestFixture(t, Config{}, func(conn net.Conn, r *bufio.Reader) {
+		_, _ = io.Copy(io.Discard, r)
+	})
+	s, err := f.gateway.Open(context.Background(), f.server, "user-revoked", 1280, 800, 96)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ws := newFakeWSConn()
+	if err := f.gateway.Attach(ws, s.ID, "user-revoked", "req-rev", testSessionIP); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	checked := false
+	f.gateway.SetAuthorizer(func(context.Context, string) error {
+		checked = true
+		return errors.New("permission revoked")
+	})
+	f.gateway.governOnce(time.Now(), false, true)
+	if !checked {
+		t.Fatal("authorizer was not invoked")
+	}
+	waitForRow(t, f.rdp, s.ID, reasonError)
+}

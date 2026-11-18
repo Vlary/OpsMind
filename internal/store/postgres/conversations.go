@@ -22,14 +22,14 @@ const replayCatalogQueryMaxRunes = 200
 type conversationStore struct{ q querier }
 
 const conversationColumns = `id::text, title, coalesce(provider_id::text, ''), model,
-	approval_mode, created_at, updated_at, last_message_at`
+	approval_mode, created_at, updated_at, last_message_at, user_id::text`
 
 func scanConversation(row pgx.Row) (store.Conversation, error) {
 	var c store.Conversation
 	var providerID string
 	var approvalMode *string
 	err := row.Scan(&c.ID, &c.Title, &providerID, &c.Model,
-		&approvalMode, &c.CreatedAt, &c.UpdatedAt, &c.LastMessageAt)
+		&approvalMode, &c.CreatedAt, &c.UpdatedAt, &c.LastMessageAt, &c.UserID)
 	if approvalMode != nil {
 		mode := store.ApprovalMode(*approvalMode)
 		c.ApprovalMode = &mode
@@ -44,26 +44,31 @@ func scanConversation(row pgx.Row) (store.Conversation, error) {
 // ListPage 按 last_message_at DESC, id DESC 游标分页返回会话。
 // cursor.ID 为空表示第一页；否则返回排序严格排在 (cursor.LastMessageAt,
 // cursor.ID) 之后的更早会话。多查一条判定 has_more。
-func (s conversationStore) ListPage(ctx context.Context, cursor store.ConversationListCursor, limit int) ([]store.Conversation, bool, error) {
+//
+// userID 非空时 user_id 条件下沉进 SQL（契约 12.3 第 3 条）：若在 Go 侧
+// 过滤，他人的较新会话会占满 limit 窗口——自己的列表为空却 has_more=true，
+// next_cursor 又取不到行，翻页直接卡死（第 2 轮走查 high）。
+func (s conversationStore) ListPage(ctx context.Context, userID string, cursor store.ConversationListCursor, limit int) ([]store.Conversation, bool, error) {
 	limit = fixedPageLimit(limit)
-	var (
-		rows pgx.Rows
-		err  error
-	)
-	if cursor.ID == "" {
-		rows, err = s.q.Query(ctx, `
-			SELECT `+conversationColumns+`
-			FROM conversations
-			ORDER BY last_message_at DESC, id DESC
-			LIMIT $1`, limit+1)
-	} else {
-		rows, err = s.q.Query(ctx, `
-			SELECT `+conversationColumns+`
-			FROM conversations
-			WHERE (last_message_at, id) < ($1, $2::uuid)
-			ORDER BY last_message_at DESC, id DESC
-			LIMIT $3`, utc(cursor.LastMessageAt), cursor.ID, limit+1)
+	args := make([]any, 0, 3)
+	conds := make([]string, 0, 2)
+	if userID != "" {
+		args = append(args, userID)
+		conds = append(conds, fmt.Sprintf("user_id = $%d::uuid", len(args)))
 	}
+	if cursor.ID != "" {
+		args = append(args, utc(cursor.LastMessageAt), cursor.ID)
+		conds = append(conds, fmt.Sprintf("(last_message_at, id) < ($%d, $%d::uuid)", len(args)-1, len(args)))
+	}
+	args = append(args, limit+1)
+
+	query := `SELECT ` + conversationColumns + ` FROM conversations`
+	if len(conds) > 0 {
+		query += ` WHERE ` + strings.Join(conds, " AND ")
+	}
+	query += fmt.Sprintf(` ORDER BY last_message_at DESC, id DESC LIMIT $%d`, len(args))
+
+	rows, err := s.q.Query(ctx, query, args...)
 	if err != nil {
 		return nil, false, mapError(err)
 	}
@@ -96,10 +101,13 @@ func (s conversationStore) Create(ctx context.Context, p store.CreateConversatio
 	if title == "" {
 		title = "新会话"
 	}
+	// 00012：user_id NOT NULL。调用方应显式传当前用户；空串回落到最早用户
+	//（仅兼容历史调用点，正常路径不会走到）。
 	return scanConversation(s.q.QueryRow(ctx, `
-		INSERT INTO conversations (title)
-		VALUES ($1)
-		RETURNING `+conversationColumns, title))
+		INSERT INTO conversations (title, user_id)
+		VALUES ($1, COALESCE(NULLIF($2, '')::uuid,
+			(SELECT id FROM users ORDER BY created_at ASC, id ASC LIMIT 1)))
+		RETURNING `+conversationColumns, title, p.UserID))
 }
 
 func (s conversationStore) UpdateTitle(ctx context.Context, id, title string, at time.Time) (store.Conversation, error) {
@@ -218,10 +226,17 @@ func (s conversationStore) ListReplayCatalog(ctx context.Context, p store.ListRe
 	where := `WHERE ($2 = '' OR c.title ILIKE '%' || $2 || '%' ESCAPE '\')
 		AND (NOT $3::boolean OR coalesce(tc.action_count, 0) > 0)`
 	args := []any{actionTools, pattern, p.HasActions}
+	// 契约 12.3 第 3 条：非 audit:read 的目录必须在 SQL 内强制 user_id=自己。
+	// Go 侧逐行过滤会让他人会话占满窗口（同一会话页 high 的同一根因）。
+	if p.UserID != "" {
+		args = append(args, p.UserID)
+		where += fmt.Sprintf(`
+		AND c.user_id = $%d::uuid`, len(args))
+	}
 	if p.Cursor.ID != "" {
 		args = append(args, utc(p.Cursor.LastMessageAt), p.Cursor.ID, p.Limit+1)
-		where += `
-		AND (c.last_message_at, c.id) < ($4, $5::uuid)`
+		where += fmt.Sprintf(`
+		AND (c.last_message_at, c.id) < ($%d, $%d::uuid)`, len(args)-2, len(args)-1)
 	} else {
 		args = append(args, p.Limit+1)
 	}

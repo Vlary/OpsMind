@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { createApprovedGrant, expect, test, type Page } from './fixtures';
 import { AUTH_STATE_FILE } from './helpers';
 
 // F1 二期 E2E（必做两条）：
@@ -37,7 +37,8 @@ async function createSshServer(page: Page, name: string): Promise<string> {
 
 test('终端页能打开并出现终端与断开按钮（真链路）', async ({ page }) => {
   const name = 'p2s5-term-basic';
-  await createSshServer(page, name);
+  const serverId = await createSshServer(page, name);
+  await createApprovedGrant(page, serverId, 'term');
   await page.goto('/term');
   await expect(page.getByRole('heading', { name: '终端' })).toBeVisible();
 
@@ -76,9 +77,9 @@ test('终端页能打开并出现终端与断开按钮（真链路）', async ({
   const row = rows.filter({ hasText: name }).first();
   await expect(row).toBeVisible();
   await expect(row).toContainText('进行中');
-  // meta 文案（p2 sprint 2）：username 是发起者（契约 v1 恒为 admin），
-  // 与服务器登录用户无关——「Linux SSH · 由 admin 发起」消除「以 admin
-  // 登录服务器」的误读。
+  // meta 文案（p2 sprint 2）：username 是发起者（users.username；RBAC 后
+  // 随实际发起人，本用例登录 admin），与服务器登录用户无关——「Linux SSH
+  // · 由 admin 发起」消除「以 admin 登录服务器」的误读。
   await expect(row).toContainText('Linux SSH · 由 admin 发起');
 
   // 收尾：断开，不遗留活动会话（同服务器单会话约束）。

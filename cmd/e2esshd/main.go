@@ -45,7 +45,29 @@ type windowSize struct {
 	Rows uint32 `json:"rows"`
 }
 
-// recorder 聚合全部会话的尺寸事件（e2e 只建单会话，聚合即该会话）。
+// 假 sshd 是测试夹具，但记录表必须有写入上限（防长跑/异常连接把内存
+// 吃满）：最多跟踪 64 个 SSH 用户名、每用户最多 4096 次 window-change。
+const (
+	maxRecordedUsers   = 64
+	maxRecordedChanges = 4096
+)
+
+// userRecorder 是单个 SSH 用户名下的尺寸/输出记录。
+//
+// e2e 并行执行（workers>1）时会有多条终端会话同时存在；聚合记录会被
+// 其它会话的 window-change 污染（PTY 尺寸用例曾出现 final 在 21/23 行
+// 之间振荡）。按 SSH 用户名分桶后，每个用例用唯一用户名即可拿到自己的
+// 尺寸事件；聚合字段仍保留给只关心 execs 的既有断言。
+type userRecorder struct {
+	initial  *windowSize
+	changes  []windowSize
+	shells   int
+	inputs   int
+	inputLen int
+	execs    []string
+}
+
+// recorder 聚合全部会话的尺寸事件，并按用户名分桶。
 type recorder struct {
 	mu       sync.Mutex
 	initial  *windowSize
@@ -55,7 +77,25 @@ type recorder struct {
 	inputLen int
 	// execs 记录 exec 请求收到的命令（六期打磨 sprint 3：批量/命令执行
 	// E2E 需要一条真实的「命令送达并返回输出」链路，此前只实现 shell）。
-	execs []string
+	execs  []string
+	byUser map[string]*userRecorder
+}
+
+func (r *recorder) userLocked(name string) *userRecorder {
+	if r.byUser == nil {
+		r.byUser = map[string]*userRecorder{}
+	}
+	u := r.byUser[name]
+	if u == nil {
+		if len(r.byUser) >= maxRecordedUsers {
+			// 有界：超过上限整体清空（e2e 用例按用户名分桶、短生命周期，
+			// 清空只影响不再查询的历史桶）。
+			r.byUser = map[string]*userRecorder{}
+		}
+		u = &userRecorder{}
+		r.byUser[name] = u
+	}
+	return u
 }
 
 func (r *recorder) snapshot() map[string]any {
@@ -70,6 +110,46 @@ func (r *recorder) snapshot() map[string]any {
 		"final":         r.finalLocked(),
 		"window_change": len(r.changes),
 		"execs":         append([]string{}, r.execs...),
+	}
+}
+
+// snapshotFor 返回单个 SSH 用户名下的记录（键与全局 snapshot 相同）。
+// 该用户名尚无会话时返回空记录，而不是报错。
+func (r *recorder) snapshotFor(user string) map[string]any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u := r.byUser[user]
+	if u == nil {
+		return map[string]any{
+			"user":          user,
+			"initial":       nil,
+			"changes":       []windowSize{},
+			"shells":        0,
+			"inputs":        0,
+			"input_bytes":   0,
+			"final":         nil,
+			"window_change": 0,
+			"execs":         []string{},
+		}
+	}
+	var final *windowSize
+	if u.initial != nil {
+		cur := *u.initial
+		if n := len(u.changes); n > 0 {
+			cur = u.changes[n-1]
+		}
+		final = &cur
+	}
+	return map[string]any{
+		"user":          user,
+		"initial":       u.initial,
+		"changes":       append([]windowSize{}, u.changes...),
+		"shells":        u.shells,
+		"inputs":        u.inputs,
+		"input_bytes":   u.inputLen,
+		"final":         final,
+		"window_change": len(u.changes),
+		"execs":         append([]string{}, u.execs...),
 	}
 }
 
@@ -94,40 +174,72 @@ func (r *recorder) reset() {
 	r.inputs = 0
 	r.inputLen = 0
 	r.execs = nil
+	r.byUser = nil
 }
 
-func (r *recorder) recordInitial(cols, rows uint32) {
+func (r *recorder) recordInitial(user string, cols, rows uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.initial == nil {
 		r.initial = &windowSize{Cols: cols, Rows: rows}
 	}
+	u := r.userLocked(user)
+	if u.initial == nil {
+		u.initial = &windowSize{Cols: cols, Rows: rows}
+	}
 }
 
-func (r *recorder) recordChange(cols, rows uint32) {
+func (r *recorder) recordChange(user string, cols, rows uint32) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.changes = append(r.changes, windowSize{Cols: cols, Rows: rows})
+	size := windowSize{Cols: cols, Rows: rows}
+	if len(r.changes) < maxRecordedChanges {
+		r.changes = append(r.changes, size)
+	}
+	u := r.userLocked(user)
+	if len(u.changes) < maxRecordedChanges {
+		u.changes = append(u.changes, size)
+	}
 }
 
-func (r *recorder) recordShell() {
+func (r *recorder) recordShell(user string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.shells++
+	r.userLocked(user).shells++
 }
 
-func (r *recorder) recordInput(n int) {
+func (r *recorder) recordInput(user string, n int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inputs++
 	r.inputLen += n
+	u := r.userLocked(user)
+	u.inputs++
+	u.inputLen += n
 }
 
 // recordExec 记录 exec 请求的命令（命令执行链路经此观测）。
-func (r *recorder) recordExec(command string) {
+func (r *recorder) recordExec(user, command string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.execs = append(r.execs, command)
+	u := r.userLocked(user)
+	if len(u.execs) < maxRecordedChanges {
+		u.execs = append(u.execs, command)
+	}
+}
+
+// statusHandler 同时支持全局快照与 ?user=<ssh username> 的单会话快照。
+func statusHandler(rec *recorder) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if user := req.URL.Query().Get("user"); user != "" {
+			_ = json.NewEncoder(w).Encode(rec.snapshotFor(user))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(rec.snapshot())
+	}
 }
 
 func main() {
@@ -164,10 +276,7 @@ func main() {
 	go serveSSH(listener, cfg, rec)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(rec.snapshot())
-	})
+	mux.HandleFunc("GET /status", statusHandler(rec))
 	mux.HandleFunc("POST /reset", func(w http.ResponseWriter, _ *http.Request) {
 		rec.reset()
 		w.WriteHeader(http.StatusNoContent)
@@ -185,11 +294,12 @@ func serveSSH(listener net.Listener, cfg *ssh.ServerConfig, rec *recorder) {
 			return
 		}
 		go func(c net.Conn) {
-			_, chans, reqs, err := ssh.NewServerConn(c, cfg)
+			sconn, chans, reqs, err := ssh.NewServerConn(c, cfg)
 			if err != nil {
 				_ = c.Close()
 				return
 			}
+			user := sconn.User()
 			go ssh.DiscardRequests(reqs)
 			for newChannel := range chans {
 				if newChannel.ChannelType() != "session" {
@@ -200,7 +310,7 @@ func serveSSH(listener net.Listener, cfg *ssh.ServerConfig, rec *recorder) {
 				if err != nil {
 					continue
 				}
-				go handleSession(channel, requests, rec)
+				go handleSession(user, channel, requests, rec)
 			}
 		}(conn)
 	}
@@ -209,14 +319,14 @@ func serveSSH(listener net.Listener, cfg *ssh.ServerConfig, rec *recorder) {
 // handleSession 处理一条会话通道的请求：pty-req 记录初始尺寸，shell 写
 // banner，window-change 记录新尺寸；stdin 持续排空（termx 会转发 input
 // 帧，不排空会因窗口写满阻塞对端）。
-func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, rec *recorder) {
+func handleSession(user string, channel ssh.Channel, requests <-chan *ssh.Request, rec *recorder) {
 	defer channel.Close()
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := channel.Read(buf)
 			if n > 0 {
-				rec.recordInput(n)
+				rec.recordInput(user, n)
 			}
 			if err != nil {
 				return
@@ -227,12 +337,12 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, rec *recor
 		switch req.Type {
 		case "pty-req":
 			_, cols, rows := parsePtyReq(req.Payload)
-			rec.recordInitial(cols, rows)
+			rec.recordInitial(user, cols, rows)
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
 		case "shell":
-			rec.recordShell()
+			rec.recordShell(user)
 			_, _ = channel.Write([]byte(shellBanner))
 			if req.WantReply {
 				_ = req.Reply(true, nil)
@@ -246,13 +356,13 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, rec *recor
 			// 未预期的可采集服务器污染。记录命令即可支撑「改写后的命令确实
 			// 送达通道」的断言；执行结果仍按通道失败处理。
 			command := parseExecPayload(req.Payload)
-			rec.recordExec(command)
+			rec.recordExec(user, command)
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
 		case "window-change":
 			cols, rows := parseWindowChange(req.Payload)
-			rec.recordChange(cols, rows)
+			rec.recordChange(user, cols, rows)
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}

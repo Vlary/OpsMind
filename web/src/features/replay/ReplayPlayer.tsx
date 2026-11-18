@@ -46,6 +46,7 @@ import LazyMarkdownView from '../../components/LazyMarkdownView';
 import ReasoningBlock from '../../components/ReasoningBlock';
 import RiskBadge from '../../components/RiskBadge';
 import { ApprovalModeTag } from '../../components/ApprovalModeSelect';
+import { usePermissions } from '../auth/useMe';
 import { stripContextPrefix } from '../chat/markdownBlocks';
 import { EXEMPT_EXECUTION_LABEL } from '../chat/toolCallBadges';
 import { describeError, toApiErrorInfo } from '../chat/useChatStream';
@@ -94,6 +95,7 @@ import {
   type ReplaySpeed,
   type ReplayStep,
 } from './replayPlayer';
+import { replayStepLinks, type ReplayStepLinks } from './replayLinks';
 import './replay.css';
 
 export interface ReplayPlayerProps {
@@ -135,6 +137,7 @@ function StepCard({
   active,
   hasApproval,
   query,
+  links,
 }: {
   step: ReplayStep;
   active: boolean;
@@ -142,6 +145,8 @@ function StepCard({
   hasApproval: boolean;
   /** 当前搜索词（用于命中片段高亮；空串不渲染）。 */
   query: string;
+  /** execution 深链按目标页权限收敛（审计员无告警/巡检/批量权限）。 */
+  links: ReplayStepLinks;
 }) {
   const cls = REPLAY_KIND_CLASS[step.kind];
   // 免审批档直执行（六期打磨 sprint 2）：与聊天工具卡同一判定。
@@ -406,28 +411,46 @@ function StepCard({
               {describeError(step.error_code)}
             </Typography.Text>
           ) : null}
-          {/* 八期深链（与对话工具卡同目标）。 */}
+          {/* 八期深链（与对话工具卡同目标）。RBAC 第 12 轮走查 low：
+              审计员只有 audit:read，目标页 /alerts、/inspections、/batch
+              都会在 PermissionGate 403。无目标权限时不渲染链接，但保留
+              ID 文本与复制按钮——诊断/报告/批量句柄本身就是可交接的证据。 */}
           {step.diagnosis_id || step.inspection_report_id || step.batch_job_id ? (
             <Space size={12} wrap>
               {step.diagnosis_id ? (
                 <Space size={4}>
-                  <Link to={`/alerts?diagnosis=${encodeURIComponent(step.diagnosis_id)}`}>
-                    查看诊断会话
-                  </Link>
+                  {links.diagnosis ? (
+                    <Link to={`/alerts?diagnosis=${encodeURIComponent(step.diagnosis_id)}`}>
+                      查看诊断会话
+                    </Link>
+                  ) : (
+                    <Typography.Text type="secondary">诊断会话</Typography.Text>
+                  )}
+                  <Typography.Text code>{step.diagnosis_id}</Typography.Text>
                   <CopyButton text={step.diagnosis_id} label="复制诊断 ID" />
                 </Space>
               ) : null}
               {step.inspection_report_id ? (
                 <Space size={4}>
-                  <Link to="/inspections">查看巡检报告</Link>
+                  {links.inspection ? (
+                    <Link to="/inspections">查看巡检报告</Link>
+                  ) : (
+                    <Typography.Text type="secondary">巡检报告</Typography.Text>
+                  )}
+                  <Typography.Text code>{step.inspection_report_id}</Typography.Text>
                   <CopyButton text={step.inspection_report_id} label="复制巡检报告 ID" />
                 </Space>
               ) : null}
               {step.batch_job_id ? (
                 <Space size={4}>
-                  <Link to={`/batch?job=${encodeURIComponent(step.batch_job_id)}`}>
-                    查看批量任务
-                  </Link>
+                  {links.batch ? (
+                    <Link to={`/batch?job=${encodeURIComponent(step.batch_job_id)}`}>
+                      查看批量任务
+                    </Link>
+                  ) : (
+                    <Typography.Text type="secondary">批量任务</Typography.Text>
+                  )}
+                  <Typography.Text code>{step.batch_job_id}</Typography.Text>
                   <CopyButton text={step.batch_job_id} label="复制批量任务 ID" />
                 </Space>
               ) : null}
@@ -447,6 +470,10 @@ function StepCard({
  * 与六期一致（避免读到流式半途数据）。
  */
 export default function ReplayPlayer({ conversationId }: ReplayPlayerProps) {
+  // execution 深链按目标页权限收敛（见 replayLinks.ts）：审计员能进
+  // /replays 但没有告警/巡检/批量权限，不得渲染必然 403 的入口。
+  const permissions = usePermissions();
+  const links = useMemo(() => replayStepLinks(permissions), [permissions]);
   const [index, setIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<ReplaySpeed>(1);
@@ -875,6 +902,7 @@ export default function ReplayPlayer({ conversationId }: ReplayPlayerProps) {
                       typeof step.tool_call_id === 'string' && approvedIds.has(step.tool_call_id)
                     }
                     query={query}
+                    links={links}
                   />
                 </div>
               );

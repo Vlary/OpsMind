@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { createApprovedGrant, expect, test, type Page } from './fixtures';
 import {
   AUTH_STATE_FILE,
   RISKY_COMMAND,
@@ -323,34 +323,32 @@ test.describe('六期：执行回放播放器', () => {
   });
 });
 
-test.describe('六期：门限四档切换（真实链路 /settings）', () => {
-  test('四档循环切换并持久化，none 档显示警示，收尾恢复 standard', async ({ page }) => {
+// RBAC 第 1 轮走查后：e2e 部署固定播种第二个管理员（second-admin），
+// 因此这里不再是「单管理员 409」形态（单管理员 fail-closed 由后端
+// TestSingleAdminDegradedMode / TestSettingsEndpoints 覆盖）。真实链路
+// 要守住的护栏是：放宽（standard→high/none）不得由单人直接生效——服务端
+// 返回 202 待审批 policy，settings 在第二人批准前保持 standard。
+test.describe('六期：全局门限放宽护栏（真实链路 /settings）', () => {
+  test('放宽不直接生效：创建待审批 policy，设置保持 standard', async ({ page }) => {
     await page.goto('/settings');
     const card = page.locator('.ant-card', { hasText: '审批门限' });
     await expect(card).toBeVisible();
-
     const select = card.locator('.ant-select').first();
-    const switchTo = async (label: string) => {
+
+    const tryWiden = async (label: string) => {
       await select.click();
       await page.getByRole('option', { name: label, exact: true }).click();
-      // 列表项标注「当前 · <档位>」表示保存成功并回显。
-      await expect(card.getByText(`当前 · ${label}`)).toBeVisible({ timeout: 10_000 });
+      // 放宽需要第二人批准：页面 toast 说明已提交给第二位审批者，门限保持
+      // 当前值（"当前 · 危险命令审批" 徽标不变）。
+      await expect(
+        page.getByText('放宽审批门限已提交给第二位审批者，批准后生效。'),
+      ).toBeVisible({ timeout: 10_000 });
+      await expect(card.getByText('当前 · 危险命令审批')).toBeVisible();
     };
 
-    await switchTo('全部审批');
-    await switchTo('仅高危审批');
-    // none 档：不可跳过警示。
-    await switchTo('免审批');
-    await expect(
-      card.getByText('所有命令将自动执行（含高危），仅剩审计留痕', { exact: false }),
-    ).toBeVisible();
-    // 恢复默认档（避免影响其他并行审批用例）。
-    await switchTo('危险命令审批');
-    await expect(
-      card.getByText('所有命令将自动执行（含高危），仅剩审计留痕', { exact: false }),
-    ).toHaveCount(0);
+    await tryWiden('仅高危审批');
 
-    // API 侧确认持久化为 standard。
+    // API 侧确认未被放宽（仍是 standard）。
     const response = await page.request.get('/api/settings');
     expect(response.ok()).toBeTruthy();
     const settings = (await response.json()) as { approval_mode?: string };
@@ -358,12 +356,12 @@ test.describe('六期：门限四档切换（真实链路 /settings）', () => {
   });
 });
 
-test.describe('六期：审批编辑命令批准后执行改写命令', () => {
+test.describe('六期：审批时禁止改写命令（00012 定稿）', () => {
   // 审批卡命令复制走统一 CopyButton（六期打磨 sprint 1：删除组件内手写
   // CommandCopyButton），剪贴板断言需要授权。
   test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
-  test('改写为 safe 命令批准：审批与执行均按改写后命令落库', async ({ page }) => {
+  test('无改写入口：批准与执行均使用原命令，edited_command 恒为空', async ({ page }) => {
     await page.goto('/chat');
     await sendMessage(page, SCENARIO_RISKY);
     await expect(page).toHaveURL(/\/c\//, { timeout: 20_000 });
@@ -377,36 +375,24 @@ test.describe('六期：审批编辑命令批准后执行改写命令', () => {
     await expect(page.getByText('已复制').first()).toBeVisible();
     expect(await readClipboard(page)).toBe(RISKY_COMMAND);
 
-    // 编辑命令（契约 8.7 审批卡编辑）：改写为 safe 命令 uptime。
-    await approvalCard.getByRole('button', { name: '编辑命令' }).click();
-    const editor = page.getByLabel('改写命令');
-    await expect(editor).toBeVisible();
-    await editor.fill('uptime');
-    // 实时风险预览给出改写后级别（safe）。
-    await expect(approvalCard.getByText('改写后风险：')).toBeVisible({ timeout: 10_000 });
-    await approvalCard.getByRole('button', { name: '保存并批准' }).click();
+    // 00012：审批时禁止改写——卡片只提供批准/拒绝，没有编辑命令入口。
+    await expect(approvalCard.getByRole('button', { name: '编辑命令' })).toHaveCount(0);
+    await expect(approvalCard.getByRole('button', { name: '保存并批准' })).toHaveCount(0);
+    await expect(approvalCard.getByLabel('改写命令')).toHaveCount(0);
+    await approvalCard.getByRole('button', { name: '批准' }).click();
 
-    // 审批按改写后命令批准：状态 + 「用户改写」标注。
+    // 按原命令批准，不得出现「用户改写」/改写副本入口。
     await expect(approvalCard.getByText('审批已批准', { exact: true })).toBeVisible({
       timeout: 20_000,
     });
-    await expect(approvalCard.getByText('用户改写').first()).toBeVisible();
-    await expect(approvalCard.getByText('uptime').first()).toBeVisible();
+    await expect(approvalCard.getByText('用户改写')).toHaveCount(0);
+    await expect(approvalCard.getByLabel('复制改写后命令')).toHaveCount(0);
 
-    // 已决策的历史改写双行：「复制原命令」与「复制改写后命令」（统一
-    // CopyButton，两级降级含可选中面板）分别取原文与改写文。
-    await approvalCard.getByLabel('复制原命令').click();
-    await expect(page.getByText('已复制').first()).toBeVisible();
-    expect(await readClipboard(page)).toBe(RISKY_COMMAND);
-    await approvalCard.getByLabel('复制改写后命令').click();
-    await expect(page.getByText('已复制').first()).toBeVisible();
-    expect(await readClipboard(page)).toBe('uptime');
-
-    // 执行的是改写后命令（假服务器 SSH 不可达 → 执行失败，但不是被拒绝）。
+    // 执行的是原命令（假服务器 SSH 不可达 → 执行失败，但不是被拒绝）。
     const sshCard = page.locator('.chat-toolcall-card', { hasText: 'ssh_exec' }).first();
     await expect(sshCard.getByText('SSH_EXEC_FAILED').first()).toBeVisible({ timeout: 30_000 });
 
-    // API 侧：审批落库 edited_command=uptime 且已批准。
+    // API 侧：edited_command 恒为空、command 保持创建时的历史事实。
     const cid = conversationIdOf(page);
     const approvalsResponse = await page.request.get('/api/approvals', {
       params: { conversation_id: cid, limit: 10 },
@@ -415,15 +401,13 @@ test.describe('六期：审批编辑命令批准后执行改写命令', () => {
     const approvals = (await approvalsResponse.json()) as {
       items: Array<{ command: string; edited_command: string; status: string }>;
     };
-    const rewritten = approvals.items.find((item) => item.edited_command === 'uptime');
-    expect(rewritten).toBeDefined();
-    expect(rewritten?.status).toBe('approved');
-    // 原 command 不动（审批创建时的历史事实）。
-    expect(rewritten?.command).toBe(RISKY_COMMAND);
+    const approved = approvals.items.find((item) => item.status === 'approved');
+    expect(approved).toBeDefined();
+    expect(approved?.command).toBe(RISKY_COMMAND);
+    expect(approved?.edited_command).toBe('');
 
-    // 审计：approval.approved 的 detail 带原文/改写双命令（契约 2.11 约定 3）。
-    // 审计 writer 异步批量落库——轮询至 8s 兜底 flush 延迟；按 detail 的
-    // original_command 定位本条（conversation_id 恒随 chat 审批落库，双保险）。
+    // 审计：approval.approved 的 detail 不再携带 original_command/edited_command。
+    // 审计 writer 异步批量落库——轮询至 8s 兜底 flush 延迟。
     let ours: { detail: Record<string, unknown>; conversation_id: string | null } | undefined;
     for (let attempt = 0; attempt < 16 && ours === undefined; attempt += 1) {
       const auditResponse = await page.request.get('/api/audit', {
@@ -433,16 +417,14 @@ test.describe('六期：审批编辑命令批准后执行改写命令', () => {
       const audit = (await auditResponse.json()) as {
         items: Array<{ detail: Record<string, unknown>; conversation_id: string | null }>;
       };
-      ours = audit.items.find(
-        (item) => item.conversation_id === cid || item.detail['original_command'] === RISKY_COMMAND,
-      );
+      ours = audit.items.find((item) => item.conversation_id === cid);
       if (ours === undefined) {
         await page.waitForTimeout(500);
       }
     }
     expect(ours).toBeDefined();
-    expect(ours?.detail['original_command']).toBe(RISKY_COMMAND);
-    expect(ours?.detail['edited_command']).toBe('uptime');
+    expect(ours?.detail['original_command']).toBeUndefined();
+    expect(ours?.detail['edited_command']).toBeUndefined();
   });
 });
 
@@ -607,6 +589,8 @@ test.describe('六期打磨：复制清单补位', () => {
       },
     });
     expect(created.status()).toBe(201);
+    const createdServer = (await created.json()) as { id: string };
+    await createApprovedGrant(page, createdServer.id, 'term');
 
     await page.goto('/term');
     await page.getByRole('combobox', { name: '选择服务器' }).click();

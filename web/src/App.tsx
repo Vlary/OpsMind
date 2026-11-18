@@ -24,8 +24,12 @@ import Spinner from './components/Spinner';
 const AntdAppRoot = lazy(() => import('./components/AntdAppRoot'));
 const AppShell = lazy(() => import('./components/AppShell'));
 const LoginPage = lazy(() => import('./features/auth/LoginPage'));
+// 00012：邀请/重置 token 公开落地页（此前邀请链接没有可用界面）。
+const InviteAcceptPage = lazy(() => import('./features/auth/InviteAcceptPage'));
 const NotFoundPage = lazy(() => import('./features/NotFoundPage'));
 const ChatPage = lazy(() => import('./features/chat/ChatPage'));
+// 00012：审批者审批队列（此前审批者没有任何审批入口，评审 high）。
+const ApprovalsPage = lazy(() => import('./features/approvals/ApprovalsPage'));
 const ServersPage = lazy(() => import('./features/servers/ServersPage'));
 const DatabasesPage = lazy(() => import('./features/databases/DatabasesPage'));
 const ProvidersPage = lazy(() => import('./features/providers/ProvidersPage'));
@@ -46,6 +50,11 @@ const SettingsPage = lazy(() => import('./features/settings/SettingsPage'));
 // 八期 FE-R（CONTRACT.md 8.1 路由表）：/replays 与 /replays/:conversationId
 // 同一页面（左目录 + 右播放器）。
 const ReplaysPage = lazy(() => import('./features/replay/ReplaysPage'));
+// 00012：用户管理页（仅管理员可见/可直达）。
+const UsersPage = lazy(() => import('./features/users/UsersPage'));
+// 00012：路由权限门（AppShell 内层 layout）。懒加载避免把 antd 结果页
+// 与 RBAC 判断链带进登录首屏 chunk。
+const PermissionGate = lazy(() => import('./features/auth/PermissionGate'));
 
 // AntdAppRoot 是必然挂载的根壳：模块求值即预取，router 首帧渲染 lazy 时
 // 命中已在途的同一 import()（Vite 模块缓存），把「多一跳串行」压缩成
@@ -75,37 +84,52 @@ const router = createBrowserRouter([
         element: lazyPage(<LoginPage />),
       },
       {
+        // 公开页：token 一次性 + Origin 校验，不需要登录。
+        path: '/invite',
+        element: lazyPage(<InviteAcceptPage />),
+      },
+      {
         element: <RequireAuth />,
         children: [
           {
             element: lazyPage(<AppShell />),
             children: [
               { index: true, element: <Navigate to="/chat" replace /> },
-              { path: '/chat', element: lazyPage(<ChatPage />) },
-              { path: '/c/:conversationId', element: lazyPage(<ChatPage />) },
-              { path: '/servers', element: lazyPage(<ServersPage />) },
-              { path: '/databases', element: lazyPage(<DatabasesPage />) },
-              { path: '/providers', element: lazyPage(<ProvidersPage />) },
-              { path: '/audit', element: lazyPage(<AuditPage />) },
-              // F1 二期：/term 终端、/recordings 回放、/rdp 桌面（受保护）。
-              { path: '/term', element: lazyPage(<TermPage />) },
-              { path: '/recordings', element: lazyPage(<RecordingsPage />) },
-              { path: '/rdp', element: lazyPage(<RdpPage />) },
-              // C2 四期：/containers 容器管理（受保护）。
-              { path: '/containers', element: lazyPage(<ContainersPage />) },
-              // M4 五期：/monitor /alerts /inspections /batch（受保护）。
-              { path: '/monitor', element: lazyPage(<MonitorPage />) },
-              { path: '/alerts', element: lazyPage(<AlertsPage />) },
-              { path: '/inspections', element: lazyPage(<InspectionsPage />) },
-              { path: '/batch', element: lazyPage(<BatchPage />) },
-              // 六期 FE-P1：/settings 全局审批门限（受保护）。
-              { path: '/settings', element: lazyPage(<SettingsPage />) },
-              // 八期 FE-R：/replays 与 /replays/:conversationId 同一页面
-              // （独立回放页：左目录 + 右时间轴，契约 2.12 约定 1）。
-              { path: '/replays', element: lazyPage(<ReplaysPage />) },
               {
-                path: '/replays/:conversationId',
-                element: lazyPage(<ReplaysPage />),
+                // 00012：所有业务页统一过权限门。无权限直达时渲染 403 页
+                // （features/ForbiddenPage.tsx），不是空白/静默重定向。
+                element: lazyPage(<PermissionGate />),
+                children: [
+                  { path: '/chat', element: lazyPage(<ChatPage />) },
+                  { path: '/approvals', element: lazyPage(<ApprovalsPage />) },
+                  { path: '/c/:conversationId', element: lazyPage(<ChatPage />) },
+                  { path: '/servers', element: lazyPage(<ServersPage />) },
+                  { path: '/databases', element: lazyPage(<DatabasesPage />) },
+                  { path: '/providers', element: lazyPage(<ProvidersPage />) },
+                  { path: '/audit', element: lazyPage(<AuditPage />) },
+                  // F1 二期：/term 终端、/recordings 回放、/rdp 桌面（受保护）。
+                  { path: '/term', element: lazyPage(<TermPage />) },
+                  { path: '/recordings', element: lazyPage(<RecordingsPage />) },
+                  { path: '/rdp', element: lazyPage(<RdpPage />) },
+                  // C2 四期：/containers 容器管理（受保护）。
+                  { path: '/containers', element: lazyPage(<ContainersPage />) },
+                  // M4 五期：/monitor /alerts /inspections /batch（受保护）。
+                  { path: '/monitor', element: lazyPage(<MonitorPage />) },
+                  { path: '/alerts', element: lazyPage(<AlertsPage />) },
+                  { path: '/inspections', element: lazyPage(<InspectionsPage />) },
+                  { path: '/batch', element: lazyPage(<BatchPage />) },
+                  // 六期 FE-P1：/settings 全局审批门限（受保护）。
+                  { path: '/settings', element: lazyPage(<SettingsPage />) },
+                  // 八期 FE-R：/replays 与 /replays/:conversationId 同一页面
+                  // （独立回放页：左目录 + 右时间轴，契约 2.12 约定 1）。
+                  { path: '/replays', element: lazyPage(<ReplaysPage />) },
+                  {
+                    path: '/replays/:conversationId',
+                    element: lazyPage(<ReplaysPage />),
+                  },
+                  // 00012：用户管理（仅管理员；导航与直达均受权限收敛）。
+                  { path: '/users', element: lazyPage(<UsersPage />) },
+                ],
               },
             ],
           },

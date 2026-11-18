@@ -7,7 +7,7 @@ import {
   SunOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   Avatar,
   Button,
@@ -17,8 +17,10 @@ import {
   Grid,
   Layout,
   Menu,
+  Result,
   Segmented,
   Space,
+  Tag,
   Typography,
 } from 'antd';
 import { useCallback, useState } from 'react';
@@ -30,9 +32,11 @@ import BrandMark from './BrandMark';
 import { NAV_ITEMS } from './navItems';
 
 import { api } from '../api/client';
-import { qk } from '../api/queryKeys';
 import { message } from './antdMessage';
 import ChangePasswordModal from '../features/auth/ChangePasswordModal';
+import { useMe } from '../features/auth/useMe';
+import { filterNavItems } from '../lib/rbac';
+import { roleLabel, roleTagColor } from '../lib/rbacPermissions';
 import { useUIStore } from '../stores/uiStore';
 
 function selectedKey(pathname: string): string {
@@ -133,17 +137,16 @@ export default function AppShell() {
   const [loggingOut, setLoggingOut] = useState(false);
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
 
-  const meQuery = useQuery({
-    queryKey: qk.me(),
-    queryFn: async () => {
-      const { data, error } = await api.GET('/api/auth/me');
-      if (error) {
-        throw error;
-      }
-      return data.user;
-    },
-    retry: false,
-  });
+  // qk.me() 缓存完整 MeResponse（user + permissions，00012 RBAC）。
+  const meQuery = useMe();
+  // 00012：must_change_password 会话在服务端被限制为只能访问
+  // me/logout/change-password；前端也必须消费该状态，否则用户会
+  // 看到满屏 403 却不知道原因（评审 medium）。
+  const mustChangePassword = meQuery.data?.user.must_change_password === true;
+  const permissions = meQuery.data?.permissions ?? [];
+  const role = meQuery.data?.user.role;
+  // 角色感知导航：未授权的入口不渲染（服务端仍是唯一授权点）。
+  const visibleNav = filterNavItems(NAV_ITEMS, permissions);
 
   const handleLogout = useCallback(async () => {
     setLoggingOut(true);
@@ -174,7 +177,7 @@ export default function AppShell() {
       selectedKeys={[selectedKey(location.pathname)]}
       // 契约 8.3.10：导航项单一来源 NAV_ITEMS（components/navItems.ts）；
       // 这里只做形状映射（antd Menu 的 ItemType 要求）。
-      items={NAV_ITEMS.map(({ key, icon, label }) => ({ key, icon, label }))}
+      items={visibleNav.map(({ key, icon, label }) => ({ key, icon, label }))}
       onClick={({ key }) => {
         setMobileNavOpen(false);
         navigate(key);
@@ -255,6 +258,10 @@ export default function AppShell() {
               placement="bottomRight"
               menu={{
                 items: [
+                  // 角色徽标的窄屏兜底：< md 时顶栏不放 Tag（会挤爆单行），
+                  // 角色仍在用户菜单首项可见。
+                  { key: 'role', disabled: true, label: `角色：${roleLabel(role)}` },
+                  { type: 'divider' },
                   { key: 'password', icon: <KeyOutlined />, label: '修改密码' },
                   { type: 'divider' },
                   { key: 'logout', icon: <LogoutOutlined />, label: '退出登录' },
@@ -272,14 +279,24 @@ export default function AppShell() {
               <Button type="text" loading={loggingOut}>
                 <Space size={8}>
                   <Avatar size="small" icon={<UserOutlined />} />
-                  <span>{meQuery.data?.username ?? 'admin'}</span>
+                  <span>{meQuery.data?.user.username ?? ''}</span>
+                  {!isMobile ? (
+                    <Tag color={roleTagColor(role)} style={{ marginInlineEnd: 0 }} title="当前角色">
+                      {roleLabel(role)}
+                    </Tag>
+                  ) : null}
                 </Space>
               </Button>
             </Dropdown>
 
             <ChangePasswordModal
-              open={passwordModalOpen}
-              onClose={() => setPasswordModalOpen(false)}
+              open={passwordModalOpen || mustChangePassword}
+              onClose={() => {
+                // must_change 未完成时不允许关闭（服务端其余端点均 403）。
+                if (!mustChangePassword) {
+                  setPasswordModalOpen(false);
+                }
+              }}
               onSuccess={handlePasswordChanged}
             />
           </Layout.Header>
@@ -293,7 +310,24 @@ export default function AppShell() {
                   : 'app-content'
             }
           >
-            <Outlet />
+            {mustChangePassword ? (
+              // must_change_password 会话在服务端只放行 me/logout/change-password，
+              // 页面组件继续挂载只会对每个查询返回 403 并渲染「加载失败」横幅
+              //（评审 low：改密弹窗背后是多条英文 PASSWORD_CHANGE_REQUIRED 与
+              //「模型供应商加载失败」，看起来像系统故障）。这里直接不挂载页面。
+              <Result
+                status="warning"
+                title="请先修改密码"
+                subTitle="首次登录或管理员重置密码后，必须先设置新密码才能使用其他功能。"
+                extra={
+                  <Button type="primary" onClick={() => setPasswordModalOpen(true)}>
+                    修改密码
+                  </Button>
+                }
+              />
+            ) : (
+              <Outlet />
+            )}
           </Layout.Content>
         </Layout>
 

@@ -51,5 +51,72 @@ const proxyErrorGuard: Middleware = {
   onResponse: ({ response }) => toContractErrorResponse(response),
 };
 
+/** 403 的统一中文提示（CONTRACT.md 12.4 第 1 条 / 9.6 FORBIDDEN）。 */
+export const FORBIDDEN_MESSAGE = '无权访问';
+
+// 已登录但缺少权限：把后端 403 FORBIDDEN（或代理层规范化出的
+// NETWORK_ERROR）统一成 { code: 'FORBIDDEN', message: '无权访问' }。
+//
+// 只归一无信息量的通用 403；保持职责分离/来源校验等专用 403 错误码原样
+// （APPROVAL_SELF_DECISION、ORIGIN_FORBIDDEN、COMMAND_FORBIDDEN、
+// PASSWORD_CHANGE_REQUIRED、SELF_REDEEM_FORBIDDEN 等有各自的中文口径），
+// 避免把「不能审批自己」误写成「无权访问」。
+const SPECIFIC_FORBIDDEN_CODES = new Set([
+  'ORIGIN_FORBIDDEN',
+  'APPROVAL_SELF_DECISION',
+  'APPROVAL_MODE_WIDENING_FORBIDDEN',
+  'COMMAND_FORBIDDEN',
+  'PASSWORD_CHANGE_REQUIRED',
+  'SELF_REDEEM_FORBIDDEN',
+  'TERMINAL_GRANT_KIND_MISMATCH',
+  'TOOL_FORBIDDEN',
+]);
+
+export async function toForbiddenResponse(response: Response): Promise<Response> {
+  if (response.status !== 403) {
+    return response;
+  }
+
+  let body: unknown = null;
+  try {
+    const text = await response.clone().text();
+    body = text === '' ? null : (JSON.parse(text) as unknown);
+  } catch {
+    body = null;
+  }
+
+  const error = isRecord(body) && isRecord(body['error']) ? body['error'] : null;
+  const rawCode = error?.['code'];
+  const code = typeof rawCode === 'string' ? rawCode : '';
+  if (code !== '' && SPECIFIC_FORBIDDEN_CODES.has(code)) {
+    return response;
+  }
+
+  const rawRequestId = error?.['request_id'];
+  const requestId =
+    (typeof rawRequestId === 'string' && rawRequestId !== ''
+      ? rawRequestId
+      : response.headers.get('X-Request-ID')) ?? '';
+  const headers = new Headers(response.headers);
+  headers.set('Content-Type', 'application/json');
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: 'FORBIDDEN',
+        message: FORBIDDEN_MESSAGE,
+        request_id: requestId,
+        details: null,
+      },
+    }),
+    { status: 403, statusText: response.statusText, headers },
+  );
+}
+
+const forbiddenGuard: Middleware = {
+  onResponse: ({ response }) => toForbiddenResponse(response),
+};
+
 export const api = createClient<paths>({ baseUrl: '/', credentials: 'same-origin' });
 api.use(proxyErrorGuard);
+// 顺序：先把非契约错误体规范化为 NETWORK_ERROR，再统一 403。
+api.use(forbiddenGuard);

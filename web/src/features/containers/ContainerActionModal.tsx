@@ -26,6 +26,7 @@ import { describeRiskRule } from '../../components/riskRules';
 import { formatRemaining } from '../../components/ApprovalCard';
 import { APPROVAL_STATUS_LABELS } from '../../components/approvalStatus';
 import { useGlobalApprovalMode } from '../settings/useApprovalSettings';
+import { useApprovalDecision } from '../auth/useApprovalDecision';
 import { containerActionNeedsApproval } from './containerActionPolicy';
 import {
   commandSectionLabel,
@@ -82,7 +83,7 @@ export default function ContainerActionModal({
   const [phase, setPhase] = useState<Phase>({ stage: 'confirm' });
   const [actionError, setActionError] = useState<ApiFailure | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  // 六期打磨 sprint 3：编辑命令态（此前该入口只能批准/拒绝，六期改写能力
+  // 六期打磨 sprint 3：命令查看态（00012 禁止审批时改写，此前该入口只能批准/拒绝
   // 只在对话审批卡可用）。
   const [editing, setEditing] = useState(false);
   // 六期打磨 sprint 6（走查 medium）：confirm 态文案必须与实际分流一致。
@@ -90,6 +91,16 @@ export default function ContainerActionModal({
   // 后端解析（本页无会话覆盖，容器 action 用全局门限，契约 2.11 约定 2
   // 第 ④ 条）。门限查询失败/未加载时不承诺任一分支（中性文案）。
   const globalModeQuery = useGlobalApprovalMode();
+  // RBAC 00012 / 第 7 轮走查 medium：容器 action 创建的 console 审批同样受
+  // 职责分离约束（requested_by=当前用户时服务端 403），无 approval:decide
+  // 的角色也不得看到批准/拒绝。提前在 hook 顶层计算（下方 target 为空时
+  // 会提前 return，不能把 hook 放到 return 之后）。
+  const approvalForAccess = phase.stage === 'pending' ? phase.approval : null;
+  const approvalDecision = useApprovalDecision({
+    status: approvalForAccess?.status ?? 'expired',
+    requestedBy: approvalForAccess?.requested_by ?? '',
+  });
+  const canApprove = approvalDecision === 'actions';
 
   // 目标变化（打开新操作）经调用方 key 重挂载重置回 confirm 态，不在此
   // 用 effect setState（react-hooks/set-state-in-effect）。
@@ -136,18 +147,11 @@ export default function ContainerActionModal({
   });
 
   const decideMutation = useMutation({
-    mutationFn: async (input: {
-      approvalId: string;
-      decision: 'approve' | 'deny';
-      /** 六期打磨 sprint 3：编辑态提交的改写后命令（仅 approve 合法）。 */
-      editedCommand?: string;
-    }) => {
+    mutationFn: async (input: { approvalId: string; decision: 'approve' | 'deny' }) => {
       const { data, error, response } = await api.POST('/api/approvals/{id}/decide', {
         params: { path: { id: input.approvalId }, header: writeHeaders() },
-        body: {
-          decision: input.decision,
-          ...(input.editedCommand !== undefined ? { edited_command: input.editedCommand } : {}),
-        },
+        // 00012：decide 只允许 decision/note；审批时不得改写命令。
+        body: { decision: input.decision },
       });
       if (error) {
         throw new ApiRequestError(toApiFailure(error, response));
@@ -316,14 +320,9 @@ export default function ContainerActionModal({
             serverId={pendingApproval.server_id}
             pending={decideMutation.isPending}
             disabled={timedOut}
-            onSubmit={(body) => {
-              decideMutation.mutate({
-                approvalId: pendingApproval.id,
-                decision: 'approve',
-                ...(body.edited_command !== undefined
-                  ? { editedCommand: body.edited_command }
-                  : {}),
-              });
+            canApprove={canApprove}
+            onSubmit={() => {
+              decideMutation.mutate({ approvalId: pendingApproval.id, decision: 'approve' });
             }}
           />
         ) : null}
@@ -334,30 +333,44 @@ export default function ContainerActionModal({
                 无 pending console 审批的再决策入口（无审批列表页），只能静默
                 过期；改回中性「关闭」，并用旁注明示后果。 */}
             <Button onClick={onClose}>关闭</Button>
-            <Button
-              danger
-              loading={decideMutation.isPending && decideMutation.variables?.decision === 'deny'}
-              disabled={decideMutation.isPending || timedOut}
-              onClick={() => {
-                if (pendingApproval) {
-                  decideMutation.mutate({ approvalId: pendingApproval.id, decision: 'deny' });
-                }
-              }}
-            >
-              拒绝
-            </Button>
-            <Button
-              type="primary"
-              loading={decideMutation.isPending && decideMutation.variables?.decision === 'approve'}
-              disabled={decideMutation.isPending || timedOut}
-              onClick={() => {
-                if (pendingApproval) {
-                  decideMutation.mutate({ approvalId: pendingApproval.id, decision: 'approve' });
-                }
-              }}
-            >
-              批准
-            </Button>
+            {canApprove ? (
+              <>
+                <Button
+                  danger
+                  loading={
+                    decideMutation.isPending && decideMutation.variables?.decision === 'deny'
+                  }
+                  disabled={decideMutation.isPending || timedOut}
+                  onClick={() => {
+                    if (pendingApproval) {
+                      decideMutation.mutate({
+                        approvalId: pendingApproval.id,
+                        decision: 'deny',
+                      });
+                    }
+                  }}
+                >
+                  拒绝
+                </Button>
+                <Button
+                  type="primary"
+                  loading={
+                    decideMutation.isPending && decideMutation.variables?.decision === 'approve'
+                  }
+                  disabled={decideMutation.isPending || timedOut}
+                  onClick={() => {
+                    if (pendingApproval) {
+                      decideMutation.mutate({
+                        approvalId: pendingApproval.id,
+                        decision: 'approve',
+                      });
+                    }
+                  }}
+                >
+                  批准
+                </Button>
+              </>
+            ) : null}
             {/* 六期打磨 sprint 3：编辑入口（此前三个 console/batch 审批入口
                 都没有，六期改写能力只能在对话审批卡使用）。 */}
             <Button
@@ -365,14 +378,23 @@ export default function ContainerActionModal({
               disabled={decideMutation.isPending || timedOut || pendingApproval === null}
               onClick={() => setEditing(true)}
             >
-              编辑命令
+              查看命令
             </Button>
           </Space>
         ) : null}
 
+        {phase.stage === 'pending' && !canApprove && !editing ? (
+          <Typography.Text type="secondary">
+            等待审批者处理
+            {approvalDecision === 'self'
+              ? '（不能审批自己发起的请求）'
+              : '（当前账号没有审批权限）'}
+          </Typography.Text>
+        ) : null}
+
         {phase.stage === 'pending' && editing ? (
           <Button onClick={() => setEditing(false)} disabled={decideMutation.isPending}>
-            取消编辑
+            关闭
           </Button>
         ) : null}
 

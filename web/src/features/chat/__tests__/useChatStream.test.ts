@@ -47,6 +47,12 @@ describe('describeError 工具路径错误码（第 6 轮）', () => {
     expect(describeError('COMMAND_INVALID')).toBe('命令不合法，未执行。');
   });
 
+  it('must_change_password 会话的 403 有中文说明，不上屏裸错误码', () => {
+    expect(describeError('PASSWORD_CHANGE_REQUIRED')).toBe(
+      '首次登录或管理员重置后必须先修改密码。',
+    );
+  });
+
   it('既有兜底行为不受影响：HTTP_ 前缀、fallback、未知码', () => {
     expect(describeError('HTTP_502')).toBe('请求失败（HTTP 502）。');
     expect(describeError('SOME_NEW_CODE', '自定义兜底')).toBe('自定义兜底');

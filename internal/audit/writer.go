@@ -3,6 +3,7 @@ package audit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,11 @@ const (
 	batchSize        = 100
 	batchInterval    = 500 * time.Millisecond
 	closeFlushBudget = 5 * time.Second
+
+	// audit_outbox 每轮最多取 200 行、最多 5 轮（写死上限：outbox 可能因
+	// worker 停机积压，单次 tick 不允许无界读取）。
+	outboxDrainLimit  = 200
+	outboxDrainRounds = 5
 )
 
 // ErrClosed 表示 writer 已关闭。
@@ -112,19 +118,7 @@ func (w *Writer) Enqueue(ctx context.Context, e Event) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	params := store.CreateAuditParams{
-		CreatedAt:      w.clock().UTC(),
-		ActorType:      e.ActorType,
-		ActorID:        e.ActorID,
-		Action:         e.Action,
-		ResourceType:   e.ResourceType,
-		ResourceID:     e.ResourceID,
-		RequestID:      e.RequestID,
-		ConversationID: e.ConversationID,
-		ServerID:       e.ServerID,
-		IP:             e.IP,
-		Detail:         sanitizeDetail(e.Detail),
-	}
+	params := Prepare(e, w.clock())
 	select {
 	case w.events <- params:
 		w.pending.Add(1)
@@ -144,6 +138,8 @@ func (w *Writer) Flush(ctx context.Context) error {
 		}
 		return ErrClosed
 	}
+	// 先排空事务内 outbox，再等通道批次——Flush 语义覆盖两条写入路径。
+	w.drainOutbox()
 	req := flushRequest{done: make(chan error, 1)}
 	select {
 	case w.flushCh <- req:
@@ -206,6 +202,7 @@ func (w *Writer) run(parent context.Context) {
 			cancel()
 			batch = batch[:0]
 		}
+		w.drainOutbox()
 		w.doneOnce.Do(func() { close(w.doneCh) })
 	}
 
@@ -233,6 +230,7 @@ func (w *Writer) run(parent context.Context) {
 					batch = batch[:0]
 				}
 			}
+			w.drainOutbox()
 			timer.Reset(batchInterval)
 		case req := <-w.flushCh:
 			w.drainEvents(&batch)
@@ -307,13 +305,30 @@ func (w *Writer) writeBatch(ctx context.Context, batch []store.CreateAuditParams
 		return errors.New("audit: nil store")
 	}
 	return w.st.WithTx(ctx, func(tx store.Store) error {
+		// 与 outbox worker 共用同一把链锁（契约 12.3 第 19 条）：即使未来
+		// 有多个 writer 实例，哈希链也串行追加。
+		if outbox := store.OutboxOf(tx); outbox != nil {
+			if err := outbox.LockAuditChain(ctx); err != nil {
+				return err
+			}
+		}
 		prev, err := tx.AuditLogs().LastHash(ctx)
 		if err != nil {
 			return err
 		}
+		// PostgreSQL 的 jsonb 会规范化 detail 文本；先取库内规范形态再算
+		// 哈希，读回复算才逐字节一致（走查第 4 轮）。
+		canon := store.AuditDetailCanonicalizerOf(tx)
 		for i := range batch {
 			p := &batch[i]
 			p.PrevHash = prev
+			if canon != nil {
+				detail, cerr := canon.CanonicalAuditDetail(ctx, p.Detail)
+				if cerr != nil {
+					return cerr
+				}
+				p.Detail = detail
+			}
 			p.Hash = computeHash(*p)
 			if err := tx.AuditLogs().Append(ctx, *p); err != nil {
 				return err
@@ -322,6 +337,85 @@ func (w *Writer) writeBatch(ctx context.Context, batch []store.CreateAuditParams
 		}
 		return nil
 	})
+}
+
+// drainOutbox 把业务事务内写入 audit_outbox 的事件串行追加到哈希链。
+//
+// 每轮一个事务：链锁 → 链尾 → 逐条 Append → 标记 processed。单轮最多
+// outboxDrainLimit 行、最多 outboxDrainRounds 轮；失败保留行待下轮重试
+// （不丢审计）。未实现 outbox 的存储直接跳过。
+func (w *Writer) drainOutbox() {
+	if w.st == nil {
+		return
+	}
+	ctx := w.loopCtx
+	if ctx.Err() != nil {
+		// Close 先 cancel loopCtx 再进入 shutdown：收尾仍须把 outbox 落库，
+		// 用独立预算，避免停机时丢事务内审计。
+		fallback, cancel := context.WithTimeout(context.Background(), closeFlushBudget)
+		defer cancel()
+		ctx = fallback
+	}
+	for round := 0; round < outboxDrainRounds; round++ {
+		processed := 0
+		err := w.st.WithTx(ctx, func(tx store.Store) error {
+			outbox := store.OutboxOf(tx)
+			if outbox == nil {
+				return nil
+			}
+			if err := outbox.LockAuditChain(ctx); err != nil {
+				return err
+			}
+			entries, err := outbox.PendingAuditOutbox(ctx, outboxDrainLimit)
+			if err != nil || len(entries) == 0 {
+				return err
+			}
+			prev, err := tx.AuditLogs().LastHash(ctx)
+			if err != nil {
+				return err
+			}
+			ids := make([]int64, 0, len(entries))
+			canon := store.AuditDetailCanonicalizerOf(tx)
+			for _, entry := range entries {
+				var p store.CreateAuditParams
+				if err := json.Unmarshal(entry.Payload, &p); err != nil {
+					// 损坏行不阻塞后续审计：记录并标记已处理。
+					w.log.Error("audit_outbox_payload_invalid",
+						"outbox_id", entry.ID, "error", err.Error())
+					ids = append(ids, entry.ID)
+					continue
+				}
+				p.PrevHash = prev
+				if canon != nil {
+					detail, cerr := canon.CanonicalAuditDetail(ctx, p.Detail)
+					if cerr != nil {
+						return cerr
+					}
+					p.Detail = detail
+				}
+				p.Hash = computeHash(p)
+				if err := tx.AuditLogs().Append(ctx, p); err != nil {
+					return err
+				}
+				prev = p.Hash
+				ids = append(ids, entry.ID)
+			}
+			if err := outbox.ProcessAuditOutbox(ctx, ids, w.clock()); err != nil {
+				return err
+			}
+			processed = len(ids)
+			return nil
+		})
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				w.log.Error("audit_outbox_drain_failed", "error", err)
+			}
+			return
+		}
+		if processed < outboxDrainLimit {
+			return
+		}
+	}
 }
 
 func resetTimer(timer *time.Timer, d time.Duration) {

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { ADMIN_PASSWORD, AUTH_STATE_FILE } from './helpers';
 
 // 修改密码全链路（顶栏头像下拉 → 弹窗 → API → 会话吊销 → 重新登录）。
@@ -40,7 +40,7 @@ test.describe('修改密码', () => {
 
     // 2) 错误旧密码 → AUTH_INVALID 错误条：改密场景无用户名字段，
     //    文案必须是「旧密码不正确」（登录页的 AUTH_INVALID 为
-    //    「管理员密码错误」，见本用例第 4 步登录失败断言）。
+    //    「用户名或密码错误」，见本用例第 4 步登录失败断言）。
     await confirmInput.fill(NEW_PASSWORD);
     await oldInput.fill('definitely-wrong-old-pass');
     await dialog.getByRole('button', { name: '确认修改' }).click();
@@ -56,7 +56,7 @@ test.describe('修改密码', () => {
     // 兜底成合成 INTERNAL（无 request_id），与上面的成功提示并存渲染出
     // 「服务器内部错误」假故障横幅。此处断言横幅不再出现；且需先等 me
     // 探测结束（表单可见）再断言，覆盖横幅与表单同帧出现的时序。
-    await expect(page.getByPlaceholder('请输入管理员密码')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByPlaceholder('请输入用户名')).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('.opsmind-login-page').getByText('INTERNAL')).toHaveCount(0);
     await expect(page.locator('.opsmind-login-page').getByText('服务器内部错误')).toHaveCount(0);
 
@@ -64,14 +64,16 @@ test.describe('修改密码', () => {
     const me = await page.request.get('/api/auth/me');
     expect(me.status()).toBe(401);
 
-    // 4) 旧密码不能再登录；新密码可以。
-    const loginInput = page.getByPlaceholder('请输入管理员密码');
+    // 4) 旧密码不能再登录；新密码可以（00012：用户名 + 密码）。
+    await page.getByPlaceholder('请输入用户名').fill('admin');
+    const loginInput = page.getByPlaceholder('请输入密码');
     await expect(loginInput).toBeVisible();
     await loginInput.fill(ADMIN_PASSWORD);
     await page.getByRole('button', { name: /登\s*录/ }).click();
-    await expect(page.getByText('管理员密码错误')).toBeVisible();
+    await expect(page.getByText('用户名或密码错误')).toBeVisible();
     await expect(page).toHaveURL(/\/login/);
 
+    await page.getByPlaceholder('请输入用户名').fill('admin');
     await loginInput.fill(NEW_PASSWORD);
     await page.getByRole('button', { name: /登\s*录/ }).click();
     await expect(page).toHaveURL(/\/chat$/, { timeout: 20_000 });
@@ -87,7 +89,7 @@ test.describe('修改密码', () => {
     await page.getByRole('button', { name: 'admin' }).click();
     await page.getByRole('menuitem', { name: '退出登录' }).click();
     await expect(page).toHaveURL(/\/login/, { timeout: 20_000 });
-    await expect(page.getByPlaceholder('请输入管理员密码')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByPlaceholder('请输入用户名')).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('.opsmind-login-page').getByText('INTERNAL')).toHaveCount(0);
     await expect(page.locator('.opsmind-login-page').getByText('服务器内部错误')).toHaveCount(0);
   });

@@ -463,7 +463,7 @@ func (s *smokeRun) step02ConcurrentHealth() error {
 }
 
 func (s *smokeRun) step03LoginInvalid() error {
-	resp, err := s.h.do("S03", http.MethodPost, "/api/auth/login", map[string]any{"password": "wrong-password"}, false)
+	resp, err := s.h.do("S03", http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": "wrong-password"}, false)
 	if err != nil {
 		return err
 	}
@@ -478,7 +478,7 @@ func (s *smokeRun) step03LoginInvalid() error {
 }
 
 func (s *smokeRun) step04LoginSuccess() error {
-	resp, err := s.h.do("S04", http.MethodPost, "/api/auth/login", map[string]any{"password": smokeAdminPassword}, false)
+	resp, err := s.h.do("S04", http.MethodPost, "/api/auth/login", map[string]any{"username": "admin", "password": smokeAdminPassword}, false)
 	if err != nil {
 		return err
 	}

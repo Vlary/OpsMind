@@ -19,6 +19,7 @@ import (
 	"aiops/internal/apierr"
 	"aiops/internal/approvals"
 	"aiops/internal/audit"
+	"aiops/internal/authz"
 	"aiops/internal/containerx"
 	"aiops/internal/risk"
 	"aiops/internal/sshx"
@@ -40,11 +41,11 @@ type containerActionRequest struct {
 
 // RegisterContainerRoutes 注册四期 C1 容器路由（契约 2.5）。
 func (d *Deps) RegisterContainerRoutes(api *gin.RouterGroup) {
-	api.GET("/servers/:id/containers", d.handleListContainers)
-	api.GET("/servers/:id/containers/:cid", d.handleInspectContainer)
-	api.POST("/servers/:id/containers/:cid/action", d.handleContainerAction)
-	api.GET("/servers/:id/containers/:cid/logs", d.handleContainerLogs)
-	api.GET("/servers/:id/images", d.handleListImages)
+	d.guard(api, http.MethodGet, "/servers/:id/containers", authz.PermExecuteReadonly, d.handleListContainers)
+	d.guard(api, http.MethodGet, "/servers/:id/containers/:cid", authz.PermExecuteReadonly, d.handleInspectContainer)
+	d.guard(api, http.MethodPost, "/servers/:id/containers/:cid/action", authz.PermExecuteWrite, d.handleContainerAction)
+	d.guard(api, http.MethodGet, "/servers/:id/containers/:cid/logs", authz.PermExecuteReadonly, d.handleContainerLogs)
+	d.guard(api, http.MethodGet, "/servers/:id/images", authz.PermExecuteReadonly, d.handleListImages)
 }
 
 // containerExecFunc 按契约 2.7 通道规则构造 ExecFunc（WinRM 走 PowerShell
@@ -365,6 +366,7 @@ func (d *Deps) handleContainerAction(c *gin.Context) {
 			Reason:       "container state change",
 			ApprovalMode: string(mode),
 			RequestID:    c.GetString("request_id"),
+			RequestedBy:  c.GetString("user_id"),
 		})
 		if err != nil {
 			if errors.Is(err, store.ErrInvalid) {
@@ -470,9 +472,9 @@ func (d *Deps) executeConsoleCommand(c *gin.Context, srv store.Server, command s
 }
 
 // executeConsoleApproval 在 decide 批准 console 审批后同步逐字节执行
-// 实际命令（六期 BE-P，契约 2.11 约定 3：edited_command 非空时的改写后
-// 命令，否则 approval.command；契约 5.5：执行不发生在 Service.Decide——
-// 在 decide handler；失败不回滚审批状态，失败信息只进 execution 与审计）。
+// 持久化的 approval.command（契约 12.3 第 7 条：永不读取 edited_command；
+// 契约 5.5：执行不发生在 Service.Decide——在 decide handler；失败不回滚
+// 审批状态，失败信息只进 execution 与审计）。
 // 返回值直接作为响应的 execution 字段。
 func (d *Deps) executeConsoleApproval(c *gin.Context, ap store.Approval) map[string]any {
 	detail := map[string]any{
@@ -504,11 +506,8 @@ func (d *Deps) executeConsoleApproval(c *gin.Context, ap store.Approval) map[str
 	if err != nil {
 		return fail(apierr.Internal)
 	}
-	// 实际执行命令=改写后命令（edited ?? original，契约 3.4 六期约束）。
+	// 执行命令唯一来源：持久化的 approval.command（00012 禁止改写）。
 	command := ap.Command
-	if ap.EditedCommand != "" {
-		command = ap.EditedCommand
-	}
 	res, err := exec(c.Request.Context(), command, containerCLITimeout)
 	if err != nil {
 		code := apierr.ContainerCLIFailed
@@ -537,13 +536,10 @@ func (d *Deps) executeConsoleApproval(c *gin.Context, ap store.Approval) map[str
 
 // auditConsoleContainerAction 落 container.action 审计（契约 9.7：
 // detail={runtime, container_id, action, exit_code, source:console, error_code?}；
-// runtime/container_id/action 从实际执行命令解析（"docker stop 9f2c"——
-// 六期起为 edited ?? original，与执行同源）。
+// runtime/container_id/action 从实际执行的 approval.command 解析（00012 起
+// 不再读取 edited_command）。
 func (d *Deps) auditConsoleContainerAction(c *gin.Context, ap store.Approval, detail map[string]any) {
 	command := ap.Command
-	if ap.EditedCommand != "" {
-		command = ap.EditedCommand
-	}
 	runtime, cid, action := parseContainerApprovalCommand(command)
 	serverID := ""
 	if ap.ServerID != nil {

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import {
   AUTH_STATE_FILE,
   RISKY_COMMAND,
@@ -74,8 +74,8 @@ test.use({ storageState: AUTH_STATE_FILE });
 // ---------------------------------------------------------------------------
 // 1. 审批卡编辑态空命令（high）
 // ---------------------------------------------------------------------------
-test.describe('六期打磨 sprint 2：审批编辑态空命令不得批准', () => {
-  test('清空「改写命令」后「保存并批准」禁用，不产生任何 approve/执行', async ({ page }) => {
+test.describe('六期打磨 sprint 2：审批编辑态空命令不得批准（00012 起无改写入口）', () => {
+  test('审批卡无「编辑命令/保存并批准」入口，原命令保持 pending 不被执行', async ({ page }) => {
     await page.goto('/chat');
     await sendMessage(page, SCENARIO_RISKY);
     await expect(page).toHaveURL(/\/c\//, { timeout: 20_000 });
@@ -84,27 +84,13 @@ test.describe('六期打磨 sprint 2：审批编辑态空命令不得批准', ()
     await expect(approvalCard).toBeVisible({ timeout: 30_000 });
     await expect(approvalCard.getByText(RISKY_COMMAND)).toBeVisible();
 
-    await approvalCard.getByRole('button', { name: '编辑命令' }).click();
-    const editor = page.getByLabel('改写命令');
-    await expect(editor).toBeVisible();
-    // 走查复现步骤：清空命令（此前 disabled=false，点击后按原命令批准执行）。
-    await editor.fill('');
+    // 00012：审批时禁止改写，空命令/改写风险预览等入口已整体移除。
+    await expect(approvalCard.getByRole('button', { name: '编辑命令' })).toHaveCount(0);
+    await expect(approvalCard.getByRole('button', { name: '保存并批准' })).toHaveCount(0);
+    await expect(approvalCard.getByLabel('改写命令')).toHaveCount(0);
+    await expect(approvalCard.getByRole('button', { name: '批准' })).toBeEnabled();
 
-    const saveButton = approvalCard.getByRole('button', { name: '保存并批准' });
-    await expect(saveButton).toBeDisabled();
-    // 内联提示给出正确出口：取消编辑（定位 Alert 而不是按钮文案——两者
-    // 都含「取消编辑」，getByText 在 strict mode 下会命中两个元素）。
-    await expect(approvalCard.getByText(/命令不能为空/)).toHaveText(
-      '命令不能为空，如需放弃修改请点「取消编辑」。',
-    );
-
-    // 纯空白同样拦截（trim 后为空）。
-    await editor.fill('   \t  ');
-    await expect(saveButton).toBeDisabled();
-
-    // 点一次（禁用态点击无效）：审批仍 pending、没有执行。
-    await saveButton.click({ force: true }).catch(() => undefined);
-    await page.waitForTimeout(500);
+    // 未点击批准：审批仍 pending、edited_command 为空、没有执行。
     const cid = conversationIdOf(page);
     const approvalsResponse = await page.request.get('/api/approvals', {
       params: { conversation_id: cid, limit: 10 },
@@ -117,22 +103,17 @@ test.describe('六期打磨 sprint 2：审批编辑态空命令不得批准', ()
     expect(risky).toBeDefined();
     expect(risky?.status).toBe('pending');
     expect(risky?.edited_command).toBe('');
-    // 原命令绝未被批准执行：回放/工具调用里不存在 ssh_exec 的成功或失败执行。
     const toolCallsResponse = await page.request.get(`/api/conversations/${cid}/tool-calls`, {
       params: { limit: 20 },
     });
     expect(toolCallsResponse.ok()).toBeTruthy();
     const toolCalls = (await toolCallsResponse.json()) as {
-      items: Array<{ name: string; status: string; result: unknown }>;
+      items: Array<{ name: string; status: string }>;
     };
     const sshCalls = toolCalls.items.filter((item) => item.name === 'ssh_exec');
     expect(sshCalls.every((item) => item.status === 'awaiting_approval')).toBe(true);
 
-    // 恢复非空命令后按钮重新可用（编辑态没有卡死）。
-    await editor.fill('uptime');
-    await expect(saveButton).toBeEnabled({ timeout: 10_000 });
     // 清理：拒绝这条审批，避免悬挂影响后续用例。
-    await approvalCard.getByRole('button', { name: '取消编辑' }).click();
     await approvalCard.getByRole('button', { name: '拒绝' }).click();
     await expect(approvalCard.getByText('审批已拒绝', { exact: true })).toBeVisible({
       timeout: 20_000,

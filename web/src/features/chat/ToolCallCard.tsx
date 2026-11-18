@@ -19,7 +19,12 @@ import StatusTag from '../../components/StatusTag';
 import { BATCH_STATUS_LABELS, RESULT_STATUS_LABELS } from '../batch/batchView';
 import { describeError, showsDuration, type ToolCallView } from './useChatStream';
 import { commandPanelOf } from './toolCommandPanel';
-import { EXEMPT_EXECUTION_LABEL, badgeInputOf, isExemptExecution } from './toolCallBadges';
+import {
+  EXEMPT_EXECUTION_LABEL,
+  badgeInputOf,
+  isExemptExecution,
+  shouldShowApprovalCancelledNotice,
+} from './toolCallBadges';
 
 type Approval = components['schemas']['Approval'];
 
@@ -173,6 +178,17 @@ export default function ToolCallCard({
   // 提示（判定纯函数见 toolCallBadges.ts）。
   const exempt = isExemptExecution(badgeInputOf(toolCall, approvals));
   const failed = toolCall.status === 'failed' || toolCall.status === 'denied';
+  // RBAC 走查 sprint 3（刷新语义）：刷新/断开页面会中断回答流，服务端把
+  // pending 审批连带取消并把 tool_call 收敛为 expired/APPROVAL_CANCELLED
+  //（internal/agent/runner.go cancelApprovalAndConverge）。无 approvals:read
+  // 的角色看不到审批卡（会话页不再请求审批列表），这里必须把「本轮审批
+  // 已取消、需要重新发起」直接讲在工具卡上，否则只剩一个「已过期」标签。
+  // 审批卡可读时由 ApprovalCard 的 cancelled 提示承担，不重复展示。
+  const approvalCancelled = shouldShowApprovalCancelledNotice({
+    status: toolCall.status,
+    errorCode: toolCall.errorCode,
+    approvalCount: approvals.length,
+  });
 
   const collapseItems = [
     ...(command
@@ -266,6 +282,12 @@ export default function ToolCallCard({
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
           {toolCall.status === 'awaiting_approval' && approvals.length === 0 ? (
             <Typography.Text type="warning">等待人工审批…</Typography.Text>
+          ) : null}
+
+          {approvalCancelled ? (
+            <Typography.Text type="warning" data-testid="approval-cancelled-notice">
+              {describeError('APPROVAL_CANCELLED')}
+            </Typography.Text>
           ) : null}
 
           {phaseFive}

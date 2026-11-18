@@ -136,16 +136,15 @@ func TestConversationReplayOrdering(t *testing.T) {
 	if execStep.Command == nil || *execStep.Command != "df -h" {
 		t.Fatalf("execution command = %v", execStep.Command)
 	}
-	// approval 步：command=edited ?? original；original 仅改写时非 null。
+	// approval 步（00012）：非 legacy 行恒取实际执行的 approval.command，
+	// edited_* 是历史只读字段，不再参与回放。
 	apStep := resp.Steps[2]
-	if apStep.Command == nil || *apStep.Command != "systemctl restart nginx --no-block" {
-		t.Fatalf("approval command = %v, want edited", apStep.Command)
+	if apStep.Command == nil || *apStep.Command != "systemctl restart nginx" {
+		t.Fatalf("approval command = %v, want approval.command", apStep.Command)
 	}
-	if apStep.OriginalCommand == nil || *apStep.OriginalCommand != "systemctl restart nginx" {
-		t.Fatalf("approval original_command = %v", apStep.OriginalCommand)
-	}
-	if apStep.EditedRiskLevel == nil || *apStep.EditedRiskLevel != "needs_approval" {
-		t.Fatalf("approval edited_risk_level = %v", apStep.EditedRiskLevel)
+	if apStep.OriginalCommand != nil || apStep.EditedRiskLevel != nil {
+		t.Fatalf("approval edited fields must be null for non-legacy: original=%v edited_level=%v",
+			apStep.OriginalCommand, apStep.EditedRiskLevel)
 	}
 	// reasoning 步带服务端计时（六期打磨 sprint 1：此前恒 null，回放摘要
 	// 永远显示「深度思考 · 耗时 —」）。
@@ -381,15 +380,63 @@ func TestSettingsEndpoints(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("PUT invalid = %d", rec.Code)
 	}
-	// PUT 合法值 200 且生效。
+	// 收紧（standard→all）由单个管理员直接生效：不扩大审批面。
+	rec = env.do(http.MethodPut, "/api/settings", `{"approval_mode":"all"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"approval_mode":"all"`) {
+		t.Fatalf("PUT all = %d %s", rec.Code, rec.Body.String())
+	}
+	// 单管理员放宽（all→high）→ 409 NO_SECOND_APPROVER，且设置不变。
+	// 临时停用预置的第二管理员，构造「仅一个启用管理员」的部署形态。
+	disableUserForTest(t, env, testSecondAdminUsername)
 	rec = env.do(http.MethodPut, "/api/settings", `{"approval_mode":"high"}`)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"approval_mode":"high"`) {
-		t.Fatalf("PUT high = %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("PUT widening single admin = %d %s", rec.Code, rec.Body.String())
+	}
+	if code, _ := errorBody(t, rec); code != "NO_SECOND_APPROVER" {
+		t.Fatalf("code = %q, want NO_SECOND_APPROVER", code)
+	}
+	rec = env.do(http.MethodGet, "/api/settings", "")
+	if !strings.Contains(rec.Body.String(), `"approval_mode":"all"`) {
+		t.Fatalf("settings changed after rejected widening: %s", rec.Body.String())
+	}
+
+	// 第二个启用管理员存在时，放宽创建 source=policy 审批（202），
+	// settings 保持 all，第二人批准后才生效。
+	enableUserForTest(t, env, testSecondAdminUsername)
+	addTestUser(t, env, "admin2", "admin2-pw", store.RoleAdmin, true)
+	admin2 := loginAs(t, env, "admin2", "admin2-pw")
+	rec = env.do(http.MethodPut, "/api/settings", `{"approval_mode":"high"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("PUT widening with approver = %d %s", rec.Code, rec.Body.String())
+	}
+	var pending struct {
+		ApprovalMode    string         `json:"approval_mode"`
+		PendingApproval store.Approval `json:"pending_approval"`
+	}
+	decodeBody(t, rec, &pending)
+	if pending.ApprovalMode != "all" || pending.PendingApproval.Source != "policy" ||
+		pending.PendingApproval.PolicyTo == nil || *pending.PendingApproval.PolicyTo != "high" {
+		t.Fatalf("pending = %+v", pending)
+	}
+	rec = env.do(http.MethodGet, "/api/settings", "")
+	if !strings.Contains(rec.Body.String(), `"approval_mode":"all"`) {
+		t.Fatalf("widening applied before approval: %s", rec.Body.String())
+	}
+	// 发起人（admin）不能自审。
+	rec = env.do(http.MethodPost, "/api/approvals/"+pending.PendingApproval.ID+"/decide", `{"decision":"approve"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self decide policy = %d %s", rec.Code, rec.Body.String())
+	}
+	// 第二人批准 → 200；settings 变 high。
+	rec = doAs(env, http.MethodPost, "/api/approvals/"+pending.PendingApproval.ID+"/decide", `{"decision":"approve"}`, admin2, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve policy = %d %s", rec.Code, rec.Body.String())
 	}
 	rec = env.do(http.MethodGet, "/api/settings", "")
 	if !strings.Contains(rec.Body.String(), `"approval_mode":"high"`) {
-		t.Fatalf("GET after PUT = %s", rec.Body.String())
+		t.Fatalf("GET after approved widening = %s", rec.Body.String())
 	}
+
 	// 非法 JSON 值兜底 standard。
 	putSetting(t, env, "approval.mode", "bogus-not-json-string")
 	rec = env.do(http.MethodGet, "/api/settings", "")
@@ -407,13 +454,13 @@ func TestSettingsEndpoints(t *testing.T) {
 
 func TestConversationApprovalModeOverride(t *testing.T) {
 	env := newTestEnv(t)
-	putSetting(t, env, "approval.mode", "standard")
-	conv := store.Conversation{ID: "conv-mode", Title: "门限"}
+	putSetting(t, env, "approval.mode", "high")
+	conv := store.Conversation{ID: "conv-mode", Title: "门限", UserID: "user-1"}
 	env.st.mu.Lock()
 	env.st.conversations[conv.ID] = conv
 	env.st.mu.Unlock()
 
-	// 设置覆盖：effective=high。
+	// 同档覆盖允许：effective=high。
 	rec := env.do(http.MethodPatch, "/api/conversations/conv-mode", `{"approval_mode":"high"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH set = %d %s", rec.Code, rec.Body.String())
@@ -429,13 +476,30 @@ func TestConversationApprovalModeOverride(t *testing.T) {
 	if got.EffectiveApprovalMode != "high" {
 		t.Fatalf("effective = %s", got.EffectiveApprovalMode)
 	}
+	// 更宽的覆盖（high→none）必须 403：会话 owner 不能自行放宽全局门限。
+	rec = env.do(http.MethodPatch, "/api/conversations/conv-mode", `{"approval_mode":"none"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("PATCH widening = %d %s, want 403", rec.Code, rec.Body.String())
+	}
+	if code, _ := errorBody(t, rec); code != "APPROVAL_MODE_WIDENING_FORBIDDEN" {
+		t.Fatalf("code = %q, want APPROVAL_MODE_WIDENING_FORBIDDEN", code)
+	}
+	// 更严格的覆盖（high→all）允许。
+	rec = env.do(http.MethodPatch, "/api/conversations/conv-mode", `{"approval_mode":"all"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH stricter = %d %s", rec.Code, rec.Body.String())
+	}
+	decodeBody(t, rec, &got)
+	if got.EffectiveApprovalMode != "all" {
+		t.Fatalf("effective stricter = %s", got.EffectiveApprovalMode)
+	}
 	// GET 同样装配。
 	rec = env.do(http.MethodGet, "/api/conversations/conv-mode", "")
 	decodeBody(t, rec, &got)
-	if got.EffectiveApprovalMode != "high" {
+	if got.EffectiveApprovalMode != "all" {
 		t.Fatalf("GET effective = %s", got.EffectiveApprovalMode)
 	}
-	// null 清除覆盖：effective 回到全局 standard、approval_mode=null。
+	// null 清除覆盖：effective 回到全局 high、approval_mode=null。
 	rec = env.do(http.MethodPatch, "/api/conversations/conv-mode", `{"approval_mode":null}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH null = %d %s", rec.Code, rec.Body.String())
@@ -444,7 +508,7 @@ func TestConversationApprovalModeOverride(t *testing.T) {
 	if got.ApprovalMode != nil {
 		t.Fatalf("approval_mode after null = %v, want null", got.ApprovalMode)
 	}
-	if got.EffectiveApprovalMode != "standard" {
+	if got.EffectiveApprovalMode != "high" {
 		t.Fatalf("effective after null = %s", got.EffectiveApprovalMode)
 	}
 	// 非法枚举 400。

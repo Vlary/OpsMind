@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { createApprovedGrant, expect, test, type Page } from './fixtures';
 import { AUTH_STATE_FILE } from './helpers';
 
 // 二期冲刺第 3 轮打磨的端到端验证：
@@ -34,7 +34,7 @@ test.describe('RDP 真链路（p2 sprint 3：文本帧修复 + ws:true 代理）
     const pageErrors: string[] = [];
     page.on('pageerror', (error) => pageErrors.push(error.message));
 
-    await createServer(page, {
+    const server = await createServer(page, {
       name: 'p2s3-win-guacd',
       host: '127.0.0.1',
       port: 3389,
@@ -45,6 +45,7 @@ test.describe('RDP 真链路（p2 sprint 3：文本帧修复 + ws:true 代理）
       auto_exec_enabled: false,
     });
 
+    await createApprovedGrant(page, server.id, 'rdp');
     await page.goto('/rdp');
     await expect(page.getByRole('heading', { name: '桌面', exact: true })).toBeVisible();
     // 创建区默认选中唯一的 Windows 服务器，直接连接。
@@ -125,6 +126,9 @@ test.describe('Redis 命令查询抽屉失败文案（p2 sprint 3：命令口径
     expect(created.status()).toBe(201);
 
     await page.goto('/databases');
+    // 列表按每页 10 条分页；并行 spec 会累积 e2e-* 数据库，新建行可能落到
+    // 第二页（round6 同型 flaky），先按名称过滤再断言。
+    await page.getByPlaceholder('搜索名称 / 主机 / 数据库名 / 用户名').fill('p2s3-redis-down');
     const row = page.locator('tr', { hasText: 'p2s3-redis-down' }).first();
     await expect(row).toBeVisible({ timeout: 20_000 });
     await row.getByRole('button', { name: '查询' }).click();

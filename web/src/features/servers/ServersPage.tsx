@@ -43,6 +43,8 @@ import {
 } from '../../components/admin/apiError';
 import { formatDateTime, shortId } from '../../components/admin/format';
 import { isWinRMAuthMethod, osLabel } from '../../components/admin/meta';
+import { PERMS, hasAnyPermission } from '../../lib/rbacPermissions';
+import { usePermissions } from '../auth/useMe';
 import '../../styles/admin.css';
 import ServerFormModal, { isNetworkDevice, netdevBrandLabel } from './ServerFormDrawer';
 import ServerTestButton from './ServerTestButton';
@@ -159,6 +161,11 @@ export function localizeTestFailure(failure: ApiFailure): ApiFailure {
 
 export default function ServersPage() {
   const queryClient = useQueryClient();
+  // 00012 评审 medium：页面内写操作必须按权限收敛，而不是点击后 403。
+  // 只读角色（审批者/审计员）不应看到新增/编辑/删除/连接测试/自动执行开关。
+  const permissions = usePermissions();
+  const canWriteAssets = hasAnyPermission(permissions, [PERMS.assetsWrite]);
+  const canTestConnection = hasAnyPermission(permissions, [PERMS.connectionTest]);
   const [keyword, setKeyword] = useState('');
   const [actionError, setActionError] = useState<ApiFailure | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -372,29 +379,34 @@ export default function ServersPage() {
       title: '自动执行',
       key: 'auto_exec_enabled',
       width: 120,
-      render: (_value, record) => (
-        <Popconfirm
-          title="开启自动执行？"
-          description="模型将可直接执行被判定为安全的命令，不再逐条审批；风险命令仍需审批。"
-          okText="开启"
-          cancelText="取消"
-          onConfirm={() => autoExecMutation.mutate({ server: record, enabled: true })}
-          disabled={record.auto_exec_enabled}
-        >
-          <Switch
-            size="small"
-            checked={record.auto_exec_enabled}
-            loading={
-              autoExecMutation.isPending && autoExecMutation.variables?.server.id === record.id
-            }
-            onChange={(checked) => {
-              if (!checked) {
-                autoExecMutation.mutate({ server: record, enabled: false });
+      render: (_value, record) =>
+        canWriteAssets ? (
+          <Popconfirm
+            title="开启自动执行？"
+            description="模型将可直接执行被判定为安全的命令，不再逐条审批；风险命令仍需审批。"
+            okText="开启"
+            cancelText="取消"
+            onConfirm={() => autoExecMutation.mutate({ server: record, enabled: true })}
+            disabled={record.auto_exec_enabled}
+          >
+            <Switch
+              size="small"
+              checked={record.auto_exec_enabled}
+              loading={
+                autoExecMutation.isPending && autoExecMutation.variables?.server.id === record.id
               }
-            }}
-          />
-        </Popconfirm>
-      ),
+              onChange={(checked) => {
+                if (!checked) {
+                  autoExecMutation.mutate({ server: record, enabled: false });
+                }
+              }}
+            />
+          </Popconfirm>
+        ) : (
+          <Tag color={record.auto_exec_enabled ? 'green' : 'default'}>
+            {record.auto_exec_enabled ? '已开启' : '已关闭'}
+          </Tag>
+        ),
     },
     {
       title: '状态',
@@ -442,30 +454,36 @@ export default function ServersPage() {
       fixed: 'right',
       render: (_value, record) => (
         <div className="opsmind-admin-actions">
-          <ServerTestButton
-            loading={testMutation.isPending && testMutation.variables?.id === record.id}
-            onClick={() => testMutation.mutate(record)}
-          />
-          <Button
-            type="link"
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => {
-              setEditing(record);
-              setFormOpen(true);
-            }}
-          >
-            编辑
-          </Button>
-          <Button
-            type="link"
-            size="small"
-            danger
-            icon={<DeleteOutlined />}
-            onClick={() => setDeleting(record)}
-          >
-            删除
-          </Button>
+          {canTestConnection ? (
+            <ServerTestButton
+              loading={testMutation.isPending && testMutation.variables?.id === record.id}
+              onClick={() => testMutation.mutate(record)}
+            />
+          ) : null}
+          {canWriteAssets ? (
+            <>
+              <Button
+                type="link"
+                size="small"
+                icon={<EditOutlined />}
+                onClick={() => {
+                  setEditing(record);
+                  setFormOpen(true);
+                }}
+              >
+                编辑
+              </Button>
+              <Button
+                type="link"
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                onClick={() => setDeleting(record)}
+              >
+                删除
+              </Button>
+            </>
+          ) : null}
         </div>
       ),
     },
@@ -485,16 +503,18 @@ export default function ServersPage() {
             >
               刷新
             </Button>
-            <Button
-              type="primary"
-              icon={<PlusOutlined />}
-              onClick={() => {
-                setEditing(null);
-                setFormOpen(true);
-              }}
-            >
-              新增服务器
-            </Button>
+            {canWriteAssets ? (
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => {
+                  setEditing(null);
+                  setFormOpen(true);
+                }}
+              >
+                新增服务器
+              </Button>
+            ) : null}
           </Space>
         }
       />
@@ -527,7 +547,15 @@ export default function ServersPage() {
           size="middle"
           scroll={{ x: 1120 }}
           locale={{
-            emptyText: <EmptyState description="还没有服务器，点击右上角“新增服务器”开始配置" />,
+            emptyText: (
+              <EmptyState
+                description={
+                  canWriteAssets
+                    ? '还没有服务器，点击右上角“新增服务器”开始配置'
+                    : '还没有服务器；当前角色只读，无法新增资产'
+                }
+              />
+            ),
           }}
           pagination={{
             pageSize: 10,

@@ -16,6 +16,7 @@ import (
 	"aiops/internal/apierr"
 	"aiops/internal/approvals"
 	"aiops/internal/audit"
+	"aiops/internal/authz"
 	"aiops/internal/store"
 )
 
@@ -87,6 +88,14 @@ func (d *Deps) fillConversationMode(c *gin.Context, conv store.Conversation) (st
 }
 
 func (d *Deps) handleListConversations(c *gin.Context) {
+	// 契约 12.3 第 3 条：owner 自己的会话目录，或 audit:read 的跨用户只读
+	// 目录（与 GET /api/replays 同源）。第 4 轮走查 medium：此前只要求
+	// chat:use 且恒传当前用户，拥有 audit:read 的 admin 只看到自己的会话，
+	// 与同页「回放执行」目录（audit:read 全量）数量自相矛盾；auditor 直接
+	// 403，与契约「audit:read 传 NULL 拿全量」冲突。
+	if !authz.AuthorizeAny(c, d.authzDenied, authz.PermChat, authz.PermAudit) {
+		return
+	}
 	limit, ok := queryConversationLimit(c)
 	if !ok {
 		return
@@ -95,13 +104,18 @@ func (d *Deps) handleListConversations(c *gin.Context) {
 	if !ok {
 		return
 	}
-	items, hasMore, err := d.Store.Conversations().ListPage(c.Request.Context(), cursor, limit)
+	// 契约 12.3 第 3 条：归属过滤在 SQL 内完成（非 audit:read 恒传当前
+	// 用户）：先取全量再在 Go 侧过滤会让他人会话占满 limit 窗口，自己的
+	// 列表为空、has_more=true 而 next_cursor=null，翻页与历史会话全部
+	// 不可达。audit:read 传空串拿全量只读目录。
+	ownerFilter := c.GetString("user_id")
+	if authz.Allowed(c, authz.PermAudit) {
+		ownerFilter = ""
+	}
+	items, hasMore, err := d.Store.Conversations().ListPage(c.Request.Context(), ownerFilter, cursor, limit)
 	if err != nil {
 		d.handleStoreError(c, err, apierr.NotFound)
 		return
-	}
-	if items == nil {
-		items = []store.Conversation{}
 	}
 	if !d.fillConversationModes(c, items) {
 		return
@@ -115,6 +129,9 @@ func (d *Deps) handleListConversations(c *gin.Context) {
 }
 
 func (d *Deps) handleCreateConversation(c *gin.Context) {
+	if !d.requireChatPermission(c) {
+		return
+	}
 	var req conversationCreateRequest
 	hasBody := c.Request.ContentLength > 0 || len(c.Request.TransferEncoding) > 0
 	if hasBody {
@@ -131,7 +148,10 @@ func (d *Deps) handleCreateConversation(c *gin.Context) {
 		return
 	}
 
-	conv, err := d.Store.Conversations().Create(c.Request.Context(), store.CreateConversationParams{Title: title})
+	conv, err := d.Store.Conversations().Create(c.Request.Context(), store.CreateConversationParams{
+		Title:  title,
+		UserID: c.GetString("user_id"),
+	})
 	if err != nil {
 		d.handleStoreError(c, err, apierr.NotFound)
 		return
@@ -153,12 +173,14 @@ func (d *Deps) handleCreateConversation(c *gin.Context) {
 }
 
 func (d *Deps) handleGetConversation(c *gin.Context) {
-	conv, err := d.Store.Conversations().Get(c.Request.Context(), c.Param("id"))
-	if err != nil {
-		d.handleStoreError(c, err, apierr.NotFound)
+	if !d.requireChatPermission(c) {
 		return
 	}
-	conv, ok := d.fillConversationMode(c, conv)
+	conv, ok := d.ownedConversation(c, c.Param("id"))
+	if !ok {
+		return
+	}
+	conv, ok = d.fillConversationMode(c, conv)
 	if !ok {
 		return
 	}
@@ -170,6 +192,9 @@ func (d *Deps) handleGetConversation(c *gin.Context) {
 // 门限覆盖属设置变更，走 settings.update（resource_id=
 // 'conversation:<id>:approval_mode'，契约 9.7）。
 func (d *Deps) handleUpdateConversation(c *gin.Context) {
+	if !d.requireChatPermission(c) {
+		return
+	}
 	var req conversationUpdateRequest
 	if !bindJSONStrict(c, &req) {
 		return
@@ -182,6 +207,10 @@ func (d *Deps) handleUpdateConversation(c *gin.Context) {
 	}
 
 	convID := c.Param("id")
+	// 先做归属校验再变更：非 owner 一律 404，禁止通过 PATCH 探测/改写他人会话。
+	if _, ok := d.ownedConversation(c, convID); !ok {
+		return
+	}
 	var conv store.Conversation
 	if hasTitle {
 		title := strings.TrimSpace(*req.Title)
@@ -219,6 +248,20 @@ func (d *Deps) handleUpdateConversation(c *gin.Context) {
 				writeError(c, apierr.ValidationFailed, "approval_mode must be one of all, standard, high, none or null")
 				return
 			}
+			// 契约 12.3 第 9 条：会话覆盖只能与全局同档或更严格；任何
+			// 更宽的覆盖（如全局 standard 下改成 high/none）都是审批门限
+			// 放宽，必须走独立的 policy 双人审批，不能由会话 owner 自行
+			// 设置——否则 needs_approval 命令可直接绕过审批执行。
+			global, gerr := approvals.GlobalMode(c.Request.Context(), d.Store)
+			if gerr != nil {
+				d.handleStoreError(c, gerr, apierr.NotFound)
+				return
+			}
+			if approvals.IsWidening(global, m) {
+				writeErrorStatus(c, http.StatusForbidden, "APPROVAL_MODE_WIDENING_FORBIDDEN",
+					"conversation approval mode cannot be wider than the global mode")
+				return
+			}
 			mode = &m
 			value = raw
 		}
@@ -246,7 +289,13 @@ func (d *Deps) handleUpdateConversation(c *gin.Context) {
 }
 
 func (d *Deps) handleDeleteConversation(c *gin.Context) {
+	if !d.requireChatPermission(c) {
+		return
+	}
 	id := c.Param("id")
+	if _, ok := d.ownedConversation(c, id); !ok {
+		return
+	}
 	if d.Streams != nil && d.Streams.Active(id) {
 		writeError(c, apierr.StreamActive, "conversation already has an active stream")
 		return
@@ -267,6 +316,12 @@ func (d *Deps) handleDeleteConversation(c *gin.Context) {
 }
 
 func (d *Deps) handleListMessages(c *gin.Context) {
+	if !d.requireChatPermission(c) {
+		return
+	}
+	if _, ok := d.ownedConversation(c, c.Param("id")); !ok {
+		return
+	}
 	beforeSeq, ok := queryBeforeSeq(c)
 	if !ok {
 		return
@@ -292,6 +347,12 @@ func (d *Deps) handleListMessages(c *gin.Context) {
 }
 
 func (d *Deps) handleListToolCalls(c *gin.Context) {
+	if !d.requireChatPermission(c) {
+		return
+	}
+	if _, ok := d.ownedConversation(c, c.Param("id")); !ok {
+		return
+	}
 	beforeSeq, ok := queryBeforeSeq(c)
 	if !ok {
 		return
@@ -448,15 +509,17 @@ type replayStep struct {
 // handleConversationReplay 从持久化表（messages/tool_calls/approvals）
 // 重建会话的有序事件序列（契约 2.11 约定 4：不建回放表；仅 handler 内
 // 合并三表既有分页查询，不新增 store 方法）。权限同 messages 端点
-// （登录态；v1 单管理员，会话存在性即 ACL——不存在返回 404）。
+// （登录态；owner 或 audit:read 只读；其他用户 404，避免泄露存在性）。
 func (d *Deps) handleConversationReplay(c *gin.Context) {
 	if !d.requireStore(c) {
 		return
 	}
-	ctx := c.Request.Context()
+	// owner 或 audit:read；其他用户（含 approver）404。
+	if !authz.AuthorizeAny(c, d.authzDenied, authz.PermChat, authz.PermAudit) {
+		return
+	}
 	convID := c.Param("id")
-	if _, err := d.Store.Conversations().Get(ctx, convID); err != nil {
-		d.handleStoreError(c, err, apierr.NotFound)
+	if _, ok := d.replayConversation(c, convID); !ok {
 		return
 	}
 
@@ -865,9 +928,9 @@ func buildReplaySteps(msgs []store.Message, calls []store.ToolCall, aps []store.
 		ap := aps[i]
 		key := ap.RequestedAt.Format(time.RFC3339Nano) + ":" + ap.ID
 		command := ap.Command
-		if ap.EditedCommand != "" {
-			// 实际执行命令=edited ?? original（契约 3.4 六期约束，回放/
-			// 审计展示/UI 同源）。
+		// 契约 2.12：00012 起回放命令恒为实际执行的 approval.command；
+		// edited_command 仅对迁移前历史行（legacy）作只读展示。
+		if ap.Legacy && ap.EditedCommand != "" {
 			command = ap.EditedCommand
 		}
 		source := ap.Source
@@ -880,7 +943,7 @@ func buildReplaySteps(msgs []store.Message, calls []store.ToolCall, aps []store.
 			Source: &source, ServerName: &serverName, Command: &command,
 			RiskLevel: &riskLevel, Status: &status,
 		}
-		if ap.EditedCommand != "" {
+		if ap.Legacy && ap.EditedCommand != "" {
 			original := ap.Command
 			editedLevel := ap.EditedRiskLevel
 			step.OriginalCommand = &original

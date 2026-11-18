@@ -3,11 +3,30 @@ import { describe, expect, it } from 'vitest';
 import {
   describeChangePasswordFailure,
   describeFailure,
+  describeInviteFailure,
   describeLoginFailure,
   failureFromError,
   isSyntheticInternalFailure,
   makeFailure,
 } from './apiError';
+
+// RBAC 走查 sprint 2：邀请落地页的创建者自兑换（SELF_REDEEM_FORBIDDEN）
+// 必须显示中文可操作文案，不能回落后端英文原文。
+describe('describeInviteFailure（RBAC sprint 2）', () => {
+  it('SELF_REDEEM_FORBIDDEN：只显示中文，忽略后端英文 message', () => {
+    expect(
+      describeInviteFailure(
+        makeFailure('SELF_REDEEM_FORBIDDEN', 'token cannot be redeemed by its creator'),
+      ),
+    ).toBe('邀请链接不能由创建者本人兑换，请让受邀者在自己的设备或网络打开');
+  });
+
+  it('其他错误码：沿用通用 describeFailure（与邀请页原行为一致）', () => {
+    expect(describeInviteFailure(makeFailure('VALIDATION_FAILED', 'invalid email'))).toBe(
+      describeFailure(makeFailure('VALIDATION_FAILED', 'invalid email')),
+    );
+  });
+});
 
 // 第 4 轮打磨：describeFailure 过滤后端通用 store 映射透传的同义 message
 // （conflict / not found / …），只把有信息量的 message（如具体重名冲突）
@@ -219,19 +238,22 @@ describe('describeChangePasswordFailure 改密场景（冲刺 2 第 2 轮）', (
   });
 });
 
-// 冲刺 5 打磨：登录页用户名输入框 disabled 固定为内置 admin，唯一可输入
-// 凭据是管理员密码；AUTH_INVALID 在登录场景按 describeLoginFailure 改写为
-// 「管理员密码错误」，不再引导用户去找不存在的可编辑用户名字段。
-describe('describeLoginFailure 登录场景（冲刺 5）', () => {
-  it('AUTH_INVALID + "invalid credentials"：登录场景显示「管理员密码错误」', () => {
+// 00012 多用户：登录页用户名与密码都可输入，服务端对「用户不存在 /
+// 已停用 / 密码错误」统一返回 AUTH_INVALID；前端文案必须不区分这几类
+// 失败，否则会变成账号枚举通道。
+describe('describeLoginFailure 登录场景（00012 RBAC）', () => {
+  it('AUTH_INVALID + "invalid credentials"：统一显示「用户名或密码错误」', () => {
     expect(describeLoginFailure(makeFailure('AUTH_INVALID', 'invalid credentials'))).toBe(
-      '管理员密码错误',
+      '用户名或密码错误',
     );
   });
 
-  it('AUTH_INVALID + 带信息量 message：括号内保留底层原因', () => {
+  it('AUTH_INVALID 携带任何底层 message：不拼接、不区分用户不存在与密码错误', () => {
     expect(describeLoginFailure(makeFailure('AUTH_INVALID', 'auth backend says: nope'))).toBe(
-      '管理员密码错误（auth backend says: nope）',
+      '用户名或密码错误',
+    );
+    expect(describeLoginFailure(makeFailure('AUTH_INVALID', 'user not found'))).toBe(
+      '用户名或密码错误',
     );
   });
 
@@ -275,5 +297,42 @@ describe('isSyntheticInternalFailure（冲刺 7）', () => {
   it('其他错误码与登录页排除规则（AUTH_REQUIRED）无关：一律不是合成 INTERNAL', () => {
     expect(isSyntheticInternalFailure(makeFailure('AUTH_REQUIRED', 'login required'))).toBe(false);
     expect(isSyntheticInternalFailure(makeFailure('NETWORK_ERROR', 'HTTP 502'))).toBe(false);
+  });
+});
+
+// 第 9 轮走查 low：未配置 SMTP 时创建用户/重置密码恒 503。错误块必须
+// 告诉管理员要配置哪些环境变量（而不是只显示通用中文句 + 后端英文 detail）。
+describe('DELIVERY_UNAVAILABLE 可操作指引（第 9 轮）', () => {
+  it('给出 AIOPS_SMTP_* 配置项与 README 章节，不再拼接后端英文原文', () => {
+    const text = describeFailure(
+      makeFailure('DELIVERY_UNAVAILABLE', 'no delivery channel available'),
+    );
+    expect(text).toContain('AIOPS_SMTP_HOST');
+    expect(text).toContain('AIOPS_SMTP_PORT');
+    expect(text).toContain('AIOPS_SMTP_FROM');
+    expect(text).toContain('README');
+    expect(text).not.toContain('no delivery channel available');
+  });
+
+  it('投递失败（invite/reset delivery failed）同样只显示中文指引', () => {
+    const expected = describeFailure(
+      makeFailure('DELIVERY_UNAVAILABLE', 'no delivery channel available'),
+    );
+    expect(
+      describeFailure(
+        makeFailure(
+          'DELIVERY_UNAVAILABLE',
+          'invite delivery failed; the user was not created, retry is safe',
+        ),
+      ),
+    ).toBe(expected);
+    expect(
+      describeFailure(
+        makeFailure(
+          'DELIVERY_UNAVAILABLE',
+          'reset delivery failed; no session was revoked, retry is safe',
+        ),
+      ),
+    ).not.toContain('retry is safe');
   });
 });

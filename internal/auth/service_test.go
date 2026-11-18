@@ -117,11 +117,11 @@ func TestLoginAndAuthenticate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := svc.Login(context.Background(), "wrong", "1.2.3.4", "ua"); !errors.Is(err, ErrInvalidCredentials) {
+	if _, err := svc.Login(context.Background(), adminUsername, "wrong", "1.2.3.4", "ua"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("Login(wrong) error = %v, want ErrInvalidCredentials", err)
 	}
 
-	res, err := svc.Login(context.Background(), "secret-pw", "1.2.3.4", "ua")
+	res, err := svc.Login(context.Background(), adminUsername, "secret-pw", "1.2.3.4", "ua")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestAuthenticateExpiredDeletesSession(t *testing.T) {
 	if err := svc.EnsureAdmin(context.Background(), "pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := svc.Login(context.Background(), "pw", "", "")
+	res, err := svc.Login(context.Background(), adminUsername, "pw", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,8 +238,11 @@ type fakeStore struct {
 	users    map[string]store.User
 	sessions map[string]store.Session
 	settings map[string]store.Setting
-	inTx     bool
-	seq      int
+	tokens   map[string]store.UserToken
+	// tokenHashes 以 string(SHA-256) 索引 token id。
+	tokenHashes map[string]string
+	inTx        bool
+	seq         int
 }
 
 // sessionCount 带锁读取会话数（供 janitor 测试轮询）。
@@ -251,9 +254,11 @@ func (f *fakeStore) sessionCount() int {
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		users:    make(map[string]store.User),
-		sessions: make(map[string]store.Session),
-		settings: make(map[string]store.Setting),
+		users:       make(map[string]store.User),
+		sessions:    make(map[string]store.Session),
+		settings:    make(map[string]store.Setting),
+		tokens:      make(map[string]store.UserToken),
+		tokenHashes: make(map[string]string),
 	}
 }
 
@@ -278,17 +283,177 @@ func (u fakeUsers) Create(_ context.Context, p store.CreateUserParams) (store.Us
 	if _, ok := u.f.users[p.Username]; ok {
 		return store.User{}, store.ErrConflict
 	}
+	role := p.Role
+	if role == "" {
+		role = store.RoleOperator
+	}
 	u.f.seq++
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
 	user := store.User{
-		ID:           fmt.Sprintf("user-%d", u.f.seq),
-		Username:     p.Username,
-		PasswordHash: p.PasswordHash,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                 fmt.Sprintf("user-%d", u.f.seq),
+		Username:           p.Username,
+		PasswordHash:       p.PasswordHash,
+		Role:               role,
+		Enabled:            p.Enabled,
+		DisplayName:        p.DisplayName,
+		Email:              p.Email,
+		MustChangePassword: p.MustChangePassword,
+		CreatedBy:          p.CreatedBy,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 	u.f.users[p.Username] = user
 	return user, nil
+}
+
+func (u fakeUsers) List(_ context.Context, limit int) ([]store.User, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out := make([]store.User, 0, len(u.f.users))
+	for _, user := range u.f.users {
+		out = append(out, user)
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (u fakeUsers) Update(_ context.Context, id string, p store.UpdateUserParams) (store.User, error) {
+	for name, user := range u.f.users {
+		if user.ID != id {
+			continue
+		}
+		if p.Role != nil {
+			user.Role = *p.Role
+		}
+		if p.Enabled != nil {
+			user.Enabled = *p.Enabled
+		}
+		if p.DisplayName != nil {
+			user.DisplayName = *p.DisplayName
+		}
+		user.UpdatedAt = p.UpdatedAt
+		u.f.users[name] = user
+		return user, nil
+	}
+	return store.User{}, store.ErrNotFound
+}
+
+func (u fakeUsers) CountEnabledAdmins(context.Context) (int64, error) {
+	var n int64
+	for _, user := range u.f.users {
+		if user.Role == store.RoleAdmin && user.Enabled {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (u fakeUsers) CountEnabledApprovers(context.Context) (int64, error) {
+	var n int64
+	for _, user := range u.f.users {
+		if user.Enabled && (user.Role == store.RoleAdmin || user.Role == store.RoleApprover) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (u fakeUsers) SetMustChangePassword(_ context.Context, id string, mustChange bool, at time.Time) error {
+	for name, user := range u.f.users {
+		if user.ID == id {
+			user.MustChangePassword = mustChange
+			user.UpdatedAt = at
+			u.f.users[name] = user
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (u fakeUsers) UpdateLastLogin(_ context.Context, id string, at time.Time) error {
+	for name, user := range u.f.users {
+		if user.ID == id {
+			t := at
+			user.LastLoginAt = &t
+			u.f.users[name] = user
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
+func (u fakeUsers) CreateToken(_ context.Context, p store.CreateUserTokenParams) (store.UserToken, error) {
+	u.f.seq++
+	id := fmt.Sprintf("token-%d", u.f.seq)
+	now := p.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	token := store.UserToken{
+		ID:               id,
+		Kind:             p.Kind,
+		UserID:           p.UserID,
+		Username:         p.Username,
+		Email:            p.Email,
+		Role:             p.Role,
+		ExpiresAt:        p.ExpiresAt,
+		CreatedBy:        p.CreatedBy,
+		CreatorIP:        p.CreatorIP,
+		DeliveredChannel: p.DeliveredChannel,
+		CreatedAt:        now,
+	}
+	u.f.tokens[id] = token
+	u.f.tokenHashes[string(p.TokenHash)] = id
+	return token, nil
+}
+
+func (u fakeUsers) TokenByHash(_ context.Context, hash []byte) (store.UserToken, error) {
+	id, ok := u.f.tokenHashes[string(hash)]
+	if !ok {
+		return store.UserToken{}, store.ErrNotFound
+	}
+	return u.f.tokens[id], nil
+}
+
+func (u fakeUsers) MarkTokenUsed(_ context.Context, id string, at time.Time) (bool, error) {
+	token, ok := u.f.tokens[id]
+	if !ok || token.UsedAt != nil {
+		return false, nil
+	}
+	t := at
+	token.UsedAt = &t
+	u.f.tokens[id] = token
+	return true, nil
+}
+
+func (u fakeUsers) PendingInvite(_ context.Context, username string) (bool, error) {
+	for _, token := range u.f.tokens {
+		if token.Kind == store.UserTokenInvite && token.UsedAt == nil && token.Username == username {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (u fakeUsers) UnusedInviteToken(_ context.Context, username string) (bool, error) {
+	return u.PendingInvite(context.Background(), username)
+}
+
+func (u fakeUsers) RevokeUnusedInvites(_ context.Context, username string, at time.Time) (int64, error) {
+	var n int64
+	for id, token := range u.f.tokens {
+		if token.Kind != store.UserTokenInvite || token.UsedAt != nil || token.Username != username {
+			continue
+		}
+		t := at
+		token.UsedAt = &t
+		u.f.tokens[id] = token
+		n++
+	}
+	return n, nil
 }
 
 func (u fakeUsers) ByUsername(_ context.Context, username string) (store.User, error) {
@@ -362,6 +527,16 @@ func (s fakeSessions) ByTokenHash(_ context.Context, hash []byte) (store.Session
 		}
 	}
 	return store.Session{}, store.ErrNotFound
+}
+
+func (s fakeSessions) Get(_ context.Context, id string) (store.Session, error) {
+	s.f.mu.Lock()
+	defer s.f.mu.Unlock()
+	session, ok := s.f.sessions[id]
+	if !ok {
+		return store.Session{}, store.ErrNotFound
+	}
+	return session, nil
 }
 
 func (s fakeSessions) Touch(_ context.Context, id string, at time.Time) error {
@@ -444,7 +619,7 @@ func TestAuthenticateTouchesSession(t *testing.T) {
 	if err := svc.EnsureAdmin(context.Background(), "secret-pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := svc.Login(context.Background(), "secret-pw", "1.2.3.4", "ua")
+	res, err := svc.Login(context.Background(), adminUsername, "secret-pw", "1.2.3.4", "ua")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -489,7 +664,7 @@ func TestJanitorDeletesExpiredSessions(t *testing.T) {
 	if err := svc.EnsureAdmin(context.Background(), "secret-pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Login(context.Background(), "secret-pw", "1.2.3.4", "ua"); err != nil {
+	if _, err := svc.Login(context.Background(), adminUsername, "secret-pw", "1.2.3.4", "ua"); err != nil {
 		t.Fatal(err)
 	}
 	if st.sessionCount() != 1 {

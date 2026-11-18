@@ -158,13 +158,44 @@ const (
 	ApprovalExpired  ApprovalStatus = "expired"
 )
 
-// User 是唯一的 admin 账号。
+// Role 是 RBAC 角色（契约 12.1，落库值）；每用户恰一个角色。
+type Role string
+
+const (
+	RoleAdmin    Role = "admin"
+	RoleOperator Role = "operator"
+	RoleApprover Role = "approver"
+	RoleAuditor  Role = "auditor"
+)
+
+// Valid 报告角色是否为契约固定的四类之一。
+func (r Role) Valid() bool {
+	switch r {
+	case RoleAdmin, RoleOperator, RoleApprover, RoleAuditor:
+		return true
+	default:
+		return false
+	}
+}
+
+// User 是 RBAC 用户；每用户恰一个 role，enabled=false 表示停用。
+//
+// InvitePending 是派生字段（是否存在未使用的 invite token，含已过期——
+// 过期邀请同样需要「重发邀请」），不落列。
 type User struct {
-	ID           string    `json:"id"`
-	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                 string     `json:"id"`
+	Username           string     `json:"username"`
+	PasswordHash       string     `json:"-"`
+	Role               Role       `json:"role"`
+	Enabled            bool       `json:"enabled"`
+	DisplayName        string     `json:"display_name"`
+	Email              string     `json:"email"`
+	InvitePending      bool       `json:"invite_pending"`
+	MustChangePassword bool       `json:"must_change_password"`
+	CreatedBy          *string    `json:"created_by"`
+	LastLoginAt        *time.Time `json:"last_login_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // Session 是服务端会话；token 只存 SHA-256。
@@ -248,8 +279,11 @@ type Provider struct {
 
 // Conversation 是一次对话会话。
 type Conversation struct {
-	ID         string  `json:"id"`
-	Title      string  `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// UserID 是会话 owner（00012；conversations.user_id NOT NULL）。
+	// 非审计员的列表/读取在 SQL 或 handler 层按此过滤；API 不暴露该字段。
+	UserID     string  `json:"-"`
 	ProviderID *string `json:"provider_id"`
 	Model      string  `json:"model"`
 	// ApprovalMode 是会话级审批门限覆盖（六期 BE-P，契约 2.11 约定 1）：
@@ -351,12 +385,28 @@ type Approval struct {
 	DecidedAt      *time.Time     `json:"decided_at"`
 	DecidedBy      *string        `json:"decided_by"`
 	Note           string         `json:"note"`
-	// BE-P（六期）：decide 时用户改写。空串=未改写；执行与展示用改写后命令
-	//（edited_command != "" ? edited_command : command，回放/审计展示/UI 同源）。
+	// BE-P（六期）：decide 时用户改写（00012 起仅历史只读）。空串=未改写；
+	// 执行恒用 Command，edited_command 永不参与执行；仅历史行可做只读展示。
 	// 原 Command/RiskLevel/RuleID/Reason 是创建时事实，改写不回写。
 	EditedCommand   string `json:"edited_command"`
 	EditedRiskLevel string `json:"edited_risk_level"` // ''|safe|needs_approval（forbidden 在 decide 即被拒，不落库）
 	EditedRuleID    string `json:"edited_rule_id"`
+	// 00012：发起人与职责分离依据。RequestedBy 非空（approvals.requested_by
+	// NOT NULL）；RequestedByName 是 JOIN 派生，不落列。
+	RequestedBy     string `json:"requested_by"`
+	RequestedByName string `json:"requested_by_name"`
+	// Legacy 标记迁移前的历史行（仅用于豁免历史自审/改写）；应用不得写 true。
+	Legacy bool `json:"legacy"`
+	// BreakGlass 仅主机侧 `aiops break-glass` 可置 true。
+	BreakGlass bool `json:"break_glass"`
+	// 00012：JIT 终端/RDP grant（source=terminal 必填 grant_kind +
+	// grant_expires_at；consumed_at 为单次消费时间）。
+	GrantKind      *string    `json:"grant_kind"`
+	GrantExpiresAt *time.Time `json:"grant_expires_at"`
+	ConsumedAt     *time.Time `json:"consumed_at"`
+	// 00012：全局审批门限变更请求（source=policy）的不可变目标。
+	PolicyFrom *string `json:"policy_from"`
+	PolicyTo   *string `json:"policy_to"`
 }
 
 // AuditLog 是只追加审计记录。
@@ -375,6 +425,10 @@ type AuditLog struct {
 	Detail         json.RawMessage `json:"detail"`
 	PrevHash       string          `json:"prev_hash"`
 	Hash           string          `json:"hash"`
+	// LegacyHash 标记 00014 之前的存量行：其哈希用纳秒时间戳计算，
+	// timestamptz 已丢弃纳秒、无法复算，校验时只核对 prev_hash 链接。
+	// 内部字段，不对外暴露（新行恒为 false）。
+	LegacyHash bool `json:"-"`
 }
 
 // Setting 是键值配置。
@@ -576,11 +630,14 @@ type DiagnosisSession struct {
 	Status         DiagnosisStatus  `json:"status"`
 	Report         json.RawMessage  `json:"report"` // null 或 DiagnosisReport 对象
 	ErrorCode      string           `json:"error_code"`
-	StartedAt      *time.Time       `json:"started_at"`
-	FinishedAt     *time.Time       `json:"finished_at"`
-	ExpiresAt      time.Time        `json:"expires_at"`
-	CreatedAt      time.Time        `json:"created_at"`
-	UpdatedAt      time.Time        `json:"updated_at"`
+	// CreatedBy 是发起用户（00012）；NULL=系统（monitor 自动诊断）。
+	// 仅用于 owner-or-admin 判定，不进入 API 响应（schema additionalProperties=false）。
+	CreatedBy  *string    `json:"-"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // InspectionJob 是巡检任务。
@@ -595,8 +652,11 @@ type InspectionJob struct {
 	Enabled         bool               `json:"enabled"`
 	LastRunAt       *time.Time         `json:"last_run_at"`
 	NextRunAt       *time.Time         `json:"next_run_at"`
-	CreatedAt       time.Time          `json:"created_at"`
-	UpdatedAt       time.Time          `json:"updated_at"`
+	// CreatedBy 是创建用户（00012）；NULL=历史任务，仅 admin 可改。
+	// 仅用于 owner-or-admin 判定，不进入 API 响应。
+	CreatedBy *string   `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // InspectionReport 是一次巡检运行。Items 由 Get 装配。

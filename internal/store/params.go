@@ -5,16 +5,79 @@ import (
 	"time"
 )
 
-// CreateUserParams 是创建用户参数。
+// CreateUserParams 是创建用户参数。Role 为空时落默认角色（operator）；
+// Enabled=false 表示创建即停用（邀请未接受，登录一律 401）。
 type CreateUserParams struct {
-	Username     string
-	PasswordHash string
+	Username           string
+	PasswordHash       string
+	Role               Role
+	Enabled            bool
+	DisplayName        string
+	Email              string
+	MustChangePassword bool
+	CreatedBy          *string
 }
 
-// UpdatePasswordParams 是更新密码参数。
+// UpdateUserParams 是用户角色/启停/展示名/邮箱更新参数；nil 表示不修改。
+//
+// Email 只用于「同名未激活账号重发邀请」：管理员在创建表单里填了新邮箱时，
+// 账号行与投递目标必须同步更新，否则邀请会继续落到旧地址（第 9 轮走查
+// medium）。PATCH /api/users 不暴露该字段。
+type UpdateUserParams struct {
+	Role        *Role
+	Enabled     *bool
+	DisplayName *string
+	Email       *string
+	UpdatedAt   time.Time
+}
+
+// UpdatePasswordParams 是更新密码参数。MustChangePassword 为 nil 时不变。
 type UpdatePasswordParams struct {
-	PasswordHash string
-	UpdatedAt    time.Time
+	PasswordHash       string
+	MustChangePassword *bool
+	UpdatedAt          time.Time
+}
+
+// UserTokenKind 是一次性凭据 token 类型（user_tokens.kind）。
+type UserTokenKind string
+
+const (
+	UserTokenInvite UserTokenKind = "invite"
+	UserTokenReset  UserTokenKind = "reset"
+)
+
+// CreateUserTokenParams 是签发一次性 token 参数。token 明文不入库，只存 SHA-256。
+//
+// invite：UserID 为 nil（迁移 CHECK 要求），Username/Email/Role 必填；
+// reset：UserID 必填。
+type CreateUserTokenParams struct {
+	Kind             UserTokenKind
+	UserID           *string
+	Username         string
+	Email            string
+	Role             *Role
+	TokenHash        []byte
+	ExpiresAt        time.Time
+	CreatedBy        *string
+	CreatorIP        string
+	DeliveredChannel string
+	CreatedAt        time.Time
+}
+
+// UserToken 是一次性凭据 token（不含明文）。
+type UserToken struct {
+	ID               string
+	Kind             UserTokenKind
+	UserID           *string
+	Username         string
+	Email            string
+	Role             *Role
+	ExpiresAt        time.Time
+	UsedAt           *time.Time
+	CreatedBy        *string
+	CreatorIP        string
+	DeliveredChannel string
+	CreatedAt        time.Time
 }
 
 // CreateSessionParams 是创建会话参数。
@@ -138,6 +201,8 @@ type UpdateProviderParams struct {
 // CreateConversationParams 是创建会话参数。
 type CreateConversationParams struct {
 	Title string
+	// UserID 是会话 owner（00012，NOT NULL）；handler 取当前登录用户。
+	UserID string
 }
 
 // ConversationListCursor 是会话列表游标分页位置：上一页末条会话的
@@ -227,6 +292,16 @@ type CreateApprovalParams struct {
 	RequestID    string
 	ExpiresAt    time.Time
 	CreatedAt    time.Time
+	// RequestedBy 是实际发起人（00012，NOT NULL）：chat=会话 owner；
+	// console/诊断 fix=HTTP 用户；batch=batch_jobs.created_by；terminal/policy=请求用户。
+	// 空串时 store 回落到会话 owner，再回落到最早的用户（迁移 00012 的回填语义）。
+	RequestedBy string
+	// 00012：source=terminal 的 grant 元数据与 source=policy 的不可变目标。
+	// source 不匹配时忽略。
+	GrantKind      *string
+	GrantExpiresAt *time.Time
+	PolicyFrom     *string
+	PolicyTo       *string
 }
 
 // DecideApprovalParams 是 decide 参数（六期 BE-P 结构体化，原多参数签名
@@ -241,7 +316,10 @@ type DecideApprovalParams struct {
 	EditedCommand   string
 	EditedRiskLevel string // Service 内部分类结果；未改写为空串
 	EditedRuleID    string
-	DecidedAt       time.Time
+	// DecidedAt 同时是 TTL 兜底的比较时刻（postgres 的
+	// `expires_at > $5`）：approve/deny 必须传入非零决策时刻；expired
+	//（Cancel/重启收敛）不受该条件限制。
+	DecidedAt time.Time
 }
 
 // AuditFilter 是审计列表过滤条件。
@@ -345,6 +423,8 @@ type CreateDiagnosisParams struct {
 	ConversationID *string
 	Trigger        DiagnosisTrigger
 	ExpiresAt      time.Time
+	// CreatedBy 是发起用户（00012）；nil=系统自动诊断（monitor）。
+	CreatedBy *string
 }
 
 // UpdateDiagnosisStatusParams 是状态迁移（engine 专用；UpdateStatus 用 CAS
@@ -368,6 +448,8 @@ type CreateInspectionJobParams struct {
 	NotifyChannelID *string
 	Enabled         bool
 	NextRunAt       *time.Time // 由 handler 按 cron 计算
+	// CreatedBy 是创建用户（00012）；nil=历史/系统任务。
+	CreatedBy *string
 }
 
 // UpdateInspectionJobParams 是巡检任务更新（指针字段 nil=不改）。
@@ -460,9 +542,14 @@ type FinishBatchResultParams struct {
 // httpapi 传入 agent.ReplayActionTools()（11 个动作类工具名，7.8）——store
 // 不得内置名单。
 type ListReplayCatalogParams struct {
-	Query       string
-	HasActions  bool
-	Cursor      ConversationListCursor // 复用会话列表游标类型（last_message_at, id）
-	Limit       int
+	Query      string
+	HasActions bool
+	Cursor     ConversationListCursor // 复用会话列表游标类型（last_message_at, id）
+	Limit      int
+	// ActionTools 是动作类工具名白名单（httpapi 传 agent.ReplayActionTools()）。
 	ActionTools []string
+	// UserID 非空时在 SQL 内强制 c.user_id = 该用户（契约 12.3 第 3 条：
+	// 「GET /api/replays 对非 audit:read 在 SQL 中强制 user_id=自己」）。
+	// 空串表示不过滤（audit:read 的跨用户只读目录）。
+	UserID string
 }

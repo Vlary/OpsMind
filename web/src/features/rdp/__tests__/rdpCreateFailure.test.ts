@@ -9,14 +9,16 @@ import { makeFailure } from '../../../components/admin/apiError';
 import { describeRdpCreateFailure } from '../RdpPage';
 
 describe('describeRdpCreateFailure（RDP_SESSION_EXISTS 场景化文案）', () => {
-  it('解释收尾时序并引导稍候重试（对齐终端文案）', () => {
+  it('解释收尾时序并说明授权未被消耗（对齐终端文案）', () => {
     const text = describeRdpCreateFailure(
       makeFailure('RDP_SESSION_EXISTS', 'server already has an active rdp session'),
     );
     expect(text).toContain('已有活动 RDP 会话');
     expect(text).toContain('若您刚断开上一会话');
     expect(text).toContain('收尾');
-    expect(text).toContain('稍候重试');
+    // 第 4 轮走查 medium：409 不再消费 grant，文案不得引导到必然 403 的重试。
+    expect(text).toContain('本次授权未被消耗');
+    expect(text).toContain('无需重新申请');
   });
 
   it('其他错误码回落通用映射（保留底层原因拼接）', () => {

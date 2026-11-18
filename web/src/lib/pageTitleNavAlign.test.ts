@@ -35,13 +35,15 @@ describe('页面标题：导航与页面标题三层一致（契约 8.3.10）', 
 
   it('反向覆盖：公开页之外不存在导航里没有的页面名', () => {
     const labels = new Set(NAV_ITEMS.map((item) => item.label));
-    // 契约列出的两个例外：/login 公开页无导航项；/ 重定向到 /chat（同为「对话」）。
-    const exceptions = new Set(['登录']);
+    // 公开页例外：/login 与 /invite 无导航项；/ 重定向到 /chat（同为「对话」）。
+    const exceptions = new Set(['登录', '接受邀请']);
     const probes = [
       '/login',
+      '/invite',
       '/',
       '/chat',
       '/c/550e8400-e29b-41d4-a716-446655440000',
+      '/approvals',
       '/servers',
       '/databases',
       '/providers',
@@ -57,6 +59,7 @@ describe('页面标题：导航与页面标题三层一致（契约 8.3.10）', 
       '/replays',
       '/replays/550e8400-e29b-41d4-a716-446655440000',
       '/settings',
+      '/users',
       '/definitely-not-a-route',
     ];
     for (const path of probes) {

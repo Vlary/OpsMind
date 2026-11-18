@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { createApprovedGrant, expect, test, type Page } from './fixtures';
 import { AUTH_STATE_FILE } from './helpers';
 
 // 二期冲刺第 5 轮打磨的端到端验证（真链路：真后端 + 假 sshd，无 mock）：
@@ -41,11 +41,16 @@ interface SshdStatus {
   shells: number;
 }
 
-async function sshdStatus(): Promise<SshdStatus> {
-  const response = await fetch(`${FAKE_SSH_HTTP}/status`);
+/** 查询假 sshd 记录；user 对应 SSH 登录名（每用例唯一，隔离并行会话）。 */
+async function sshdStatus(user: string): Promise<SshdStatus> {
+  const response = await fetch(`${FAKE_SSH_HTTP}/status?user=${encodeURIComponent(user)}`);
   return (await response.json()) as SshdStatus;
 }
 
+/**
+ * 建一台指向假 sshd 的服务器。SSH 用户名 = 用例名：假 sshd 按用户名分桶
+ * 记录 PTY 尺寸，workers>1 时其它终端会话的 window-change 不会污染本用例。
+ */
 async function createSshServer(page: Page, name: string): Promise<{ id: string }> {
   const created = await page.request.post('/api/servers', {
     headers: { Origin: ORIGIN },
@@ -55,7 +60,7 @@ async function createSshServer(page: Page, name: string): Promise<{ id: string }
       port: FAKE_SSH_PORT,
       os: 'linux',
       auth_method: 'password',
-      username: 'e2e',
+      username: name,
       password: SSH_PASSWORD,
       auto_exec_enabled: false,
     },
@@ -79,12 +84,12 @@ function termRows(page: Page) {
   );
 }
 
-/** 轮询假 sshd 直到 PTY 最终尺寸等于期望行数（同步链路完成）。 */
-async function waitForPtyRows(page: Page, expectedRows: number, timeout = 15_000) {
+/** 轮询假 sshd 直到该 SSH 用户的 PTY 最终行数等于期望（同步链路完成）。 */
+async function waitForPtyRows(page: Page, user: string, expectedRows: number, timeout = 15_000) {
   const deadline = Date.now() + timeout;
   let status: SshdStatus | null = null;
   while (Date.now() < deadline) {
-    status = await sshdStatus();
+    status = await sshdStatus(user);
     if (status.final && status.final.rows === expectedRows) {
       return status;
     }
@@ -116,10 +121,12 @@ async function waitForTermRows(
 test.describe('终端 PTY 尺寸同步（真链路：假 sshd）', () => {
   test('挂载即上报视口尺寸；改窗口后 PTY 跟随（修复前永远停在 120×40）', async ({ page }) => {
     test.setTimeout(120_000);
-    await createSshServer(page, 'p2s5-sshd-sync');
+    const name = 'p2s5-sshd-sync';
+    const syncServer = await createSshServer(page, name);
+    await createApprovedGrant(page, syncServer.id, 'term');
     await fetch(`${FAKE_SSH_HTTP}/reset`, { method: 'POST' });
 
-    await selectServer(page, 'p2s5-sshd-sync');
+    await selectServer(page, name);
     await page.getByRole('button', { name: /打开终端/ }).click();
 
     // 假 sshd 的 banner 出现在 xterm：WS→PTY 双向链路建立（此前 mock
@@ -137,7 +144,7 @@ test.describe('终端 PTY 尺寸同步（真链路：假 sshd）', () => {
     // 到达（changes ≥ 1）——修复前 initial 恒为创建默认 120×40 且零
     // window-change，final.rows=40 ≠ 本地 xterm 行数。
     const domRows = await waitForTermRows(page, (rows) => rows > 0 && rows !== 40);
-    const synced = await waitForPtyRows(page, domRows);
+    const synced = await waitForPtyRows(page, name, domRows);
     expect(synced.final?.rows).toBe(domRows);
     expect(synced.changes.length).toBeGreaterThanOrEqual(1);
     expect(synced.initial).toEqual({ cols: 120, rows: 40 }); // 创建默认（缺陷形态的对照）
@@ -145,7 +152,7 @@ test.describe('终端 PTY 尺寸同步（真链路：假 sshd）', () => {
     // 改视口尺寸：本地 fit → resize 帧 → PTY window-change 跟随。
     await page.setViewportSize({ width: 1000, height: 520 });
     const domRowsAfter = await waitForTermRows(page, (rows) => rows !== domRows);
-    const resynced = await waitForPtyRows(page, domRowsAfter);
+    const resynced = await waitForPtyRows(page, name, domRowsAfter);
     expect(resynced.final?.rows).toBe(domRowsAfter);
     expect(resynced.changes.length).toBeGreaterThan(synced.changes.length);
 
@@ -162,7 +169,8 @@ test.describe('断开后会话列表录制大小占位（真链路）', () => {
     page,
   }) => {
     test.setTimeout(120_000);
-    await createSshServer(page, 'p2s5-sshd-size');
+    const sizeServer = await createSshServer(page, 'p2s5-sshd-size');
+    await createApprovedGrant(page, sizeServer.id, 'term');
     await selectServer(page, 'p2s5-sshd-size');
     await page.getByRole('button', { name: /打开终端/ }).click();
 

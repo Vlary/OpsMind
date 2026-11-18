@@ -54,6 +54,15 @@ func utc(t time.Time) time.Time {
 	return t.UTC()
 }
 
+// utcPtr 对可空时间做 UTC 归一化（nil 透传）。
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	v := utc(*t)
+	return &v
+}
+
 // optionalID 把空字符串转换为 nil（NULL::uuid 语义）。
 func optionalID(id string) *string {
 	if strings.TrimSpace(id) == "" {

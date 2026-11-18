@@ -2,6 +2,8 @@
 // 重试集合）。node 直测（__tests__/batchView.test.ts）。
 
 import type { components } from '../../api/schema';
+import { approvalDecisionState, type ApprovalDecisionState } from '../../lib/approvalDecision';
+import type { Permission } from '../../lib/rbacPermissions';
 
 export type BatchJob = components['schemas']['BatchJob'];
 export type BatchResult = components['schemas']['BatchResult'];
@@ -49,6 +51,30 @@ export function canCancelBatch(results: readonly BatchResult[]): boolean {
   return results.some(
     (result) => result.status === 'pending' || result.status === 'awaiting_approval',
   );
+}
+
+/**
+ * 批量待审批行的操作区状态（RBAC 00012 / 第 7 轮走查 medium）。
+ *
+ * 批量审批的 `requested_by` = `batch_jobs.created_by`（契约 12.3 第 5 条；
+ * `internal/batchx/service.go` 创建审批时显式传 requester），因此详情抽屉
+ * 无需逐行回取审批即可判定职责分离。`created_by` 为空（历史/system 行）
+ * 时失败关闭为 waiting——无法证明「第二人」就不渲染必然 403 的批准入口。
+ */
+export function batchApprovalDecisionState(input: {
+  createdBy: string | null;
+  permissions: readonly Permission[];
+  currentUserId: string;
+}): ApprovalDecisionState {
+  if (input.createdBy === null || input.createdBy === '') {
+    return 'waiting';
+  }
+  return approvalDecisionState({
+    status: 'pending',
+    permissions: input.permissions,
+    requestedBy: input.createdBy,
+    currentUserId: input.currentUserId,
+  });
 }
 
 /** 失败行集合（重试入口用）：failed / denied / expired / skipped——

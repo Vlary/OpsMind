@@ -18,6 +18,7 @@ import (
 
 	"aiops/internal/apierr"
 	"aiops/internal/auth"
+	"aiops/internal/authz"
 	"aiops/internal/store"
 	"aiops/internal/termx"
 )
@@ -41,10 +42,16 @@ const asciicastContentType = "application/x-asciicast"
 // Origin→Cookie→业务→子协议校验由 handler 自行完成（契约 6.4 写死顺序，
 // 不复用 GET 不覆盖的 originCheck，也不让 requireAuth 抢在 Origin 之前）。
 func (d *Deps) RegisterTermRoutes(protected, api *gin.RouterGroup) {
-	protected.POST("/term/sessions", d.handleCreateTermSession)
-	protected.GET("/term/sessions", d.handleListTermSessions)
-	protected.GET("/term/recordings", d.handleListTermRecordings)
-	protected.GET("/term/recordings/:id", d.handleDownloadTermRecording)
+	// 00012：JIT grant 申请（source=terminal，由他人批准后单次消费）。
+	d.guard(protected, http.MethodPost, "/term/grants", authz.PermTerminal, d.handleCreateTermGrant)
+	// 第 2 轮走查（low）：发起人可见的「已批准、待消费」授权列表（只返回本人）。
+	d.guard(protected, http.MethodGet, "/term/grants", authz.PermTerminal, d.handleListTermGrants)
+	d.guard(protected, http.MethodPost, "/term/sessions", authz.PermTerminal, d.handleCreateTermSession)
+	// 列表/录制对 auditor 跨用户只读（audit:read），owner 只看自己。
+	d.guardAny(protected, http.MethodGet, "/term/sessions", []authz.Permission{authz.PermTerminal, authz.PermAudit}, d.handleListTermSessions)
+	d.guardAny(protected, http.MethodGet, "/term/recordings", []authz.Permission{authz.PermTerminal, authz.PermAudit}, d.handleListTermRecordings)
+	d.guardAny(protected, http.MethodGet, "/term/recordings/:id", []authz.Permission{authz.PermTerminal, authz.PermAudit}, d.handleDownloadTermRecording)
+	// WS 端点挂裸 api 组：升级前 Origin→Cookie→权限→归属由 handler 手工完成。
 	api.GET("/term/sessions/:id/ws", d.handleTermSessionWS)
 }
 
@@ -54,8 +61,11 @@ func (d *Deps) RegisterTermRoutes(protected, api *gin.RouterGroup) {
 
 type termSessionCreateRequest struct {
 	ServerID string `json:"server_id"`
-	Cols     *int   `json:"cols"`
-	Rows     *int   `json:"rows"`
+	// GrantID 是已批准、未消费的 source=terminal/grant_kind=term 审批 id
+	//（00012：交互会话必须叠加他人批准的单次 grant）。
+	GrantID string `json:"grant_id"`
+	Cols    *int   `json:"cols"`
+	Rows    *int   `json:"rows"`
 }
 
 func (d *Deps) handleCreateTermSession(c *gin.Context) {
@@ -104,13 +114,49 @@ func (d *Deps) handleCreateTermSession(c *gin.Context) {
 			"telnet access has no terminal support")
 		return
 	}
+	// 认证方式能力先于 grant 消费判定：WinRM 无 PTY，请求本身不被支持，
+	// 不应白白烧掉一次已批准的 grant。
+	if server.AuthMethod == store.AuthMethodPasswordNTLM ||
+		server.AuthMethod == store.AuthMethodPasswordBasic {
+		writeAPIError(c, http.StatusBadRequest, apierr.TermUnsupported,
+			"auth method has no pty support")
+		return
+	}
 	if d.Term == nil {
 		writeError(c, apierr.Internal, "terminal manager unavailable")
 		return
 	}
+	// 契约 12.3 第 11 条：仅一个启用管理员/审批者时处于降级模式，不得开
+	// 终端（fail-closed，连 grant 都不消费）。
+	if !d.requireSecondApprover(c, authz.PermTerminal, "terminal.session") {
+		return
+	}
+	// 00012：交互会话必须叠加他人批准的单次 grant（职责分离）。
+	//
+	// 第 4 轮走查 medium：先做「同服务器已有活动会话」预检，再消费 grant。
+	// 此前消费在 Open 前完成，已有活动会话时 409 会烧掉一次刚批准的授权，
+	// 运维必须重新找审批人。预检只消除常见路径；Open 仍可能因并发/上限
+	// 失败，此时回滚 consumed_at（releaseTerminalGrant）保留可重试。
+	if active, cerr := d.Store.TerminalSessions().CountActiveByServer(c.Request.Context(), server.ID); cerr != nil {
+		d.logHandlerError(c, "term session precheck failed", cerr)
+		writeError(c, apierr.Internal, "internal server error")
+		return
+	} else if active > 0 {
+		writeAPIError(c, http.StatusConflict, apierr.TermSessionExists, "server already has an active session")
+		return
+	}
+	grant, ok := d.consumeTerminalGrant(c, req.GrantID, server.ID, "term")
+	if !ok {
+		return
+	}
 
-	session, err := d.Term.Open(c.Request.Context(), server, user.ID, cols, rows)
+	// 契约 12.3 第 13 条：记录发起会话的 auth session，logout 时精确关闭。
+	// grant.ID 同时落到会话行：WS 升级后 SSH 拨号失败时据此回滚本次消费
+	//（第 10 轮走查 medium，契约 12.3 第 12 条）。
+	session, err := d.Term.OpenForAuthSession(c.Request.Context(), server, user.ID,
+		c.GetString("auth_session_id"), grant.ID, cols, rows)
 	if err != nil {
+		d.releaseTerminalGrant(c, grant, "term")
 		d.writeTermOpenError(c, err)
 		return
 	}
@@ -166,6 +212,17 @@ func (d *Deps) handleListTermSessions(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.TermSessionNotFound)
 		return
 	}
+	// 契约 12.3 第 4 条：非 audit:read 强制只看自己的会话。
+	if !authz.Allowed(c, authz.PermAudit) {
+		me := c.GetString("user_id")
+		own := make([]store.TerminalSession, 0, len(items))
+		for _, it := range items {
+			if it.UserID == me {
+				own = append(own, it)
+			}
+		}
+		items = own
+	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
@@ -203,9 +260,14 @@ func (d *Deps) handleListTermRecordings(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.TermSessionNotFound)
 		return
 	}
+	auditor := authz.Allowed(c, authz.PermAudit)
+	me := c.GetString("user_id")
 	out := make([]termRecordingItem, 0, len(items))
 	for _, s := range items {
 		if !s.HasRecording {
+			continue
+		}
+		if !auditor && s.UserID != me {
 			continue
 		}
 		out = append(out, termRecordingItem{
@@ -240,6 +302,17 @@ func (d *Deps) handleDownloadTermRecording(c *gin.Context) {
 	if !session.HasRecording {
 		writeAPIError(c, http.StatusNotFound, apierr.RecordingNotFound, "session has no recording")
 		return
+	}
+	// 契约 12.3 第 4 条：owner 或 auditor；其他用户一律 404（不泄露存在性）。
+	me := c.GetString("user_id")
+	if session.UserID != me {
+		if !authz.Allowed(c, authz.PermAudit) {
+			writeAPIError(c, http.StatusNotFound, apierr.RecordingNotFound, "recording not found")
+			return
+		}
+		d.auditEvent(c, "session.recording_download", "terminal_session", session.ID, map[string]any{
+			"owner_id": session.UserID, "server_id": session.ServerID,
+		})
 	}
 	dir := d.recordingsDir()
 	// 文件名即会话 UUID（DB 行校验过的 <uuid>.cast，无用户可控拼接）。
@@ -332,7 +405,7 @@ func (d *Deps) handleTermSessionWS(c *gin.Context) {
 		writeError(c, apierr.AuthRequired, "authentication required")
 		return
 	}
-	user, err := d.Auth.Authenticate(c.Request.Context(), raw)
+	user, authSession, err := d.Auth.AuthenticateSession(c.Request.Context(), raw)
 	if err != nil {
 		if errors.Is(err, auth.ErrAuthRequired) {
 			writeError(c, apierr.AuthRequired, "authentication required")
@@ -340,6 +413,11 @@ func (d *Deps) handleTermSessionWS(c *gin.Context) {
 		}
 		d.logHandlerError(c, "authenticate failed", err)
 		writeError(c, apierr.Internal, "internal server error")
+		return
+	}
+	// must_change 门在 WS 手工鉴权路径同样生效（契约 12.3 第 2 条三处共用）。
+	if user.MustChangePassword {
+		writeErrorStatus(c, http.StatusForbidden, "PASSWORD_CHANGE_REQUIRED", "password change required")
 		return
 	}
 	// 3. 业务校验：会话存在且 active 且属于当前用户。
@@ -357,12 +435,17 @@ func (d *Deps) handleTermSessionWS(c *gin.Context) {
 		d.handleStoreError(c, err, apierr.TermSessionNotFound)
 		return
 	}
+	if !authz.Has(user.Role, authz.PermTerminal) {
+		d.writeForbidden(c, user, authz.PermTerminal)
+		return
+	}
 	if session.Status != store.SessionActive {
 		writeAPIError(c, http.StatusConflict, apierr.Conflict, "session is not active")
 		return
 	}
-	if session.Username != user.Username {
-		writeAPIError(c, http.StatusConflict, apierr.Conflict, "session belongs to another user")
+	// 非 owner 一律 404（不泄露会话存在性；契约 12.3 第 4 条）。
+	if session.UserID != user.ID {
+		writeAPIError(c, http.StatusNotFound, apierr.TermSessionNotFound, "session not found")
 		return
 	}
 	// 4. 子协议必须是 opsmind-term-v1。
@@ -397,7 +480,14 @@ func (d *Deps) handleTermSessionWS(c *gin.Context) {
 		return
 	}
 	// Attach 内部完成 PTY 拨号与完整生命周期收尾；连接由 termx 关闭。
-	if err := d.Term.Attach(conn, session.ID, user.ID, requestIDOf(c), d.requestIP(c), target); err != nil {
+	if err := d.Term.AttachForAuthSession(conn, session.ID, user.ID, authSession.ID, requestIDOf(c), d.requestIP(c), target); err != nil {
+		if errors.Is(err, termx.ErrConnectFailed) {
+			// 拨号失败：manager 已写 error/closed 帧、把会话行收尾为 error
+			// 并关闭连接。此处只回滚创建会话时消费的 grant，授权保留可重试
+			//（契约 12.3 第 12 条）。
+			d.releaseTerminalGrantByID(c, session.GrantID, user.ID, "term")
+			return
+		}
 		// 升级已完成的失败：错误帧 + closed 帧（契约 6.4 生命周期）。
 		if errors.Is(err, termx.ErrNotActive) {
 			_ = conn.WriteJSON(termx.Frame{Type: "error", Code: apierr.Conflict, Message: "session is not active"})

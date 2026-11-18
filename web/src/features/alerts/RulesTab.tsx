@@ -21,6 +21,8 @@ import { formatDateTime } from '../../components/admin/format';
 import CopyButton from '../../components/CopyButton';
 import EmptyState from '../../components/EmptyState';
 import { message } from '../../components/antdMessage';
+import { hasAnyPermission, PERMS } from '../../lib/rbacPermissions';
+import { usePermissions } from '../auth/useMe';
 
 import { METRIC_LABELS, ruleDisplayName, SEVERITY_LABELS } from './ruleForm';
 import { describePhase5Failure } from './phase5Codes';
@@ -41,6 +43,10 @@ export interface RulesTabProps {
 
 export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
   const queryClient = useQueryClient();
+  // RBAC 走查 sprint 1（medium）：规则的新建/编辑/删除/启停均要求
+  // alerts:write（后端 authz.PermAlertConfig），只读角色不渲染入口。
+  const permissions = usePermissions();
+  const canConfigure = hasAnyPermission(permissions, [PERMS.alertsWrite]);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -187,53 +193,59 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
       title: '启用',
       dataIndex: 'enabled',
       width: 72,
-      render: (enabled: boolean, rule) => (
-        <Switch
-          size="small"
-          checked={enabled}
-          loading={togglingId === rule.id}
-          onChange={(checked) => {
-            toggleMutation.mutate({ rule, enabled: checked });
-          }}
-          aria-label={`启用规则 ${rule.name}`}
-        />
-      ),
+      render: (enabled: boolean, rule) =>
+        canConfigure ? (
+          <Switch
+            size="small"
+            checked={enabled}
+            loading={togglingId === rule.id}
+            onChange={(checked) => {
+              toggleMutation.mutate({ rule, enabled: checked });
+            }}
+            aria-label={`启用规则 ${rule.name}`}
+          />
+        ) : (
+          <Tag color={enabled ? 'green' : 'default'}>{enabled ? '已启用' : '已停用'}</Tag>
+        ),
     },
     {
       title: '操作',
       key: 'actions',
       width: 96,
-      render: (_, rule) => (
-        <Space size={0}>
-          <Button
-            size="small"
-            type="text"
-            icon={<EditOutlined />}
-            aria-label={`编辑规则 ${rule.name}`}
-            onClick={() => {
-              onEdit(rule);
-            }}
-          />
-          <Popconfirm
-            title="删除规则"
-            description={`确定删除「${ruleDisplayName(rule.name)}」？关联事件将级联删除。`}
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => {
-              deleteMutation.mutate(rule.id);
-            }}
-          >
+      render: (_, rule) =>
+        canConfigure ? (
+          <Space size={0}>
             <Button
               size="small"
               type="text"
-              danger
-              icon={<DeleteOutlined />}
-              aria-label={`删除规则 ${rule.name}`}
-              loading={deletingId === rule.id}
+              icon={<EditOutlined />}
+              aria-label={`编辑规则 ${rule.name}`}
+              onClick={() => {
+                onEdit(rule);
+              }}
             />
-          </Popconfirm>
-        </Space>
-      ),
+            <Popconfirm
+              title="删除规则"
+              description={`确定删除「${ruleDisplayName(rule.name)}」？关联事件将级联删除。`}
+              okText="删除"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => {
+                deleteMutation.mutate(rule.id);
+              }}
+            >
+              <Button
+                size="small"
+                type="text"
+                danger
+                icon={<DeleteOutlined />}
+                aria-label={`删除规则 ${rule.name}`}
+                loading={deletingId === rule.id}
+              />
+            </Popconfirm>
+          </Space>
+        ) : (
+          <Typography.Text type="secondary">只读</Typography.Text>
+        ),
     },
   ];
 
@@ -251,9 +263,13 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
   return (
     <Flex vertical gap={12}>
       <Flex justify="flex-end">
-        <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>
-          新建规则
-        </Button>
+        {canConfigure ? (
+          <Button type="primary" icon={<PlusOutlined />} onClick={onCreate}>
+            新建规则
+          </Button>
+        ) : (
+          <Typography.Text type="secondary">当前角色只读，不能新建或修改规则</Typography.Text>
+        )}
       </Flex>
       <Table<AlertRule>
         rowKey="id"

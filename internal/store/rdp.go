@@ -11,9 +11,11 @@ import (
 
 // RdpSession 是堡垒机式 RDP 网关会话（guacd 边车，凭据仅存在于 Go 侧握手）。
 type RdpSession struct {
-	ID             string                   `json:"id"`
-	ServerID       string                   `json:"server_id"`
-	ServerName     string                   `json:"server_name"`
+	ID         string `json:"id"`
+	ServerID   string `json:"server_id"`
+	ServerName string `json:"server_name"`
+	// UserID 是会话 owner（00012）；列表/WS 归属校验用，不进入 API 响应。
+	UserID         string                   `json:"-"`
 	Width          int                      `json:"width"`
 	Height         int                      `json:"height"`
 	DPI            int                      `json:"dpi"`

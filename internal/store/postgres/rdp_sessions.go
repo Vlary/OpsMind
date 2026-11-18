@@ -27,7 +27,7 @@ type rdpSessionStore struct{ q querier }
 // RdpSessions 挂载 RDP 会话仓储（方法定义在本文件，避免多人编辑 store.go）。
 func (s *Store) RdpSessions() store.RdpSessionStore { return rdpSessionStore{q: s.q} }
 
-const rdpSessionColumns = `t.id::text, t.server_id::text, coalesce(s.name, ''),
+const rdpSessionColumns = `t.id::text, t.server_id::text, coalesce(s.name, ''), t.user_id::text,
 	t.width, t.height, t.dpi, t.status, t.ended_reason, t.recording_file,
 	t.bytes_written, t.started_at, t.last_activity_at, t.ended_at,
 	t.created_at, t.updated_at`
@@ -40,7 +40,7 @@ const rdpSessionFrom = ` FROM rdp_sessions t` + rdpSessionJoin
 
 func scanRdpSession(row pgx.Row) (store.RdpSession, error) {
 	var t store.RdpSession
-	err := row.Scan(&t.ID, &t.ServerID, &t.ServerName,
+	err := row.Scan(&t.ID, &t.ServerID, &t.ServerName, &t.UserID,
 		&t.Width, &t.Height, &t.DPI, &t.Status, &t.EndedReason, &t.RecordingFile,
 		&t.BytesWritten, &t.StartedAt, &t.LastActivityAt, &t.EndedAt,
 		&t.CreatedAt, &t.UpdatedAt)

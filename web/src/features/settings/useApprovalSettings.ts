@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import { qk } from '../../api/queryKeys';
 import type { components } from '../../api/schema';
+import { ApiRequestError, toApiFailure } from '../../components/admin/apiError';
 import { message } from '../../components/antdMessage';
 import { approvalModeLabel } from '../../components/approvalMode';
 
@@ -35,16 +36,22 @@ export function useUpdateGlobalApprovalMode() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (mode: ApprovalMode) => {
-      const { data, error } = await api.PUT('/api/settings', {
+      const { data, error, response } = await api.PUT('/api/settings', {
         params: { header: { Origin: window.location.origin } },
         body: { approval_mode: mode },
       });
       if (error) {
-        throw error;
+        throw new ApiRequestError(toApiFailure(error, response));
       }
       return data;
     },
     onSuccess: (result) => {
+      // 00012：放宽门限返回 202（pending_approval），settings 未变更；
+      // 收紧/同档返回 200 直接生效。
+      if ('pending_approval' in result) {
+        message.info('放宽审批门限已提交给第二位审批者，批准后生效。');
+        return;
+      }
       message.success(`全局审批门限已设为「${approvalModeLabel(result.approval_mode)}」`);
       void queryClient.invalidateQueries({ queryKey: qk.settings });
       void queryClient.invalidateQueries({ queryKey: qk.conversations });

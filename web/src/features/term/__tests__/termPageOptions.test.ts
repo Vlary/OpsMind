@@ -86,13 +86,16 @@ describe('termServerOptionLabel（走查 C2）', () => {
 });
 
 describe('describeTermCreateFailure（走查 A3）', () => {
-  it('TERM_SESSION_EXISTS 解释收尾时序并引导稍候重试', () => {
+  it('TERM_SESSION_EXISTS 解释收尾时序并说明授权未被消耗', () => {
     const text = describeTermCreateFailure(
       makeFailure('TERM_SESSION_EXISTS', 'server already has an active session'),
     );
     expect(text).toContain('已有活动终端会话');
     expect(text).toContain('收尾');
-    expect(text).toContain('稍候重试');
+    // 第 4 轮走查 medium：409 在 grant 消费前判定，文案不得再引导用户
+    // 「稍候重试」到必然 403 的路径，而应明确授权未消耗、无需重新申请。
+    expect(text).toContain('本次授权未被消耗');
+    expect(text).toContain('无需重新申请');
   });
 
   it('其他错误码回落通用映射（保留底层原因拼接）', () => {

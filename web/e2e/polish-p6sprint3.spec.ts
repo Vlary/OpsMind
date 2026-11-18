@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import { AUTH_STATE_FILE, conversationIdOf, sendMessage, SCENARIO_LIST } from './helpers';
 
 // 六期打磨 sprint 3 走查修复的端到端断言（真实后端 + 假 LLM + 假 sshd +
@@ -171,8 +171,8 @@ test.describe('六期打磨 sprint 3：审批门限下拉可访问名', () => {
 // ---------------------------------------------------------------------------
 // 4. 批量详情「编辑命令」真实链路
 // ---------------------------------------------------------------------------
-test.describe('六期打磨 sprint 3：批量详情可编辑命令并批准', () => {
-  test('待审批行「编辑」→ 改写为 uptime → 保存并批准：执行改写后命令', async ({ page }) => {
+test.describe('六期打磨 sprint 3：批量详情编辑入口（00012 起只读）', () => {
+  test('待审批行「编辑」→ 只读原命令 → 批准原命令执行 uptime（禁止改写）', async ({ page }) => {
     // 建一台指向假 sshd 的服务器（auto_exec=false → 批量逐台落审批）。
     const name = `e2e-batch-edit-${Date.now()}`;
     const created = await page.request.post('/api/servers', {
@@ -208,32 +208,36 @@ test.describe('六期打磨 sprint 3：批量详情可编辑命令并批准', ()
     const drawer = page.getByRole('dialog');
     await expect(drawer.getByText('批量任务详情')).toBeVisible({ timeout: 30_000 });
     await expect(drawer.getByText('待审批').first()).toBeVisible({ timeout: 30_000 });
-    await drawer.getByRole('button', { name: /编\s*辑/ }).first().click();
+    await drawer
+      .getByRole('button', { name: /查\s*看/ })
+      .first()
+      .click();
 
-    // 编辑弹窗：预填原命令，改写为 whoami 后「保存并批准」。
-    const modal = page.locator('.ant-modal').filter({ hasText: '编辑命令并批准' });
+    // 00012 定稿：编辑弹窗只读展示原命令，不再提供改写框。
+    const modal = page.locator('.ant-modal').filter({ hasText: '查看命令并批准' });
     await expect(modal).toBeVisible();
-    const editor = modal.getByLabel('改写命令');
-    await expect(editor).toHaveValue('uptime');
-    await editor.fill('whoami');
-    await expect(modal.getByText('改写后风险：')).toBeVisible({ timeout: 10_000 });
-    await modal.getByRole('button', { name: /保存并批准/ }).click();
+    await expect(
+      modal.getByText('本版本不支持审批时改写命令。如需修改，请拒绝后由发起人重新发起'),
+    ).toBeVisible();
+    await expect(modal.getByLabel('改写命令')).toHaveCount(0);
+    await modal.getByRole('button', { name: '批准原命令' }).click();
 
-    // 审批已按改写后命令执行：假 sshd 拒绝 exec（夹具只服务终端 PTY），
-    // 因此 result 是通道失败终态——关键事实是**下发的是 whoami**。
+    // 审批按原命令 uptime 执行：假 sshd 拒绝 exec（夹具只服务终端 PTY），
+    // 因此 result 是通道失败终态——关键事实是**下发的是原命令**。
     await expect(drawer.getByText('执行失败').first()).toBeVisible({ timeout: 30_000 });
 
-    // 假 sshd 控制端：改写后的命令确实被送达通道（execs 是全局聚合——监控
+    // 假 sshd 控制端：原命令确实被送达通道（execs 是全局聚合——监控
     // 采集器也会对同一台服务器执行采集模板，因此只做正向断言）。
     const statusResponse = await page.request.get('http://127.0.0.1:18084/status');
     expect(statusResponse.ok()).toBeTruthy();
     const fakeSshd = (await statusResponse.json()) as { execs?: string[] };
     // exec 命令可能带 Windows PowerShell 包装前缀（linux 无包装，逐字节即
-    // 改写后命令）；用包含断言兼容通道层包装差异。
-    expect((fakeSshd.execs ?? []).some((item) => item.includes('whoami'))).toBe(true);
+    // 审批原命令）；用包含断言兼容通道层包装差异。
+    expect((fakeSshd.execs ?? []).some((item) => item.includes('uptime'))).toBe(true);
+    expect((fakeSshd.execs ?? []).some((item) => item.includes('whoami'))).toBe(false);
 
-    // API 侧：approval.edited_command=whoami、批量结果落通道失败但规则/级别
-    // 来自改写后命令的分类快照。
+    // API 侧：approval.edited_command 恒为空、command 为原命令；批量结果落
+    // 通道失败，规则/级别来自原命令的分类快照。
     const jobsResponse = await page.request.get('/api/batch/jobs', { params: { limit: 50 } });
     expect(jobsResponse.ok()).toBeTruthy();
     const jobs = (await jobsResponse.json()) as {
@@ -261,9 +265,7 @@ test.describe('六期打磨 sprint 3：批量详情可编辑命令并批准', ()
     expect(row?.error_code).toBe('SSH_EXEC_FAILED');
     // Gap1 回归：审批路径的 risk_level 来自分类快照（uptime 为 safe）。
     expect(row?.risk_level).toBe('safe');
-    const approvalResponse = await page.request.get(
-      `/api/approvals/${row?.approval_id ?? ''}`,
-    );
+    const approvalResponse = await page.request.get(`/api/approvals/${row?.approval_id ?? ''}`);
     expect(approvalResponse.ok()).toBeTruthy();
     const approval = (await approvalResponse.json()) as {
       command: string;
@@ -271,7 +273,7 @@ test.describe('六期打磨 sprint 3：批量详情可编辑命令并批准', ()
       status: string;
     };
     expect(approval.command).toBe('uptime');
-    expect(approval.edited_command).toBe('whoami');
+    expect(approval.edited_command).toBe('');
     expect(approval.status).toBe('approved');
   });
 });

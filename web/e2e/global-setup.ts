@@ -17,6 +17,7 @@
 // teardown：反向清理全部进程、临时目录与数据库。
 
 import { spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -44,6 +45,19 @@ const ADMIN_PASSWORD = 'e2e-admin-pass-123';
 const BACKEND_BIN = '/tmp/aiops-e2e';
 const FAKE_SSHD_BIN = '/tmp/aiops-e2e-fakesshd';
 const AUTH_STATE_FILE = path.join(here, '.auth', 'user.json');
+// RBAC（00012）：审批职责分离要求审批人 ≠ 发起人。e2e 页面会话是 admin
+// （会话/批量任务的发起人），审批动作由独立 reviewer 账号完成；测试通过
+// fixtures.ts 的 decide 路由注入 reviewer Cookie 模拟「第二个人批准」。
+const APPROVER_USERNAME = 'reviewer';
+const APPROVER_STATE_FILE = path.join(here, '.auth', 'reviewer.json');
+// 运维工程师/审计员视图（RBAC 走查 sprint 1）：验证页面入口按权限收敛与
+// 审计员只读提示。
+const OPERATOR_STATE_FILE = path.join(here, '.auth', 'operator.json');
+// 第二管理员：RBAC 第 1 轮走查后「仅一个启用管理员」会进入降级模式
+// （不能审批/开终端/放宽 policy）。e2e 的审批与终端用例需要非降级部署，
+// 因此启动时播种一个第二管理员（不用于页面登录，只满足第二人条件）。
+const SECOND_ADMIN_USERNAME = 'second-admin';
+const AUDITOR_STATE_FILE = path.join(here, '.auth', 'auditor.json');
 
 interface Child {
   proc: ReturnType<typeof spawn>;
@@ -318,7 +332,10 @@ async function api(method: string, path: string, body: unknown, cookie?: string)
 }
 
 async function seed() {
-  const login = await api('POST', '/api/auth/login', { password: ADMIN_PASSWORD });
+  const login = await api('POST', '/api/auth/login', {
+    username: 'admin',
+    password: ADMIN_PASSWORD,
+  });
   const session = login.setCookie
     .find((value) => value.startsWith('opsmind_session='))
     ?.split(';')[0];
@@ -384,6 +401,158 @@ async function seed() {
   const providerId = JSON.parse(provider.text || '{}').id;
   const serverId = JSON.parse(server.text || '{}').id;
   console.log(`[setup] seeded provider=${providerId} server=${serverId}`);
+}
+
+// seedRoleUser 创建指定角色用户并写入独立会话 storageState。
+//
+// 直接 SQL 插入 users 行：用户管理 API 只签发邀请 token（需外部投递通道），
+// 无法在 e2e 中拿到最终密码。这里复用 admin 的 bcrypt hash（同一
+// ADMIN_PASSWORD），与 seed 的固定密码语义一致。
+//
+// RBAC 走查 sprint 1：除审批者外再播种运维工程师（operator）与审计员
+// （auditor），用于验证页面入口按权限收敛、审计员只读提示。
+async function seedRoleUser(input: {
+  username: string;
+  role: string;
+  stateFile: string;
+  label: string;
+}) {
+  await run(
+    'docker',
+    [
+      'compose',
+      'exec',
+      '-T',
+      'db',
+      'psql',
+      '-U',
+      'aiops',
+      '-d',
+      E2E_DATABASE,
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-c',
+      `INSERT INTO users (username, password_hash, role, enabled, display_name)
+         SELECT '${input.username}', password_hash, '${input.role}', true, '${input.username}'
+         FROM users WHERE username = 'admin'
+       ON CONFLICT (username) DO UPDATE
+         SET password_hash = EXCLUDED.password_hash,
+             role = EXCLUDED.role,
+             enabled = true`,
+    ],
+    { cwd: repoRoot },
+  );
+  // 直接插入 sessions 行而不是调用 /api/auth/login：登录限流为按 IP
+  // 5 次/12s，setup 里再为每个角色登录一次会挤占 auth.spec 的配额。
+  // token 规则与 internal/auth/token.go 一致：base64url(random 32B)，
+  // 库里只存 SHA-256。
+  const value = randomBytes(32).toString('base64url');
+  const tokenHash = createHash('sha256').update(value).digest('hex');
+  await run(
+    'docker',
+    [
+      'compose',
+      'exec',
+      '-T',
+      'db',
+      'psql',
+      '-U',
+      'aiops',
+      '-d',
+      E2E_DATABASE,
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-c',
+      `INSERT INTO sessions (user_id, token_hash, expires_at, last_seen_at)
+         SELECT id, decode('${tokenHash}', 'hex'), now() + interval '12 hours', now()
+         FROM users WHERE username = '${input.username}'`,
+    ],
+    { cwd: repoRoot },
+  );
+  mkdirSync(path.dirname(input.stateFile), { recursive: true });
+  writeFileSync(
+    input.stateFile,
+    JSON.stringify(
+      {
+        cookies: [
+          {
+            name: 'opsmind_session',
+            value,
+            domain: 'localhost',
+            path: '/',
+            expires: -1,
+            httpOnly: true,
+            secure: false,
+            sameSite: 'Lax',
+          },
+        ],
+        origins: [],
+      },
+      null,
+      2,
+    ),
+  );
+  console.log(`[setup] ${input.label} ${input.username} seeded`);
+}
+
+async function seedApprover() {
+  await seedRoleUser({
+    username: APPROVER_USERNAME,
+    role: 'approver',
+    stateFile: APPROVER_STATE_FILE,
+    label: 'reviewer',
+  });
+}
+
+async function seedOperator() {
+  await seedRoleUser({
+    username: 'operator',
+    role: 'operator',
+    stateFile: OPERATOR_STATE_FILE,
+    label: 'operator',
+  });
+}
+
+// seedSecondAdmin 播种第二个启用管理员：契约 12.3 第 11/25 条下，仅一个
+// 启用管理员时系统进入降级模式（不能审批、不能开终端/RDP、不能放宽 policy）。
+// e2e 覆盖的是正常双人部署，因此必须满足「至少两个启用管理员」这一前提。
+// 该账号不用于页面登录，只满足第二人条件（密码哈希与 admin 相同）。
+async function seedSecondAdmin() {
+  await run(
+    'docker',
+    [
+      'compose',
+      'exec',
+      '-T',
+      'db',
+      'psql',
+      '-U',
+      'aiops',
+      '-d',
+      E2E_DATABASE,
+      '-v',
+      'ON_ERROR_STOP=1',
+      '-c',
+      `INSERT INTO users (username, password_hash, role, enabled, display_name)
+         SELECT '${SECOND_ADMIN_USERNAME}', password_hash, 'admin', true, '第二管理员'
+         FROM users WHERE username = 'admin'
+       ON CONFLICT (username) DO UPDATE
+         SET password_hash = EXCLUDED.password_hash,
+             role = 'admin',
+             enabled = true`,
+    ],
+    { cwd: repoRoot },
+  );
+  console.log(`[setup] second admin ${SECOND_ADMIN_USERNAME} seeded`);
+}
+
+async function seedAuditor() {
+  await seedRoleUser({
+    username: 'auditor',
+    role: 'auditor',
+    stateFile: AUDITOR_STATE_FILE,
+    label: 'auditor',
+  });
 }
 
 export default async function globalSetup() {
@@ -453,6 +622,11 @@ export default async function globalSetup() {
       () => httpOk(`${BACKEND_URL}/healthz`),
       60_000,
     );
+
+    await seedSecondAdmin();
+    await seedApprover();
+    await seedOperator();
+    await seedAuditor();
 
     const preview = startBackground(
       'vite-preview',

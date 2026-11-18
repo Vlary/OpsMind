@@ -32,14 +32,19 @@ type errUsersStore struct {
 	forceCountAfterFirst bool
 }
 
-func (f *errUsersStore) Users() store.UserStore { return errUsers{f} }
+func (f *errUsersStore) Users() store.UserStore {
+	return errUsers{UserStore: f.fakeStore.Users(), s: f}
+}
 
 // WithTx 把包装后的 store 传给事务回调，保证覆盖的方法在事务内同样生效。
 func (f *errUsersStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	return fn(f)
 }
 
-type errUsers struct{ s *errUsersStore }
+type errUsers struct {
+	store.UserStore
+	s *errUsersStore
+}
 
 func (u errUsers) Count(ctx context.Context) (int64, error) {
 	if err := u.s.countErr; err != nil {
@@ -98,6 +103,9 @@ func (s errSessions) ByTokenHash(ctx context.Context, hash []byte) (store.Sessio
 		return store.Session{}, err
 	}
 	return s.s.fakeStore.Sessions().ByTokenHash(ctx, hash)
+}
+func (s errSessions) Get(ctx context.Context, id string) (store.Session, error) {
+	return s.s.fakeStore.Sessions().Get(ctx, id)
 }
 func (s errSessions) Touch(ctx context.Context, id string, at time.Time) error {
 	return s.s.fakeStore.Sessions().Touch(ctx, id, at)
@@ -197,7 +205,7 @@ func itoa(n int) string {
 // 用户不存在时 Login 仍对 dummy hash 做一次同成本 bcrypt（时间侧信道防护）。
 func TestLoginWithMissingUserRunsDummyVerify(t *testing.T) {
 	svc := NewService(newFakeStore(), Config{SessionTTL: time.Hour, Clock: time.Now})
-	_, err := svc.Login(context.Background(), "whatever", "1.2.3.4", "ua")
+	_, err := svc.Login(context.Background(), "ghost", "whatever", "1.2.3.4", "ua")
 	if !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
 	}
@@ -215,13 +223,13 @@ func TestLoginStoreErrors(t *testing.T) {
 
 	dbErr := errors.New("db unavailable")
 	st := &errUsersStore{fakeStore: base, byUsernameErr: dbErr}
-	_, err := NewService(st, Config{SessionTTL: time.Hour}).Login(context.Background(), "secret-pw", "1.1.1.1", "ua")
+	_, err := NewService(st, Config{SessionTTL: time.Hour}).Login(context.Background(), adminUsername, "secret-pw", "1.1.1.1", "ua")
 	if !errors.Is(err, dbErr) {
 		t.Fatalf("ByUsername error not propagated: %v", err)
 	}
 
 	st2 := &errSessionsStore{fakeStore: base, createErr: dbErr}
-	_, err = NewService(st2, Config{SessionTTL: time.Hour}).Login(context.Background(), "secret-pw", "1.1.1.1", "ua")
+	_, err = NewService(st2, Config{SessionTTL: time.Hour}).Login(context.Background(), adminUsername, "secret-pw", "1.1.1.1", "ua")
 	if !errors.Is(err, dbErr) {
 		t.Fatalf("Sessions().Create error not propagated: %v", err)
 	}
@@ -248,7 +256,7 @@ func TestAuthenticateErrorBranches(t *testing.T) {
 	if err := svc.EnsureAdmin(context.Background(), "secret-pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := svc.Login(context.Background(), "secret-pw", "1.1.1.1", "ua")
+	res, err := svc.Login(context.Background(), adminUsername, "secret-pw", "1.1.1.1", "ua")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +273,7 @@ func TestAuthenticateErrorBranches(t *testing.T) {
 	if err := svc2.EnsureAdmin(context.Background(), "secret-pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	res2, err := svc2.Login(context.Background(), "secret-pw", "1.1.1.1", "ua")
+	res2, err := svc2.Login(context.Background(), adminUsername, "secret-pw", "1.1.1.1", "ua")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +290,7 @@ func TestAuthenticateErrorBranches(t *testing.T) {
 	if err := svc3.EnsureAdmin(context.Background(), "secret-pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	res3, err := svc3.Login(context.Background(), "secret-pw", "1.1.1.1", "ua")
+	res3, err := svc3.Login(context.Background(), adminUsername, "secret-pw", "1.1.1.1", "ua")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +309,7 @@ func TestLogoutBranches(t *testing.T) {
 	if err := svc.EnsureAdmin(context.Background(), "secret-pw", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := svc.Login(context.Background(), "secret-pw", "1.1.1.1", "ua")
+	res, err := svc.Login(context.Background(), adminUsername, "secret-pw", "1.1.1.1", "ua")
 	if err != nil {
 		t.Fatal(err)
 	}

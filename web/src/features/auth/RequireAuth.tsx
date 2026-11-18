@@ -1,27 +1,18 @@
-import { useQuery } from '@tanstack/react-query';
 import { useEffect } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
-import { api } from '../../api/client';
-import { qk } from '../../api/queryKeys';
 import Spinner from '../../components/Spinner';
+import { loginRedirectPath } from '../../lib/loginRedirect';
 import { describeError, isUnauthorizedError, toApiErrorInfo } from '../chat/useChatStream';
+import { useMe } from './useMe';
 
 export default function RequireAuth() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const meQuery = useQuery({
-    queryKey: qk.me(),
-    queryFn: async () => {
-      const { data, error } = await api.GET('/api/auth/me');
-      if (error) {
-        throw error;
-      }
-      return data.user;
-    },
-    retry: false,
-  });
+  // qk.me() 缓存完整 MeResponse（user + permissions，00012 RBAC）；
+  // 认证门只关心 user/错误码，权限由内层 PermissionGate 消费。
+  const meQuery = useMe();
 
   const unauthorized = isUnauthorizedError(meQuery.error);
 
@@ -37,8 +28,9 @@ export default function RequireAuth() {
     if (!unauthorized) {
       return;
     }
-    const next = `${location.pathname}${location.search}`;
-    navigate(`/login?next=${encodeURIComponent(next)}`, { replace: true });
+    navigate(loginRedirectPath(location.pathname, location.search), {
+      replace: true,
+    });
   }, [location.pathname, location.search, navigate, unauthorized]);
 
   if (meQuery.isLoading) {

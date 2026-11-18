@@ -33,6 +33,10 @@ function approval(overrides: Partial<Approval> = {}): Approval {
     edited_command: '',
     edited_risk_level: '',
     edited_rule_id: '',
+    requested_by: 'u1',
+    requested_by_name: 'admin',
+    break_glass: false,
+    legacy: false,
     ...overrides,
   };
 }

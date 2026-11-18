@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { AUTH_STATE_FILE } from './helpers';
 
 // 审计页：种子数据（provider/server 创建、登录成功）必须出现在审计列表。

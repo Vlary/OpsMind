@@ -168,7 +168,7 @@ function ConversationSidebar({
   }, [renameMutation, renameTarget, renameValue]);
 
   const conversations = conversationsQuery.data?.pages.flatMap((page) => page.items) ?? [];
-  // 会话列表按标题前端过滤当前已加载页（单管理员量级无需后端支持）；
+  // 会话列表按标题前端过滤当前已加载页（已加载页的前端过滤）；
   // 会话超过一屏后不再需要翻列表肉眼找。
   const normalizedKeyword = keyword.trim().toLowerCase();
   const visibleConversations = normalizedKeyword

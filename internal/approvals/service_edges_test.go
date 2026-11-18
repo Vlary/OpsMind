@@ -382,6 +382,7 @@ func TestDecideEmptyConversationNilPointer(t *testing.T) {
 		ID:          "ap-orphan",
 		ToolCallID:  &orphanTool,
 		Status:      store.ApprovalPending,
+		RequestedBy: "requester-1",
 		RequestedAt: time.Now(),
 		ExpiresAt:   time.Now().Add(time.Hour),
 	}

@@ -115,7 +115,7 @@ func (f *fakeDiagSessions) Get(_ context.Context, id string) (store.DiagnosisSes
 	return store.DiagnosisSession{}, store.ErrNotFound
 }
 
-func (f *fakeDiagSessions) List(_ context.Context, status store.DiagnosisStatus, serverID string, limit int) ([]store.DiagnosisSession, error) {
+func (f *fakeDiagSessions) List(_ context.Context, status store.DiagnosisStatus, serverID, createdBy string, limit int) ([]store.DiagnosisSession, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := []store.DiagnosisSession{}
@@ -125,6 +125,9 @@ func (f *fakeDiagSessions) List(_ context.Context, status store.DiagnosisStatus,
 			continue
 		}
 		if serverID != "" && s.ServerID != serverID {
+			continue
+		}
+		if createdBy != "" && (s.CreatedBy == nil || *s.CreatedBy != createdBy) {
 			continue
 		}
 		out = append(out, *s)

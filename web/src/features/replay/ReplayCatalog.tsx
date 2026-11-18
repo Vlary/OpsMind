@@ -18,6 +18,8 @@ import type { components } from '../../api/schema';
 import EmptyState from '../../components/EmptyState';
 import { AdminLoading, QueryErrorState } from '../../components/admin/AdminStates';
 import { formatDateTime } from '../../components/admin/format';
+import { usePermissions } from '../auth/useMe';
+import { canOpenChatFromCatalog } from './replayLinks';
 import { Link } from 'react-router-dom';
 
 type ReplayCatalogItem = components['schemas']['ReplayCatalogItem'];
@@ -61,6 +63,10 @@ function useDebouncedValue(value: string, delayMs: number): string {
 }
 
 export default function ReplayCatalog({ activeId, onSelect }: ReplayCatalogProps) {
+  const permissions = usePermissions();
+  // 审计员（audit:read）能看回放目录但没有 chat:use；「去对话页」会把
+  // 他带到 403（RBAC 第 12 轮走查 low）。无权限时不渲染按钮。
+  const canOpenChat = canOpenChatFromCatalog(permissions);
   const [keyword, setKeyword] = useState('');
   const [hasActions, setHasActions] = useState(false);
   const query = useDebouncedValue(keyword.trim(), SEARCH_DEBOUNCE_MS);
@@ -129,9 +135,11 @@ export default function ReplayCatalog({ activeId, onSelect }: ReplayCatalogProps
       <EmptyState
         description={query !== '' || hasActions ? '没有符合条件的历史会话' : '暂无可回放的会话'}
       >
-        <Link to="/chat">
-          <Button size="small">去对话页</Button>
-        </Link>
+        {canOpenChat ? (
+          <Link to="/chat">
+            <Button size="small">去对话页</Button>
+          </Link>
+        ) : null}
       </EmptyState>
     </div>
   ) : (

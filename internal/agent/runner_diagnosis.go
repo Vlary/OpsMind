@@ -56,7 +56,7 @@ type diagnosisReportView struct {
 
 // runRunDiagnosis 实现 run_diagnosis 工具（契约 7.2：恒 safe、无审批——
 // 工具本身只创建会话并等待；引擎内部的 safe 闸是唯一执行闸）。
-func (r *Runner) runRunDiagnosis(ctx context.Context, conv store.Conversation, raw json.RawMessage) toolOutcome {
+func (r *Runner) runRunDiagnosis(ctx context.Context, conv store.Conversation, in RunInput, raw json.RawMessage) toolOutcome {
 	if r.phase5Diagnosis == nil {
 		return toolOutcome{Err: &ToolError{Code: "SERVICE_UNAVAILABLE", Message: "diagnosis engine not attached"}, Status: store.ToolFailed}
 	}
@@ -72,6 +72,8 @@ func (r *Runner) runRunDiagnosis(ctx context.Context, conv store.Conversation, r
 		ServerID:       args.ServerID,
 		ConversationID: &convID,
 		Trigger:        store.DiagnosisTriggerChat,
+		// 00012：chat 诊断归属发起用户，complete/fix 的 owner 规则才成立。
+		CreatedBy: &in.UserID,
 	}
 	if args.AlertEventID != nil {
 		params.AlertEventID = args.AlertEventID
