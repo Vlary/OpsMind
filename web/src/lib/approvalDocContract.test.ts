@@ -15,11 +15,24 @@ import { describe, expect, it } from 'vitest';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
-const contract = readFileSync(resolve(repoRoot, 'docs/CONTRACT.md'), 'utf8');
+
+// docs/CONTRACT.md 是内部设计文档，不随开源仓库发布。缺失时跳过「契约文本」
+// 断言，只保留 openapi.yaml 的断言——openapi 是发布物。本地有该文件，断言照常跑，
+// 防回潮的保护不减弱。
+function readIfExists(path: string): string {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+const contract = readIfExists(resolve(repoRoot, 'docs/CONTRACT.md'));
 const openapi = readFileSync(resolve(repoRoot, 'api/openapi.yaml'), 'utf8');
+const itContract = contract === '' ? it.skip : it;
 
 describe('审批 edited_command 文档口径（00012 / 第 7 轮走查）', () => {
-  it('CONTRACT.md 不再声称审批改写命令会被执行', () => {
+  itContract('CONTRACT.md 不再声称审批改写命令会被执行', () => {
     // 5.18 逐台分派旧句：OnApprovalDecided 执行 approval.EditedCommand。
     expect(contract).not.toContain('逐字节执行 `approval.EditedCommand` 非空时的改写后命令');
     // 6.2 SSE / decide 旧句：请求体可携带 edited_command、runner 执行改写命令。
@@ -31,7 +44,7 @@ describe('审批 edited_command 文档口径（00012 / 第 7 轮走查）', () =
     expect(contract).not.toContain('待审批态提供「编辑命令」进入编辑态');
   });
 
-  it('CONTRACT.md 保留 12.3 的只读口径', () => {
+  itContract('CONTRACT.md 保留 12.3 的只读口径', () => {
     expect(contract).toContain('执行层无条件使用 `approvals.command`');
     expect(contract).toContain('执行层恒用 `approval.command`');
     expect(contract).toContain('edited_command` 仅历史只读');
