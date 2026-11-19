@@ -39,7 +39,9 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        run: go test ./...
+        # -p 1：集成测试共用同一个 postgres service 库（靠 advisory lock 串行化），
+        # 并行跑多个包会在 2 核 runner 上争锁与抢超时预算，造成偶发失败。
+        run: go test -p 1 ./...
 
       - name: smoke
         run: go run ./cmd/smoke
