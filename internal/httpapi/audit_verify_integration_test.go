@@ -75,16 +75,20 @@ func truncateAuditVerifyTables(t *testing.T, db *sql.DB) {
 func TestAuditVerifyPostgresIntegration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := acquireAuditVerifyDBLock(t)
-	truncateAuditVerifyTables(t, db)
-	t.Cleanup(func() { truncateAuditVerifyTables(t, db) })
 
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// 必须先 Open 再 TRUNCATE：Open 才执行内嵌 goose Up。CI 与任何全新库上
+	// 表还不存在，先 TRUNCATE 会以 SQLSTATE 42P01（relation does not exist）
+	// 直接失败——本测试此前只在已迁移过的开发库上跑过，所以没暴露。
 	st, err := postgres.Open(ctx, pgAuditVerifyDSN(), log)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(st.Close)
+
+	truncateAuditVerifyTables(t, db)
+	t.Cleanup(func() { truncateAuditVerifyTables(t, db) })
 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte("it-audit-verify"), bcrypt.MinCost)
 	if err != nil {
