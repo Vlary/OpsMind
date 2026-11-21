@@ -40,8 +40,10 @@ jobs:
 
       - name: go test
         # -p 1：集成测试共用同一个 postgres service 库（靠 advisory lock 串行化），
-        # 并行跑多个包会在 2 核 runner 上争锁与抢超时预算，造成偶发失败。
-        run: go test -p 1 ./...
+        # 并行跑多个包会在 2 核 runner 上争锁与抢超时预算。
+        # -timeout 30m：默认 10 分钟包级超时对含真实 PG 的包在共享 runner 上偏紧。
+        # -count=1：不吃构建缓存，保证每次都是真跑。
+        run: go test -p 1 -count=1 -timeout 30m ./...
 
       - name: smoke
         run: go run ./cmd/smoke
