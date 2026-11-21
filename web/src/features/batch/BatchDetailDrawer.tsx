@@ -358,11 +358,11 @@ export default function BatchDetailDrawer({
   ];
 
   return (
-    <Drawer title="批量任务详情" open={open} onClose={onClose} width={860} destroyOnHidden>
+    <Drawer title="批量任务详情" open={open} onClose={onClose} size={860} destroyOnHidden>
       {detailQuery.isLoading ? (
         <div style={{ padding: 32, textAlign: 'center' }}>加载中……</div>
       ) : detail ? (
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        <Space orientation="vertical" size={16} style={{ width: '100%' }}>
           <Descriptions size="small" column={2} bordered>
             <Descriptions.Item label="状态" span={1}>
               <Tag
@@ -442,7 +442,7 @@ export default function BatchDetailDrawer({
           </div>
 
           {detail.job.source === 'chat' ? (
-            <Alert type="info" showIcon message="该任务来自对话中的 batch_execute 工具。" />
+            <Alert type="info" showIcon title="该任务来自对话中的 batch_execute 工具。" />
           ) : null}
 
           <Table<BatchResult>
@@ -498,7 +498,7 @@ export default function BatchDetailDrawer({
         <Alert
           type="error"
           showIcon
-          message={describeFailure(failureFromError(detailQuery.error))}
+          title={describeFailure(failureFromError(detailQuery.error))}
           action={
             <Button
               size="small"
@@ -526,10 +526,10 @@ export default function BatchDetailDrawer({
           <Alert
             type="error"
             showIcon
-            message={describeFailure(failureFromError(editingApprovalQuery.error))}
+            title={describeFailure(failureFromError(editingApprovalQuery.error))}
           />
         ) : editingApprovalQuery.data ? (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Space orientation="vertical" size={12} style={{ width: '100%' }}>
             <Typography.Text type="secondary">
               目标服务器：
               <Typography.Text strong>

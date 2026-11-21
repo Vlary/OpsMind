@@ -58,6 +58,14 @@ describe('metricThresholdBounds / clampThreshold', () => {
     }
     expect(Object.keys(METRIC_LABELS)).toHaveLength(6);
   });
+
+  it('load_1 标签同时说明 Linux 负载与 Windows 处理器队列（走查第 15 轮）', () => {
+    // 同一规则会评估两种平台资产；旧标签「负载（1m）」会让 Windows
+    // 值班员按 1 分钟负载均值理解 ProcessorQueueLength 阈值。
+    expect(METRIC_LABELS.load_1).toContain('负载');
+    expect(METRIC_LABELS.load_1).toContain('处理器队列');
+    expect(METRIC_LABELS.load_1).not.toBe('负载（1m）');
+  });
 });
 
 describe('toCreatePayload', () => {

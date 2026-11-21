@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func (f *fakeMetricStore) LatestByServer(context.Context, string) (store.ServerM
 	return store.ServerMetricLatest{}, store.ErrNotFound
 }
 func (f *fakeMetricStore) Window(_ context.Context, w store.MetricWindow) ([]store.ServerMetric, error) {
-	if w.Limit > 1440 {
+	if w.Limit > store.MetricWindowLimitMax {
 		return nil, store.ErrInvalid
 	}
 	var out []store.ServerMetric
@@ -53,10 +54,18 @@ func (f *fakeMetricStore) Window(_ context.Context, w store.MetricWindow) ([]sto
 			}
 		}
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	// 与生产 Window 同语义：单机窗口取最新 limit 个点后升序返回。
+	if w.Limit > 0 && len(out) > w.Limit {
+		out = out[len(out)-w.Limit:]
+	}
 	return out, nil
 }
 func (f *fakeMetricStore) DeleteBefore(context.Context, time.Time) (int64, error) {
 	return 0, nil
+}
+func (f *fakeMetricStore) Trend(context.Context, store.MetricTrendQuery) ([]store.MetricTrendPoint, error) {
+	return nil, store.ErrInvalid
 }
 
 type fakeAlertEventStore struct{ s *monitorTestStore }
@@ -97,6 +106,12 @@ func (f *fakeAlertEventStore) SetNotifyStatus(context.Context, int64, store.Noti
 func (f *fakeAlertEventStore) CountFiring(context.Context) (int64, error) { return 0, nil }
 func (f *fakeAlertEventStore) CountFiringByServer(context.Context, string) (int64, error) {
 	return 0, nil
+}
+func (f *fakeAlertEventStore) CountFiringBySeverity(context.Context) (store.FiringSeverityCounts, error) {
+	return store.FiringSeverityCounts{}, nil
+}
+func (f *fakeAlertEventStore) Stats(context.Context, store.AlertEventStatsQuery) (store.AlertEventStats, error) {
+	return store.AlertEventStats{}, store.ErrInvalid
 }
 
 type fakeAuditListStore struct{ s *monitorTestStore }
@@ -182,6 +197,53 @@ func TestToolGetMetricsHappyPath(t *testing.T) {
 	first := res.Points[0]
 	if first["cpu_pct"] != float64(10) {
 		t.Fatalf("first point = %v", first)
+	}
+}
+
+// TestToolGetMetricsThirtySecondFullDay：采集间隔 30s 时 24h 窗口有 2880 点，
+// 工具必须全部返回且 truncated=false（旧上限 1440 只返回最近 12h）；确实
+// 多出更早的点时才报 truncated。
+func TestToolGetMetricsThirtySecondFullDay(t *testing.T) {
+	st := newMonitorTestStore(t)
+	st.metrics = st.metrics[:0]
+	// 2880 点 × 30s，末点≈now，首点在 23h59.5m 前（窗口 24h 内）。
+	start := time.Now().UTC().Add(-time.Duration(store.MetricWindowLimitMax-1) * 30 * time.Second)
+	for index := 0; index < store.MetricWindowLimitMax; index++ {
+		st.metrics = append(st.metrics, store.ServerMetric{
+			ServerID: "s1", CreatedAt: start.Add(time.Duration(index) * 30 * time.Second),
+			CPU: float64(index % 100), Mem: 40, Disk: 50, Load1: 0.5,
+		})
+	}
+	r := newRunner(st, nil, nil, nil, nil)
+	decode := func(out toolOutcome) (int, bool) {
+		t.Helper()
+		if out.Err != nil {
+			t.Fatalf("err = %v", out.Err)
+		}
+		var res struct {
+			Points    []map[string]any `json:"points"`
+			Truncated bool             `json:"truncated"`
+		}
+		if err := json.Unmarshal(out.Result, &res); err != nil {
+			t.Fatal(err)
+		}
+		return len(res.Points), res.Truncated
+	}
+
+	points, truncated := decode(r.runGetMetrics(context.Background(),
+		json.RawMessage(`{"server_id":"s1","minutes":1440}`)))
+	if points != store.MetricWindowLimitMax || truncated {
+		t.Fatalf("points/truncated = %d/%v, want %d/false", points, truncated, store.MetricWindowLimitMax)
+	}
+
+	// 再补一个窗口内更早的点（2881 个）：上限丢弃最旧一个，truncated=true。
+	st.metrics = append(st.metrics, store.ServerMetric{
+		ServerID: "s1", CreatedAt: start.Add(-15 * time.Second), CPU: 1, Mem: 2, Disk: 3,
+	})
+	points, truncated = decode(r.runGetMetrics(context.Background(),
+		json.RawMessage(`{"server_id":"s1","minutes":1440}`)))
+	if points != store.MetricWindowLimitMax || !truncated {
+		t.Fatalf("points/truncated = %d/%v, want %d/true", points, truncated, store.MetricWindowLimitMax)
 	}
 }
 

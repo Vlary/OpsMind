@@ -225,7 +225,7 @@ export default function UsersPage() {
       key: 'username',
       width: 220,
       render: (_, user) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <Space size={6}>
             <Typography.Text strong>{user.username}</Typography.Text>
             {user.id === currentUserId ? <Tag color="blue">我</Tag> : null}
@@ -370,9 +370,9 @@ export default function UsersPage() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="权限护栏"
+        title="权限护栏"
         description={
-          <Space direction="vertical" size={2}>
+          <Space orientation="vertical" size={2}>
             <span>{adminGuardHint(users, currentUserId)}</span>
             <span>
               停用、改角色与重置密码会立即吊销目标账号的会话并关闭其终端/RDP；重置密码只签发一次性
@@ -454,7 +454,7 @@ export default function UsersPage() {
         open={resendTarget !== null}
         title={resendTarget ? `重发邀请 · ${resendTarget.username}` : '重发邀请'}
         description={
-          <Space direction="vertical" size={4}>
+          <Space orientation="vertical" size={4}>
             <span>
               将向 {resendTarget?.email || '目标邮箱'} 重新发送一次性邀请链接（30
               分钟有效，仅可使用一次）。
@@ -477,7 +477,7 @@ export default function UsersPage() {
         open={resetTarget !== null}
         title={resetTarget ? `重置密码 · ${resetTarget.username}` : '重置密码'}
         description={
-          <Space direction="vertical" size={4}>
+          <Space orientation="vertical" size={4}>
             <span>
               将向 {resetTarget?.email || '目标邮箱'} 发送一次性重置链接（30
               分钟有效，仅可使用一次）。

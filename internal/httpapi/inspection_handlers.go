@@ -7,9 +7,12 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"aiops/internal/apierr"
 	"aiops/internal/authz"
@@ -28,6 +31,9 @@ func (d *Deps) RegisterInspectionRoutes(api *gin.RouterGroup) {
 
 	d.guard(api, http.MethodGet, "/inspection/reports", authz.PermInspection, d.handleListInspectionReports)
 	d.guard(api, http.MethodGet, "/inspection/reports/:id", authz.PermInspection, d.handleGetInspectionReport)
+	// 路径刻意不用 /inspection/reports/trend：与 /inspection/reports/:id
+	// 同级静态段并存会让 gin 的路由树对 reports 段产生静态/参数冲突风险。
+	d.guard(api, http.MethodGet, "/inspection/trend", authz.PermInspection, d.handleInspectionTrend)
 
 	d.guard(api, http.MethodPost, "/inspection/run", authz.PermInspection, d.handleRunInspectionNow)
 }
@@ -314,6 +320,71 @@ func (d *Deps) handleGetInspectionReport(c *gin.Context) {
 	c.JSON(http.StatusOK, inspectionReportDetail{
 		Report: report, Items: items, PreviousScores: prev,
 	})
+}
+
+// inspectionTrendPointResponse 是一个报告点（按 created_at 升序返回）。
+type inspectionTrendPointResponse struct {
+	ReportID     string                  `json:"report_id"`
+	CreatedAt    time.Time               `json:"created_at"`
+	AvgScore     int                     `json:"avg_score"`
+	ServerCount  int                     `json:"server_count"`
+	AnomalyCount int                     `json:"anomaly_count"`
+	Trigger      store.InspectionTrigger `json:"trigger"`
+}
+
+// inspectionTrendResponse 是 GET /api/inspection/trend 响应（points ≤60；
+// job_id 为回显参数，未传时为 null）。
+type inspectionTrendResponse struct {
+	JobID     *string                        `json:"job_id"`
+	Points    []inspectionTrendPointResponse `json:"points"`
+	Truncated bool                           `json:"truncated"`
+}
+
+// handleInspectionTrend 返回最近 N 份报告的评分趋势（按报告份数而非天数；
+// limit 1..60 缺省 30）。单条 SQL 取 limit+1 份后 Go 反转，truncated 表示
+// 还有更早报告。空数据返回 points=[]，不报错。
+func (d *Deps) handleInspectionTrend(c *gin.Context) {
+	if !d.requireStore(c) {
+		return
+	}
+	jobID := strings.TrimSpace(c.Query("job_id"))
+	if jobID != "" {
+		if _, err := uuid.Parse(jobID); err != nil {
+			writeAPIError(c, http.StatusBadRequest, apierr.ValidationFailed,
+				"job_id must be a valid uuid")
+			return
+		}
+	}
+	limit := 30
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 60 {
+			writeAPIError(c, http.StatusBadRequest, apierr.ValidationFailed,
+				"limit must be between 1 and 60")
+			return
+		}
+		limit = n
+	}
+	points, truncated, err := d.Store.InspectionReports().Trend(c.Request.Context(), jobID, limit)
+	if err != nil {
+		d.handleStoreError(c, err, apierr.InspectionReportNotFound)
+		return
+	}
+	if points == nil {
+		points = []store.InspectionTrendPoint{}
+	}
+	out := make([]inspectionTrendPointResponse, 0, len(points))
+	for _, p := range points {
+		out = append(out, inspectionTrendPointResponse{
+			ReportID: p.ReportID, CreatedAt: p.CreatedAt, AvgScore: p.AvgScore,
+			ServerCount: p.ServerCount, AnomalyCount: p.AnomalyCount, Trigger: p.Trigger,
+		})
+	}
+	var echo *string
+	if jobID != "" {
+		echo = &jobID
+	}
+	c.JSON(http.StatusOK, inspectionTrendResponse{JobID: echo, Points: out, Truncated: truncated})
 }
 
 // runInspectionNowRequest 是即时巡检请求体。

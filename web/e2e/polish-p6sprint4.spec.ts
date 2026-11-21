@@ -1,6 +1,12 @@
 import { expect, test, type Page } from './fixtures';
 
-import { AUTH_STATE_FILE, SCENARIO_LIST, SCENARIO_RISKY, conversationIdOf, sendMessage } from './helpers';
+import {
+  AUTH_STATE_FILE,
+  SCENARIO_LIST,
+  SCENARIO_RISKY,
+  conversationIdOf,
+  sendMessage,
+} from './helpers';
 
 // 六期打磨 sprint 4 走查修复的端到端断言（真实后端 + 假 LLM + Postgres；
 // 回放数据按契约允许用路由伪造）。
@@ -175,10 +181,9 @@ test.describe('六期打磨 sprint 4：折叠面板复制按钮不连带开合',
     for (let round = 1; round <= 3; round += 1) {
       await copy.click();
       await page.waitForTimeout(150);
-      await expect(
-        collapse,
-        `round ${round}: 复制不该展开/收起输出面板`,
-      ).not.toHaveClass(/ant-collapse-item-active/);
+      await expect(collapse, `round ${round}: 复制不该展开/收起输出面板`).not.toHaveClass(
+        /ant-collapse-item-active/,
+      );
     }
 
     // 面板本身仍可正常开合（未因 stopPropagation 变成死区）。
@@ -209,18 +214,13 @@ test.describe('六期打磨 sprint 4：小视口侧栏末项可点击', () => {
       await sider.evaluate((element) => {
         element.scrollTop = element.scrollHeight;
       });
-      const settingsItem = sider
-        .locator('.ant-menu-item', { hasText: '设置' })
-        .first();
+      const settingsItem = sider.locator('.ant-menu-item', { hasText: '设置' }).first();
       await expect(settingsItem).toBeVisible();
 
       // 命中测试：项中心点必须命中该项自身（而不是 .ant-layout-sider-trigger）。
       const hitIsTrigger = await settingsItem.evaluate((element) => {
         const box = element.getBoundingClientRect();
-        const hit = document.elementFromPoint(
-          box.left + box.width / 2,
-          box.top + box.height / 2,
-        );
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
         return Boolean(hit?.closest('.ant-layout-sider-trigger'));
       });
       expect(hitIsTrigger, '末项中心点不得被折叠条覆盖').toBe(false);

@@ -206,9 +206,16 @@ describe('toApiFailure 归一化补充矩阵', () => {
   });
 
   it('error 顶层不是 record（如 null）：兜底分支保留 Error.message', () => {
-    const failure = toApiFailure(new TypeError('network down'), responseOf(503));
+    const failure = toApiFailure(new Error('network down'), responseOf(503));
     expect(failure.code).toBe('INTERNAL');
     expect(failure.message).toBe('network down');
+    expect(failure.status).toBe(503);
+  });
+
+  it('TypeError（fetch 网络失败）走 NETWORK_ERROR，不落 INTERNAL', () => {
+    const failure = toApiFailure(new TypeError('network down'), responseOf(503));
+    expect(failure.code).toBe('NETWORK_ERROR');
+    expect(failure.message).toBe('网络异常，请检查连接后重试');
     expect(failure.status).toBe(503);
   });
 

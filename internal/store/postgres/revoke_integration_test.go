@@ -312,8 +312,15 @@ func TestExpireStaleGrantsIntegration(t *testing.T) {
 		}
 		return grant
 	}
-	stale := mkGrant("term", now.Add(-time.Minute))
-	fresh := mkGrant("rdp", now.Add(time.Hour))
+	// 开发库上可能同时跑着 app 实例（后台 grant 收敛器按真实时钟扫描）。
+	// stale 行若直接用「过去」的 grant_expires_at，会在本测试读取前被外部
+	// 收敛器置为 expired，ExpireStaleGrants 便返回 0 行（实测偶发）。
+	// 改用「真实时钟仍在未来、但传给函数的 now 已过」的 expires_at 隔离外部
+	// 扫描器：被测语义（grant_expires_at <= now 才收敛）不变。
+	staleExpires := now.Add(time.Hour)
+	expireNow := staleExpires.Add(time.Minute)
+	stale := mkGrant("term", staleExpires)
+	fresh := mkGrant("rdp", now.Add(2*time.Hour))
 
 	expiry := store.GrantExpiryStoreOf(testDB)
 	if expiry == nil {
@@ -321,7 +328,7 @@ func TestExpireStaleGrantsIntegration(t *testing.T) {
 	}
 	var expired []store.Approval
 	if err := testDB.WithTx(ctx, func(tx store.Store) error {
-		rows, err := store.GrantExpiryStoreOf(tx).ExpireStaleGrants(ctx, now, 200)
+		rows, err := store.GrantExpiryStoreOf(tx).ExpireStaleGrants(ctx, expireNow, 200)
 		expired = rows
 		return err
 	}); err != nil {
@@ -354,7 +361,7 @@ func TestExpireStaleGrantsIntegration(t *testing.T) {
 	// 幂等：第二轮无待收敛行。
 	var again []store.Approval
 	if err := testDB.WithTx(ctx, func(tx store.Store) error {
-		rows, err := store.GrantExpiryStoreOf(tx).ExpireStaleGrants(ctx, now, 200)
+		rows, err := store.GrantExpiryStoreOf(tx).ExpireStaleGrants(ctx, expireNow, 200)
 		again = rows
 		return err
 	}); err != nil {

@@ -15,7 +15,13 @@ import { ApiRequestError, toApiFailure } from '../../components/admin/apiError';
 import { formatDateTime, formatDuration } from '../../components/admin/format';
 import CopyButton from '../../components/CopyButton';
 
-import { TRIGGER_LABELS, describeInspectionError, scoreColor, scoreColorVar, scoreTrend } from './inspectionView';
+import {
+  TRIGGER_LABELS,
+  describeInspectionError,
+  scoreColor,
+  scoreColorVar,
+  scoreTrend,
+} from './inspectionView';
 
 type InspectionReportDetail = components['schemas']['InspectionReportDetail'];
 type InspectionReportItem = components['schemas']['InspectionReportItem'];
@@ -163,7 +169,7 @@ export default function ReportDrawer({ open, reportId, onClose }: ReportDrawerPr
   ];
 
   return (
-    <Drawer title="巡检报告" open={open} onClose={onClose} width={760} destroyOnHidden>
+    <Drawer title="巡检报告" open={open} onClose={onClose} size={760} destroyOnHidden>
       {detailQuery.isLoading ? (
         <div style={{ textAlign: 'center', padding: 32 }}>
           <Spin />
@@ -192,7 +198,7 @@ function ReportBody({
   columns: TableColumnsType<InspectionReportItem>;
 }) {
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Space orientation="vertical" size={16} style={{ width: '100%' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
         <div>
           {/* 六期打磨 sprint 6（走查 low）：大字按分档着色（此前恒为绿色，
@@ -233,9 +239,9 @@ function ReportBody({
         expandable={{
           rowExpandable: (item) => item.anomaly_count > 0 || item.raw_output !== '',
           expandedRowRender: (item) => (
-            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            <Space orientation="vertical" size={8} style={{ width: '100%' }}>
               {item.anomalies.length > 0 ? (
-                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space orientation="vertical" size={4} style={{ width: '100%' }}>
                   {item.anomalies.map((anomaly, index) => (
                     <div key={index}>
                       <Tag color={anomalySeverityColor[anomaly.severity] ?? 'default'}>

@@ -196,38 +196,55 @@ func (s serverStore) Update(ctx context.Context, id string, p store.UpdateServer
 	}
 
 	return scanServer(s.q.QueryRow(ctx, `
-		UPDATE servers SET
-			name = CASE WHEN $1::boolean THEN $2::text ELSE name END,
-			device_kind = CASE WHEN $3::boolean THEN $4::text ELSE device_kind END,
-			os = CASE WHEN $5::boolean THEN $6::text ELSE os END,
-			netdev_brand = CASE WHEN $7::boolean THEN $8::text ELSE netdev_brand END,
-			access_proto = CASE WHEN $9::boolean THEN $10::text ELSE access_proto END,
-			host = CASE WHEN $11::boolean THEN $12::text ELSE host END,
-			port = CASE WHEN $13::boolean THEN $14::int ELSE port END,
-			winrm_port = CASE WHEN $15::boolean THEN $16::int ELSE winrm_port END,
-			username = CASE WHEN $17::boolean THEN $18::text ELSE username END,
-			auth_method = CASE WHEN $19::boolean THEN $20::text ELSE auth_method END,
-			password_enc = CASE WHEN $19::boolean THEN $21::text ELSE password_enc END,
-			private_key_enc = CASE WHEN $19::boolean THEN $22::text ELSE private_key_enc END,
-			passphrase_enc = CASE WHEN $19::boolean THEN $23::text ELSE passphrase_enc END,
-			enable_secret_enc = CASE WHEN $24::boolean THEN $25::text ELSE enable_secret_enc END,
-			tags = CASE WHEN $26::boolean THEN $27::text[] ELSE tags END,
-			auto_exec_enabled = CASE WHEN $28::boolean THEN $29::boolean ELSE auto_exec_enabled END,
-			host_key_fingerprint = CASE WHEN
-				($11::boolean AND host IS DISTINCT FROM $12::text) OR
-				($13::boolean AND port IS DISTINCT FROM $14::int)
-				THEN '' ELSE host_key_fingerprint END,
-			host_key_public = CASE WHEN
-				($11::boolean AND host IS DISTINCT FROM $12::text) OR
-				($13::boolean AND port IS DISTINCT FROM $14::int)
-				THEN '' ELSE host_key_public END,
-			host_key_verified_at = CASE WHEN
-				($11::boolean AND host IS DISTINCT FROM $12::text) OR
-				($13::boolean AND port IS DISTINCT FROM $14::int)
-				THEN NULL ELSE host_key_verified_at END,
-			updated_at = now()
-		WHERE id = $30::uuid
-		RETURNING `+serverColumns,
+		WITH updated AS (
+			UPDATE servers SET
+				name = CASE WHEN $1::boolean THEN $2::text ELSE name END,
+				device_kind = CASE WHEN $3::boolean THEN $4::text ELSE device_kind END,
+				os = CASE WHEN $5::boolean THEN $6::text ELSE os END,
+				netdev_brand = CASE WHEN $7::boolean THEN $8::text ELSE netdev_brand END,
+				access_proto = CASE WHEN $9::boolean THEN $10::text ELSE access_proto END,
+				host = CASE WHEN $11::boolean THEN $12::text ELSE host END,
+				port = CASE WHEN $13::boolean THEN $14::int ELSE port END,
+				winrm_port = CASE WHEN $15::boolean THEN $16::int ELSE winrm_port END,
+				username = CASE WHEN $17::boolean THEN $18::text ELSE username END,
+				auth_method = CASE WHEN $19::boolean THEN $20::text ELSE auth_method END,
+				password_enc = CASE WHEN $19::boolean THEN $21::text ELSE password_enc END,
+				private_key_enc = CASE WHEN $19::boolean THEN $22::text ELSE private_key_enc END,
+				passphrase_enc = CASE WHEN $19::boolean THEN $23::text ELSE passphrase_enc END,
+				enable_secret_enc = CASE WHEN $24::boolean THEN $25::text ELSE enable_secret_enc END,
+				tags = CASE WHEN $26::boolean THEN $27::text[] ELSE tags END,
+				auto_exec_enabled = CASE WHEN $28::boolean THEN $29::boolean ELSE auto_exec_enabled END,
+				host_key_fingerprint = CASE WHEN
+					($11::boolean AND host IS DISTINCT FROM $12::text) OR
+					($13::boolean AND port IS DISTINCT FROM $14::int)
+					THEN '' ELSE host_key_fingerprint END,
+				host_key_public = CASE WHEN
+					($11::boolean AND host IS DISTINCT FROM $12::text) OR
+					($13::boolean AND port IS DISTINCT FROM $14::int)
+					THEN '' ELSE host_key_public END,
+				host_key_verified_at = CASE WHEN
+					($11::boolean AND host IS DISTINCT FROM $12::text) OR
+					($13::boolean AND port IS DISTINCT FROM $14::int)
+					THEN NULL ELSE host_key_verified_at END,
+				updated_at = now()
+			WHERE id = $30::uuid
+			RETURNING *
+		),
+		-- 资产改成 network_device 后不再采集（契约 2.10 约定 1）：同一语句
+		-- 清掉历史 latest 与明细点，避免监控页把残留指标当成已采集服务器
+		-- （走查第 9 轮 medium）。data-modifying CTE 即使不被主查询引用也会
+		-- 执行；读路径另有 device_kind 过滤兜底。
+		purged_latest AS (
+			DELETE FROM server_metrics_latest l
+			USING updated u
+			WHERE l.server_id = u.id AND u.device_kind = 'network_device'
+		),
+		purged_metrics AS (
+			DELETE FROM server_metrics m
+			USING updated u
+			WHERE m.server_id = u.id AND u.device_kind = 'network_device'
+		)
+		SELECT `+serverColumns+` FROM updated`,
 		nameSet, name, kindSet, kind, osSet, osVal, brandSet, brand, protoSet, proto,
 		hostSet, host, portSet, port, winrmPortSet, winrmPort,
 		userSet, username,

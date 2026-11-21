@@ -207,7 +207,7 @@ function ConversationSidebar({
           showIcon
           closable
           onClose={() => setActionError(null)}
-          message={actionError}
+          title={actionError}
         />
       ) : null}
 
@@ -235,7 +235,7 @@ function ConversationSidebar({
             <Alert
               type="error"
               showIcon
-              message={describeError(
+              title={describeError(
                 conversationsError?.code ?? 'UNKNOWN',
                 conversationsError?.message ?? '会话列表加载失败。',
               )}

@@ -983,7 +983,7 @@ export default function ChatPage() {
               type="info"
               showIcon
               data-testid="pending-approval-leave-hint"
-              message="本轮审批等待中：刷新或离开页面会中断回答流并取消审批。"
+              title="本轮审批等待中：刷新或离开页面会中断回答流并取消审批。"
             />
           </div>
         ) : null}
@@ -1085,7 +1085,7 @@ export default function ChatPage() {
                   style={{ marginTop: 20, maxWidth: 560 }}
                   type="warning"
                   showIcon
-                  message="尚未配置模型供应商"
+                  title="尚未配置模型供应商"
                   description={
                     canConfigureProviders
                       ? '请先在模型管理中添加供应商与模型，再开始对话。'
@@ -1136,7 +1136,7 @@ export default function ChatPage() {
               type="error"
               showIcon
               closable
-              message={sendError}
+              title={sendError}
               onClose={() => setSendError(null)}
             />
           </div>
@@ -1163,7 +1163,7 @@ export default function ChatPage() {
         <Drawer
           open={drawerOpen}
           placement="left"
-          width={300}
+          size={300}
           title="会话"
           onClose={() => setDrawerOpen(false)}
           styles={{ body: { padding: 0 } }}

@@ -194,6 +194,10 @@ func (f *fakeMetrics) DeleteBefore(_ context.Context, cutoff time.Time) (int64, 
 	return n, nil
 }
 
+func (f *fakeMetrics) Trend(context.Context, store.MetricTrendQuery) ([]store.MetricTrendPoint, error) {
+	return nil, store.ErrInvalid
+}
+
 func (f *fakeMonitorStore) AlertRules() store.AlertRuleStore { return (*fakeRules)(f) }
 
 type fakeRules fakeMonitorStore
@@ -370,6 +374,30 @@ func (f *fakeEvents) CountFiringByServer(_ context.Context, serverID string) (in
 		}
 	}
 	return n, nil
+}
+
+func (f *fakeEvents) CountFiringBySeverity(context.Context) (store.FiringSeverityCounts, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out store.FiringSeverityCounts
+	for _, ev := range f.alerts {
+		if ev.Status != store.AlertEventFiring {
+			continue
+		}
+		switch ev.Severity {
+		case store.AlertSeverityInfo:
+			out.Info++
+		case store.AlertSeverityWarning:
+			out.Warning++
+		case store.AlertSeverityCritical:
+			out.Critical++
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeEvents) Stats(context.Context, store.AlertEventStatsQuery) (store.AlertEventStats, error) {
+	return store.AlertEventStats{}, store.ErrInvalid
 }
 
 func (f *fakeMonitorStore) NotificationChannels() store.NotificationChannelStore {

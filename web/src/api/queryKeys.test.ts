@@ -65,6 +65,27 @@ describe('参数化 query key 隔离', () => {
   });
 });
 
+describe('监控图表化：趋势/分布/巡检走势 key', () => {
+  it('monitorTrend 按窗口切子 key，前缀可供整组失效', () => {
+    expect(qk.monitorTrend('24h')).toEqual(['monitor-trend', '24h']);
+    expect(qk.monitorTrend('7d')).toEqual(['monitor-trend', '7d']);
+    expect(qk.monitorTrend('24h')).not.toEqual(qk.monitorTrend('7d'));
+    expect(qk.monitorTrendPrefix).toEqual(['monitor-trend']);
+  });
+
+  it('alertEventStats 按窗口与 top 规则数隔离', () => {
+    expect(qk.alertEventStats('24h', 8)).toEqual(['alert-event-stats', '24h', 8]);
+    expect(qk.alertEventStats('24h', 8)).not.toEqual(qk.alertEventStats('7d', 8));
+    expect(qk.alertEventStats('24h', 8)).not.toEqual(qk.alertEventStats('24h', 5));
+  });
+
+  it('inspectionTrend 的 null 任务映射为 all，且与其他任务隔离', () => {
+    expect(qk.inspectionTrend(null, 30)).toEqual(['inspection-trend', 'all', 30]);
+    expect(qk.inspectionTrend(null, 30)).not.toEqual(qk.inspectionTrend('job-1', 30));
+    expect(qk.inspectionTrendPrefix).toEqual(['inspection-trend']);
+  });
+});
+
 describe('八期 FE-R：回放目录 key', () => {
   it('replays(q, has_actions) 结构为 [replays, filters]', () => {
     expect(qk.replays({ q: '磁盘', has_actions: true })).toEqual([

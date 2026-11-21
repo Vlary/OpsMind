@@ -201,6 +201,9 @@ func (f *fakeDiagMetrics) Window(context.Context, store.MetricWindow) ([]store.S
 	return nil, nil
 }
 func (f *fakeDiagMetrics) DeleteBefore(context.Context, time.Time) (int64, error) { return 0, nil }
+func (f *fakeDiagMetrics) Trend(context.Context, store.MetricTrendQuery) ([]store.MetricTrendPoint, error) {
+	return nil, store.ErrInvalid
+}
 
 func (f *fakeDiagStore) AlertEvents() store.AlertEventStore { return (*fakeDiagEvents)(f) }
 
@@ -224,6 +227,12 @@ func (f *fakeDiagEvents) SetNotifyStatus(context.Context, int64, store.NotifySta
 func (f *fakeDiagEvents) CountFiring(context.Context) (int64, error) { return 0, nil }
 func (f *fakeDiagEvents) CountFiringByServer(context.Context, string) (int64, error) {
 	return 0, nil
+}
+func (f *fakeDiagEvents) CountFiringBySeverity(context.Context) (store.FiringSeverityCounts, error) {
+	return store.FiringSeverityCounts{}, nil
+}
+func (f *fakeDiagEvents) Stats(context.Context, store.AlertEventStatsQuery) (store.AlertEventStats, error) {
+	return store.AlertEventStats{}, store.ErrInvalid
 }
 
 func (f *fakeDiagStore) Providers() store.ProviderStore { return (*fakeDiagProviders)(f) }

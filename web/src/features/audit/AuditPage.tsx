@@ -509,15 +509,15 @@ export default function AuditPage() {
             <Alert
               type="success"
               showIcon
-              message={verifyOkText(verifyView.summary)}
+              title={verifyOkText(verifyView.summary)}
               description={
                 <span className="opsmind-admin-mono">链头哈希 {verifyView.summary.headHash}</span>
               }
             />
           ) : verifyView.kind === 'broken' ? (
-            <Alert type="error" showIcon message={verifyBrokenText(verifyView.summary)} />
+            <Alert type="error" showIcon title={verifyBrokenText(verifyView.summary)} />
           ) : (
-            <Alert type="warning" showIcon message={`哈希链校验未完成：${verifyView.text}`} />
+            <Alert type="warning" showIcon title={`哈希链校验未完成：${verifyView.text}`} />
           )}
         </div>
       ) : null}

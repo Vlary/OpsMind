@@ -96,7 +96,7 @@ export default function LoginPage() {
     return (
       <ConfigProvider theme={themeConfig(theme)}>
         <div className="opsmind-login-page">
-          <Spin size="large" tip="正在确认登录状态…">
+          <Spin size="large" description="正在确认登录状态…">
             <div style={{ width: 160, height: 80 }} />
           </Spin>
         </div>
@@ -139,14 +139,14 @@ export default function LoginPage() {
             使用你的用户名与密码登录。角色与权限由服务端下发，界面只按权限展示可用操作。
           </Typography.Paragraph>
           {sessionNotice ? (
-            <Alert type="info" showIcon style={{ marginBottom: 12 }} message={sessionNotice} />
+            <Alert type="info" showIcon style={{ marginBottom: 12 }} title={sessionNotice} />
           ) : null}
           {passwordSet ? (
             <Alert
               type="success"
               showIcon
               style={{ marginBottom: 12 }}
-              message="密码已设置，请用新密码登录"
+              title="密码已设置，请用新密码登录"
               description="为安全起见不会自动登录；请使用刚设置的密码登录。"
             />
           ) : null}

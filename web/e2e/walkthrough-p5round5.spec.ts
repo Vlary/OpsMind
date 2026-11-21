@@ -18,7 +18,7 @@ import {
 
 // 五期第 5 轮冲刺激收走查（round 5）：真链路逐页操作 + 全程 console 收集。
 // 与 round4 互补的增量覆盖：
-// - /monitor 空态三档（页级空态 / 窗口无点「暂无采集数据」/ 单点「点数不足」）；
+// - /monitor 空态三档（页级空态 / 窗口无点但存在 latest「最近一次采样 N 前」/ 单点标注时间与值）；
 // - /alerts 诊断全链路到 decide：awaiting_fix → 执行（需审批）→ 批准 →
 //   执行结果 toast 全文 → 审批 Alert 消失 → 标记完成 → done；
 // - /batch 页面链路：tag 筛选 + 意图描述 → 创建 → 批准 → 执行失败 toast
@@ -85,7 +85,7 @@ test.use({ storageState: AUTH_STATE_FILE });
 
 test.describe.configure({ mode: 'serial' });
 
-test('monitor：空态三档——页级空态/窗口无点/单点点数不足', async ({ page }) => {
+test('monitor：空态三档——页级空态/窗口无点/单点标注', async ({ page }) => {
   const watched = watchConsole(page);
 
   // 清场：本用例是「独占干净库」设计（①空态/②窗口无点均要求库内无其他
@@ -104,9 +104,9 @@ test('monitor：空态三档——页级空态/窗口无点/单点点数不足',
   });
   // 下拉空提示（打开下拉验证 notFoundContent）。
   await page.getByRole('combobox', { name: '选择服务器' }).click();
-  await expect(
-    page.getByText('暂无已采集的服务器（等待首轮采集）').first(),
-  ).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('暂无已采集的服务器（等待首轮采集）').first()).toBeVisible({
+    timeout: 10_000,
+  });
   await page.keyboard.press('Escape');
 
   // ② 窗口无点：只插 20h 前的点（1h/6h 窗口外，24h 窗口内）。
@@ -123,16 +123,28 @@ test('monitor：空态三档——页级空态/窗口无点/单点点数不足',
       net_out_bps = EXCLUDED.net_out_bps, updated_at = EXCLUDED.updated_at;
   `);
   await page.reload();
-  // 有资产后：概要「1 台」+ 卡片当前值可见。
-  await expect(page.getByText('当前 55.5%').first()).toBeVisible({ timeout: 20_000 });
-  // 1h 默认窗口无点：六张卡显示「暂无采集数据」。
-  await expect(page.getByText('暂无采集数据').first()).toBeVisible({ timeout: 20_000 });
-
-  // ③ 单点：24h 窗口含 20h 前 1 点 → 「点数不足，等待更多采集数据」。
-  await page.locator('.ant-segmented-item', { hasText: '24 小时' }).click();
-  await expect(page.getByText('点数不足，等待更多采集数据').first()).toBeVisible({
+  // 有资产后：窗口内无点，卡片不再把 20 小时前的值冒充「当前」，
+  // 改为「最新（20 小时前）」（走查第 14 轮 low）。
+  await expect(page.getByText(/最新（20 小时前） 55\.5%/).first()).toBeVisible({
     timeout: 20_000,
   });
+  // 1h 默认窗口无点、但该机存在 latest：写「最近一次采样 20 小时前」，
+  // 与「从未采集」的「暂无采集数据」区分。
+  await expect(page.getByText('窗口内无采样（最近一次采样 20 小时前）').first()).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByText('暂无采集数据')).toHaveCount(0);
+
+  // ③ 单点：24h 窗口含 20h 前 1 点 → 图上仍画出该点，并标注时间与值
+  // （第 10 轮 low：不再显示「点数不足，等待更多采集数据」）。
+  // 锚定完整文案：集群趋势卡的「近 24 小时」会与时间窗选项子串撞车。
+  await page.locator('.ant-segmented-item', { hasText: /^24 小时$/ }).click();
+  const singleNote = page.getByTestId('metric-chart-single-point-note').first();
+  await expect(singleNote).toBeVisible({ timeout: 20_000 });
+  await expect(singleNote).toContainText('仅 1 个采样点（');
+  await expect(singleNote).toContainText('值 55.5%');
+  await expect(page.getByText('点数不足，等待更多采集数据')).toHaveCount(0);
+  await expect(page.getByTestId('metric-chart-series-dot').first()).toBeVisible();
 
   // ④ 两点成线：再插 5min 前的点，6h 窗口（5min 在窗内、20h 在窗外——只有
   // 一点？改插 3h 前）→ 补一个 3h 前的点，6h 窗口 2 点出 polyline。
@@ -148,12 +160,15 @@ test('monitor：空态三档——页级空态/窗口无点/单点点数不足',
       load_1 = EXCLUDED.load_1, net_in_bps = EXCLUDED.net_in_bps,
       net_out_bps = EXCLUDED.net_out_bps, updated_at = EXCLUDED.updated_at;
   `);
-  // overview（latest 概要值）无轮询、缓存未失效——插库后 reload 再看。
+  // overview 每 30s 轮询：插库后 reload 强制取最新快照，避免与下一轮轮询竞态。
   await page.reload();
   await page.locator('.ant-segmented-item', { hasText: '6 小时' }).click();
   await expect(page.locator('svg polyline').first()).toBeVisible({ timeout: 20_000 });
-  // 概要卡「当前 12.5%」（latest 已更新到 5min 前的值）。
-  await expect(page.getByText('当前 12.5%').first()).toBeVisible({ timeout: 20_000 });
+  // 概要卡「最新（N 分钟前） 12.5%」：latest 是 5min 前的值，已越过
+  // 5 分钟过期阈值（第 15 轮起不再谎称「当前」）。
+  await expect(page.getByText(/最新（\d+ 分钟前） 12\.5%/).first()).toBeVisible({
+    timeout: 20_000,
+  });
 
   expect(watched.pageErrors, `monitor pageerror：${watched.pageErrors.join(' | ')}`).toEqual([]);
   expect(watched.errors, `monitor console error：${watched.errors.join(' | ')}`).toEqual([]);
@@ -187,7 +202,9 @@ test('alerts：诊断全链路——fix 审批→批准→执行失败 toast 全
   ).toBeVisible({ timeout: 15_000 });
   await expect(drawer.getByText('待审批的修复命令')).toBeVisible({ timeout: 15_000 });
   // 建议命令原样出现在审批区。
-  await expect(drawer.locator('.opsmind-admin-mono', { hasText: 'systemctl status sshd' })).toBeVisible();
+  await expect(
+    drawer.locator('.opsmind-admin-mono', { hasText: 'systemctl status sshd' }),
+  ).toBeVisible();
 
   const decideCalls: Array<{ url: string; status: number; body: unknown }> = [];
   page.on('response', async (res) => {
@@ -219,7 +236,9 @@ test('alerts：诊断全链路——fix 审批→批准→执行失败 toast 全
 
   // 标记处理完成 → 状态「已完成」。
   await drawer.getByRole('button', { name: /标记处理完成/ }).click();
-  await expect(page.locator('.ant-message-success', { hasText: '诊断会话已标记完成' })).toBeVisible();
+  await expect(
+    page.locator('.ant-message-success', { hasText: '诊断会话已标记完成' }),
+  ).toBeVisible();
   await expect(drawer.getByText('已完成')).toBeVisible({ timeout: 15_000 });
   await drawer.getByRole('button', { name: /关\s*闭/ }).click();
 
@@ -269,7 +288,10 @@ test('batch：tag 筛选+描述创建→批准→失败 toast 全文→partial �
   });
 
   // 批准：decide 200 + 执行失败 toast 全文（重点查「退出码 undefined」）。
-  await drawer.getByRole('button', { name: /批\s*准/ }).first().click();
+  await drawer
+    .getByRole('button', { name: /批\s*准/ })
+    .first()
+    .click();
   await expect.poll(() => decideCalls.length, { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
   expect(decideCalls[0].status).toBe(200);
   const toast = page.locator('.ant-message-warning').first();
@@ -365,12 +387,19 @@ test('monitor：采集器暂停/恢复——Alert 提示与概要卡状态联动
   `);
   await page.goto('/monitor');
   await expect(page.getByRole('heading', { name: '监控' })).toBeVisible();
-  await expect(page.getByText('当前 12.5%').first()).toBeVisible({ timeout: 20_000 });
+  // 5 分钟前的 latest 已过期：卡头是「最新（N 分钟前）」而非「当前」。
+  await expect(page.getByText(/最新（\d+ 分钟前） 12\.5%/).first()).toBeVisible({
+    timeout: 20_000,
+  });
 
   // 暂停：关 Switch → 保存 → Alert + 概要卡「已暂停」。
   await page.getByRole('switch', { name: '启用采集' }).click();
   await page.getByRole('button', { name: '保存采集配置' }).click();
-  await expect(page.locator('.ant-message-success', { hasText: '采集配置已保存' })).toBeVisible();
+  // .last()：两次保存间隔可能短于 toast 的 3s 展示期，首条仍可见时
+  // strict mode 会因两个 .ant-message-success 匹配而失败（走查第 2 轮）。
+  await expect(
+    page.locator('.ant-message-success', { hasText: '采集配置已保存' }).last(),
+  ).toBeVisible();
   await expect(page.getByText('采集已暂停：折线展示历史数据，不再自动刷新。')).toBeVisible({
     timeout: 15_000,
   });
@@ -380,7 +409,7 @@ test('monitor：采集器暂停/恢复——Alert 提示与概要卡状态联动
   await page.getByRole('switch', { name: '启用采集' }).click();
   await page.getByRole('button', { name: '保存采集配置' }).click();
   await expect(
-    page.locator('.ant-message-success', { hasText: '采集配置已保存' }),
+    page.locator('.ant-message-success', { hasText: '采集配置已保存' }).last(),
   ).toBeVisible();
   await expect(page.getByText('运行中').first()).toBeVisible({ timeout: 15_000 });
   await expect(page.getByText('采集已暂停：折线展示历史数据，不再自动刷新。')).toHaveCount(0, {
@@ -389,6 +418,129 @@ test('monitor：采集器暂停/恢复——Alert 提示与概要卡状态联动
 
   expect(watched.pageErrors, `collector pageerror：${watched.pageErrors.join(' | ')}`).toEqual([]);
   expect(watched.errors, `collector console error：${watched.errors.join(' | ')}`).toEqual([]);
+});
+
+test('monitor：overview 每 30s 轮询——Top12/概要卡与折线同源刷新（走查第 2 轮 medium）', async ({
+  page,
+}) => {
+  const requestedAt: number[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/api/monitor/overview') {
+      requestedAt.push(Date.now());
+    }
+  });
+  await page.goto('/monitor');
+  await expect(page.getByRole('heading', { name: '监控' })).toBeVisible();
+  await expect.poll(() => requestedAt.length, { timeout: 20_000 }).toBeGreaterThan(0);
+  const first = requestedAt[0] as number;
+  // 30s refetchInterval：25s 后再出现一次 overview 请求即证明轮询生效。
+  await expect
+    .poll(() => requestedAt.some((time) => time - first >= 25_000), { timeout: 45_000 })
+    .toBe(true);
+});
+
+test('monitor：10 分钟采集间隔不误标过期，单机卡显示采样时刻（走查第 2 轮 medium）', async ({
+  page,
+}) => {
+  const serverID = await seedServerId(page);
+  const serversRes = await page.request.get('/api/servers', { headers: API_HEADERS });
+  const serverName = (
+    ((await serversRes.json()) as { items: Array<{ id: string; name: string }> }).items ?? []
+  ).find((server) => server.id === serverID)?.name;
+  expect(serverName).toBeTruthy();
+  // 6 分钟前的采样：固定 5 分钟阈值下会误标过期；600s 间隔应为 20 分钟。
+  psql(`
+    INSERT INTO server_metrics_latest (server_id, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps, updated_at)
+    VALUES ('${serverID}', now() - interval '6 minutes', 99.9, 30, 40, 0.4, 1024, 2048, now())
+    ON CONFLICT (server_id) DO UPDATE SET
+      created_at = EXCLUDED.created_at, cpu_pct = EXCLUDED.cpu_pct,
+      mem_pct = EXCLUDED.mem_pct, disk_pct = EXCLUDED.disk_pct,
+      load_1 = EXCLUDED.load_1, net_in_bps = EXCLUDED.net_in_bps,
+      net_out_bps = EXCLUDED.net_out_bps, updated_at = EXCLUDED.updated_at;
+  `);
+  const setCollector = (intervalSeconds: number) =>
+    page.request.put('/api/monitor/collector', {
+      headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+      data: { enabled: true, interval_seconds: intervalSeconds },
+    });
+  try {
+    expect((await setCollector(600)).ok()).toBeTruthy();
+    await page.goto('/monitor');
+    await expect(page.getByRole('heading', { name: '监控' })).toBeVisible();
+    // CPU 卡口径（走查第 2 轮 low）与按采集间隔推导的 Top12 阈值。
+    await expect(page.getByText('/proc/stat 使用率（两次采样差分计算）').first()).toBeVisible({
+      timeout: 20_000,
+    });
+    await expect(page.getByText('采样超 20 分钟标为过期')).toBeVisible({ timeout: 20_000 });
+    // 单机卡区域明确给出采样时刻/年龄，不再只写「当前」。
+    await expect(page.getByText(/最新采样 .+（\d+ 分钟前/)).toBeVisible({ timeout: 20_000 });
+    // Top12 该行（按服务器名定位，避免其他残留机器排在第 1）不应带过期标记。
+    await page.locator(`rect[aria-label*="${serverName}"]`).first().hover();
+    const tooltip = page.getByTestId('top-server-tooltip');
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).not.toContainText('已过期');
+  } finally {
+    await setCollector(60);
+  }
+});
+
+test('monitor：选择器按名称排序/可搜索、默认选最热机（走查第 2 轮 low）', async ({ page }) => {
+  const created: Array<{ id: string; name: string }> = [];
+  try {
+    // 故意按反序创建，证明下拉顺序来自名称排序而不是 UUID/创建序。
+    for (const [index, name] of ['sel-warm', 'sel-cold', 'sel-hot'].entries()) {
+      const res = await page.request.post('/api/servers', {
+        headers: { ...API_HEADERS, 'Content-Type': 'application/json' },
+        data: {
+          name,
+          host: '127.0.0.1',
+          port: 90 + index,
+          username: 'root',
+          auth_method: 'password',
+          password: 'not-a-real-password',
+          tags: ['e2e'],
+          auto_exec_enabled: false,
+        },
+      });
+      expect(res.ok()).toBeTruthy();
+      const body = (await res.json()) as { id: string };
+      created.push({ id: body.id, name });
+    }
+    const idOf = (name: string) => created.find((item) => item.name === name)!.id;
+    psql(`
+      INSERT INTO server_metrics_latest (server_id, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps, updated_at)
+      VALUES ('${idOf('sel-cold')}', now() - interval '1 minute', 1, 10, 20, 0.1, 0, 0, now()),
+             ('${idOf('sel-hot')}', now() - interval '1 minute', 100, 10, 20, 0.1, 0, 0, now()),
+             ('${idOf('sel-warm')}', now() - interval '1 minute', 50, 10, 20, 0.1, 0, 0, now())
+      ON CONFLICT (server_id) DO UPDATE SET
+        created_at = EXCLUDED.created_at, cpu_pct = EXCLUDED.cpu_pct,
+        mem_pct = EXCLUDED.mem_pct, disk_pct = EXCLUDED.disk_pct,
+        load_1 = EXCLUDED.load_1, net_in_bps = EXCLUDED.net_in_bps,
+        net_out_bps = EXCLUDED.net_out_bps, updated_at = EXCLUDED.updated_at;
+    `);
+    await page.goto('/monitor');
+    await expect(page.getByRole('heading', { name: '监控' })).toBeVisible();
+    const selector = page.locator('.ant-select-content');
+    await expect(selector).toContainText('sel-hot', { timeout: 20_000 });
+
+    await page.getByRole('combobox', { name: '选择服务器' }).click();
+    const dropdown = page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)');
+    const options = dropdown.locator('.ant-select-item-option').filter({ hasText: 'sel-' });
+    await expect(options).toHaveCount(3);
+    const titles = await options.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute('title')),
+    );
+    expect(titles).toEqual(['sel-cold', 'sel-hot', 'sel-warm']);
+
+    // showSearch：输入名称片段后只剩命中的一项。
+    await page.getByRole('combobox', { name: '选择服务器' }).fill('sel-hot');
+    await expect(dropdown.locator('.ant-select-item-option', { hasText: 'sel-hot' })).toBeVisible();
+    await expect(dropdown.locator('.ant-select-item-option', { hasText: 'sel-cold' })).toHaveCount(
+      0,
+    );
+  } finally {
+    psql(`DELETE FROM servers WHERE name LIKE 'sel-%';`);
+  }
 });
 
 test('alerts：通知渠道 CRUD 冒烟——新建 webhook → 行出现 → 删除', async ({ page }) => {
@@ -464,7 +616,10 @@ test('chat 四链全走：metrics→alerts→batch(深链批准)→diagnosis(深
       });
     }
   });
-  await popupDrawer.getByRole('button', { name: /批\s*准/ }).first().click();
+  await popupDrawer
+    .getByRole('button', { name: /批\s*准/ })
+    .first()
+    .click();
   await expect.poll(() => popupDecide.length, { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
   expect(popupDecide[0].status).toBe(200);
   const popupToast = popup.locator('.ant-message-warning').first();
@@ -502,9 +657,10 @@ test('chat 四链全走：metrics→alerts→batch(深链批准)→diagnosis(深
     popupWatched.pageErrors,
     `batch popup pageerror：${popupWatched.pageErrors.join(' | ')}`,
   ).toEqual([]);
-  expect(popupWatched.errors, `batch popup console error：${popupWatched.errors.join(' | ')}`).toEqual(
-    [],
-  );
+  expect(
+    popupWatched.errors,
+    `batch popup console error：${popupWatched.errors.join(' | ')}`,
+  ).toEqual([]);
   expect(
     diagWatched.pageErrors,
     `diag popup pageerror：${diagWatched.pageErrors.join(' | ')}`,

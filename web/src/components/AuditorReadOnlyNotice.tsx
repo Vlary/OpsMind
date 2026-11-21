@@ -17,7 +17,7 @@ export default function AuditorReadOnlyNotice() {
     <Alert
       type="info"
       showIcon
-      message="审计员为只读角色"
+      title="审计员为只读角色"
       description="可查看审计、回放与录制；任何写操作都会被服务端拒绝。"
     />
   );

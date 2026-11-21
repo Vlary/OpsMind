@@ -5,7 +5,8 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist', 'node_modules', 'src/api/schema.d.ts'] },
+  // .zcode 是本地工作流运行产物（非仓库源码），不能进入 lint 门禁。
+  { ignores: ['dist', 'node_modules', 'src/api/schema.d.ts', '**/.zcode/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

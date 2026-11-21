@@ -199,7 +199,7 @@ export default function DiagnosisDrawer({ open, sessionId, onClose }: DiagnosisD
         setPendingApproval(null);
         onClose();
       }}
-      width={640}
+      size={640}
       destroyOnHidden
     >
       {sessionQuery.isLoading ? (
@@ -272,7 +272,7 @@ function DiagnosisBody({
   // 六期打磨 sprint 3：修复批审批的命令查看态（审批时禁止改写）。
   const [editing, setEditing] = useState(false);
   return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Space orientation="vertical" size={16} style={{ width: '100%' }}>
       <Descriptions size="small" column={2} bordered>
         <Descriptions.Item label="服务器" span={1}>
           {session.server_name || session.server_id.slice(0, 8)}
@@ -298,7 +298,7 @@ function DiagnosisBody({
         <Alert
           type="error"
           showIcon
-          message={describePhase5Failure({
+          title={describePhase5Failure({
             code: session.error_code,
             message: session.error_code,
             requestId: '',
@@ -312,7 +312,7 @@ function DiagnosisBody({
         <Alert
           type="info"
           showIcon
-          message="AI 正在采集证据并生成诊断报告……"
+          title="AI 正在采集证据并生成诊断报告……"
           description="诊断引擎在独立会话内执行安全采集命令（仅 safe 级别），完成后自动展示报告。"
         />
       ) : null}
@@ -323,7 +323,7 @@ function DiagnosisBody({
         <Alert
           type="warning"
           showIcon
-          message="待审批的修复命令"
+          title="待审批的修复命令"
           description={
             <div>
               <Typography.Paragraph style={{ marginBottom: 8 }}>
@@ -444,7 +444,7 @@ function ReportView({
             key: index,
             label: `证据 ${index + 1}：${evidence.source}${evidence.note ? ` · ${evidence.note}` : ''}`,
             children: (
-              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <Space orientation="vertical" size={4} style={{ width: '100%' }}>
                 {evidence.command ? (
                   <Typography.Text code>{evidence.command}</Typography.Text>
                 ) : null}
@@ -461,7 +461,7 @@ function ReportView({
           <Typography.Title level={5} style={{ marginBottom: 8 }}>
             修复建议
           </Typography.Title>
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space orientation="vertical" size={8} style={{ width: '100%' }}>
             {report.suggestions.map((suggestion: FixSuggestion) => (
               <div
                 key={suggestion.command}
@@ -471,7 +471,7 @@ function ReportView({
                   padding: '8px 12px',
                 }}
               >
-                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space orientation="vertical" size={4} style={{ width: '100%' }}>
                   <CodeBlock language="bash" code={suggestion.command} closed />
                   <Space size={8} wrap>
                     <RiskBadge level={suggestion.risk_level} />

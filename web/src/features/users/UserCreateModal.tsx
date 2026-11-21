@@ -118,7 +118,7 @@ export default function UserCreateModal({ open, onClose, onCreated }: UserCreate
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="不设置初始密码"
+        title="不设置初始密码"
         description="系统会向目标邮箱发送一次性邀请链接，由本人设置密码；链接 30 分钟内有效且仅可使用一次。若用户名与未激活账号重名，将重发邀请并使用本次填写的邮箱。"
       />
       {failure ? <ApiErrorAlert failure={failure} /> : null}

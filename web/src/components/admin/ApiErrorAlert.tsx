@@ -33,7 +33,7 @@ export default function ApiErrorAlert({
     <Alert
       type="error"
       showIcon
-      message={describe(failure)}
+      title={describe(failure)}
       {...(meta ? { description: <div className="opsmind-admin-meta">{meta}</div> } : {})}
       closable={closable}
       {...(onClose ? { onClose } : {})}

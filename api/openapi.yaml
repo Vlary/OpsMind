@@ -1796,6 +1796,40 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/monitor/trend:
+    get:
+      tags: [monitor]
+      operationId: getMonitorTrend
+      summary: 监控图表时间桶聚合
+      description: |
+        服务端写死桶宽：window=24h → bucket_seconds=3600（24 桶）；window=7d →
+        bucket_seconds=21600（28 桶）。按 UTC 整点对齐（origin 2000-01-01T00:00:00Z），
+        to 为当前桶结束时刻、from=to-桶数×桶宽。无样本桶的六个指标字段为 null
+        （前端折线断线，不连点）；servers/samples 为 0。聚合在 SQL 单次 date_bin 完成。
+        to 是当前桶的结束（未来）时刻，聚合上界单独钳到服务端当前时刻：只计入
+        created_at <= now 的样本，时钟超前机器写入的未来样本不得进入当前桶的
+        P95/峰值/台数/样本数；桶数与 from/to 不变，无样本桶仍补 null。
+      parameters:
+        - name: window
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d]
+            default: 24h
+      responses:
+        '200':
+          description: 时间桶序列（≤28 点）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MonitorTrend'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/monitor/collector:
     get:
       tags: [monitor]
@@ -1846,6 +1880,9 @@ paths:
       tags: [monitor]
       operationId: getServerMetrics
       summary: 服务器指标时间序列
+      description: >-
+        返回窗口内按 created_at 升序的采样点，不做降采样；最多
+        minutes×2 点（采集间隔最小 30s，24h 窗口 2880 点）。
       parameters:
         - name: id
           in: path
@@ -2030,6 +2067,24 @@ paths:
           schema:
             type: string
             format: uuid
+        - name: rule_id
+          in: query
+          description: 仅下钻某一规则（与 fired_after/fired_before 可叠加）。
+          schema:
+            type: string
+            format: uuid
+        - name: fired_after
+          in: query
+          description: 触发时间下界（含边界，RFC3339，半开区间 [after, before)）。必须与 fired_before 成对；after<before 且跨度 ≤7d。
+          schema:
+            type: string
+            format: date-time
+        - name: fired_before
+          in: query
+          description: 触发时间上界（不含边界，RFC3339；`fired_at < before`）。与图表桶同为半开区间，必须与 fired_after 成对。
+          schema:
+            type: string
+            format: date-time
         - name: before_id
           in: query
           schema:
@@ -2049,6 +2104,43 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AlertEventList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/alert-events/stats:
+    get:
+      tags: [alerts]
+      operationId: getAlertEventStats
+      summary: 告警事件图表统计
+      description: |
+        两条独立 SQL：① 按 fired_at 的 date_bin 时间桶 + count(*) FILTER 分级
+        （空桶在服务端补零，时间轴连续）；② 按 rule 聚合 ORDER BY count DESC
+        LIMIT top_rules。窗口与桶宽同 GET /api/monitor/trend。
+      parameters:
+        - name: window
+          in: query
+          schema:
+            type: string
+            enum: [24h, 7d]
+            default: 24h
+        - name: top_rules
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 8
+      responses:
+        '200':
+          description: 统计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertEventStats'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '500':
@@ -2632,6 +2724,43 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/inspection/trend:
+    get:
+      tags: [inspection]
+      operationId: getInspectionTrend
+      summary: 巡检评分趋势
+      description: |
+        按报告份数（不是天数）取最近 limit 份：SELECT … ORDER BY created_at DESC
+        LIMIT limit+1，Go 反转为 created_at 升序。truncated=true 表示还有更早报告。
+        路径刻意不用 /inspection/reports/trend，避免与 /inspection/reports/{id} 的
+        静态段/参数段路由冲突。
+      parameters:
+        - name: job_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 60
+            default: 30
+      responses:
+        '200':
+          description: 报告趋势（created_at 升序，≤60 点）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionTrend'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -6348,11 +6477,14 @@ components:
           type: integer
         points:
           type: array
-          maxItems: 1440
+          maxItems: 2880
           items:
             $ref: '#/components/schemas/MetricPoint'
         truncated:
           type: boolean
+          description: >-
+            true 表示窗口内还有更早的点因 2880 点上限（30s 最小采集间隔 ×
+            24h）未返回；仅表示返回集合被截断，不代表更早时段无采样。
 
     CollectorConfig:
       type: object
@@ -6368,9 +6500,15 @@ components:
 
     MonitorOverview:
       type: object
-      required: [servers, firing, last_inspection, collector]
+      required: [servers, firing, server_time, last_inspection, collector]
       additionalProperties: false
       properties:
+        server_time:
+          type: string
+          format: date-time
+          description: >-
+            本响应生成时的服务端时间；前端用它校正浏览器时钟偏差，所有
+            「N 前/过期」与未来样本判定均按此时间计算。
         servers:
           type: array
           items:
@@ -6404,9 +6542,77 @@ components:
         collector:
           $ref: '#/components/schemas/CollectorConfig'
 
+    MonitorTrend:
+      type: object
+      required: [window, bucket_seconds, from, to, first_sample, last_sample, points]
+      additionalProperties: false
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d]
+        bucket_seconds:
+          type: integer
+          enum: [3600, 21600]
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        first_sample:
+          type: string
+          format: date-time
+          nullable: true
+          description: 窗口内实际参与聚合的最早采样时刻（已按服务端 now 钳制）；无样本时为 null。
+        last_sample:
+          type: string
+          format: date-time
+          nullable: true
+          description: 窗口内实际参与聚合的最晚采样时刻（已按服务端 now 钳制）；无样本时为 null。前端用 last_sample - first_sample 展示真实数据跨度，避免把未满桶的桶跨度说成数据跨度。
+        points:
+          type: array
+          maxItems: 28
+          items:
+            $ref: '#/components/schemas/MetricTrendPoint'
+
+    MetricTrendPoint:
+      type: object
+      description: 一个时间桶；无样本桶的六个指标字段为 null（前端断线不连点）。
+      required: [bucket_start, cpu_p95, cpu_avg, cpu_max, mem_p95, mem_avg, mem_max, servers, samples]
+      additionalProperties: false
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        cpu_p95:
+          type: number
+          nullable: true
+        cpu_avg:
+          type: number
+          nullable: true
+        cpu_max:
+          type: number
+          nullable: true
+        mem_p95:
+          type: number
+          nullable: true
+        mem_avg:
+          type: number
+          nullable: true
+        mem_max:
+          type: number
+          nullable: true
+        servers:
+          type: integer
+          description: 桶内覆盖的不同服务器数（count(DISTINCT server_id)）。
+        samples:
+          type: integer
+          format: int64
+          description: 桶内样本数（count(*)）。
+
     MetricLatestRow:
       type: object
-      required: [server_id, server_name, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps]
+      required: [server_id, server_name, os, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps]
       additionalProperties: false
       properties:
         server_id:
@@ -6414,6 +6620,14 @@ components:
           format: uuid
         server_name:
           type: string
+        os:
+          allOf:
+            - $ref: '#/components/schemas/TargetOS'
+          description: >-
+            资产平台（JOIN servers.os）。前端按它切换指标副文案：Linux 为
+            /proc 与 loadavg 口径；Windows 为 Win32_Processor
+            LoadPercentage / Win32_OperatingSystem / ProcessorQueueLength
+            口径。缺失时前端使用平台中性文案。
         created_at:
           type: string
           format: date-time
@@ -6644,6 +6858,86 @@ components:
           type: integer
           format: int64
           nullable: true
+
+    AlertEventStats:
+      type: object
+      required: [window, bucket_seconds, from, to, server_time, total, distinct_rules, severity_timeline, top_rules]
+      additionalProperties: false
+      properties:
+        window:
+          type: string
+          enum: [24h, 7d]
+        bucket_seconds:
+          type: integer
+          enum: [3600, 21600]
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        server_time:
+          type: string
+          format: date-time
+          description: >-
+            本响应生成时的服务端时间；to 对齐到当前桶结束，to > server_time
+            表示最后一个桶尚未走完（前端标「进行中」）。
+        total:
+          type: integer
+          format: int64
+        distinct_rules:
+          type: integer
+          format: int64
+        severity_timeline:
+          type: array
+          maxItems: 28
+          items:
+            $ref: '#/components/schemas/AlertSeverityBucket'
+        top_rules:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/AlertRuleStat'
+
+    AlertSeverityBucket:
+      type: object
+      required: [bucket_start, info, warning, critical]
+      additionalProperties: false
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        info:
+          type: integer
+          format: int64
+        warning:
+          type: integer
+          format: int64
+        critical:
+          type: integer
+          format: int64
+
+    AlertRuleStat:
+      type: object
+      required: [rule_id, rule_name, severity, count, server_count, last_fired_at]
+      additionalProperties: false
+      properties:
+        rule_id:
+          type: string
+          format: uuid
+        rule_name:
+          type: string
+        severity:
+          $ref: '#/components/schemas/AlertSeverity'
+        count:
+          type: integer
+          format: int64
+        server_count:
+          type: integer
+          format: int64
+        last_fired_at:
+          type: string
+          format: date-time
 
     NotificationChannel:
       type: object
@@ -7012,6 +7306,50 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/InspectionReport'
+
+    InspectionTrend:
+      type: object
+      required: [job_id, points, truncated]
+      additionalProperties: false
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 回显请求的 job_id；缺省为 null（全部报告，含即时巡检）。
+        points:
+          type: array
+          maxItems: 60
+          items:
+            $ref: '#/components/schemas/InspectionTrendPoint'
+        truncated:
+          type: boolean
+          description: true=还有更早的报告（按报告份数截断，不是时间窗截断）。
+
+    InspectionTrendPoint:
+      type: object
+      required: [report_id, created_at, avg_score, server_count, anomaly_count, trigger]
+      additionalProperties: false
+      properties:
+        report_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        avg_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        server_count:
+          type: integer
+          minimum: 0
+        anomaly_count:
+          type: integer
+          minimum: 0
+        trigger:
+          type: string
+          enum: [cron, manual, chat]
 
     InspectionAnomaly:
       type: object

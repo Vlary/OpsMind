@@ -334,7 +334,7 @@ export default function AppShell() {
         <Drawer
           open={isMobile && mobileNavOpen}
           placement="left"
-          width={240}
+          size={240}
           onClose={() => setMobileNavOpen(false)}
           styles={{ body: { padding: 0, background: 'var(--color-bg-shell)' } }}
         >

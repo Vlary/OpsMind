@@ -59,16 +59,19 @@ test.describe('六期打磨 sprint 6：监控网络速率按字节/秒展示', (
             {
               server_id: serverId,
               server_name: serverName,
-              created_at: '2026-11-08T10:00:00Z',
+              // 当前时刻：窗口内有采样，卡头才会显示「当前」（第 14 轮起
+              // 窗口无点不再拿 overview 的最新值冒充当前）。
+              created_at: new Date().toISOString(),
               cpu_pct: 12.5,
               mem_pct: 43.1,
               disk_pct: 61,
               load_1: 0.35,
               net_in_bps: 1_000_000,
               net_out_bps: 2_000_000,
-              updated_at: '2026-11-08T10:00:00Z',
+              updated_at: new Date().toISOString(),
             },
           ],
+          server_time: new Date().toISOString(),
           firing: { total: 0, critical: 0, warning: 0, info: 0 },
           last_inspection: null,
           collector: { enabled: true, interval_seconds: 60 },
@@ -81,7 +84,7 @@ test.describe('六期打磨 sprint 6：监控网络速率按字节/秒展示', (
           server_id: serverId,
           points: [
             {
-              created_at: '2026-11-08T10:00:00Z',
+              created_at: new Date().toISOString(),
               cpu_pct: 12.5,
               mem_pct: 43.1,
               disk_pct: 61,

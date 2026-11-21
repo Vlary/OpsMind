@@ -43,7 +43,7 @@ export default function ConnectionTestModal({
         <Alert
           type="error"
           showIcon
-          message={describeFailure(error)}
+          title={describeFailure(error)}
           description={
             <div className="opsmind-admin-meta">
               {[error.code, error.requestId ? `request_id: ${error.requestId}` : null]
@@ -58,7 +58,7 @@ export default function ConnectionTestModal({
           <Alert
             type="success"
             showIcon
-            message="连接成功"
+            title="连接成功"
             description={<Tag color="green">延迟 {formatDuration(success.latencyMs)}</Tag>}
           />
           {success.lines.length > 0 ? (
@@ -75,10 +75,10 @@ export default function ConnectionTestModal({
             />
           ) : null}
           {success.warning ? (
-            <Alert type="warning" showIcon message={success.warning} style={{ marginTop: 16 }} />
+            <Alert type="warning" showIcon title={success.warning} style={{ marginTop: 16 }} />
           ) : null}
           {success.note ? (
-            <Alert type="info" showIcon message={success.note} style={{ marginTop: 16 }} />
+            <Alert type="info" showIcon title={success.note} style={{ marginTop: 16 }} />
           ) : null}
         </div>
       ) : null}

@@ -31,8 +31,6 @@ import { usePermissions } from '../auth/useMe';
 type CollectorConfig = components['schemas']['CollectorConfig'];
 
 export default function CollectorCard() {
-  const queryClient = useQueryClient();
-  const [form] = Form.useForm<{ enabled: boolean; interval_seconds: number }>();
   // 采集配置的写入口要求 monitor:manage（后端 authz.PermAlertConfig）。
   // 无该权限的角色（operator 只有 monitor:read）看到的是只读回显，
   // 不再渲染必吃 403 的开关/输入框/保存按钮。
@@ -47,41 +45,6 @@ export default function CollectorCard() {
         throw new ApiRequestError(toApiFailure(error, response));
       }
       return data;
-    },
-  });
-
-  // 配置回读只填一次（避免轮询期间覆盖用户正在编辑的表单值）。
-  useEffect(() => {
-    if (configQuery.data) {
-      form.setFieldsValue({
-        enabled: configQuery.data.enabled,
-        interval_seconds: configQuery.data.interval_seconds,
-      });
-    }
-  }, [configQuery.data, form]);
-
-  const saveMutation = useMutation({
-    mutationFn: async (values: { enabled: boolean; interval_seconds: number }) => {
-      const { data, error, response } = await api.PUT('/api/monitor/collector', {
-        params: { header: writeHeaders() },
-        body: values,
-      });
-      if (error) {
-        throw new ApiRequestError(toApiFailure(error, response));
-      }
-      return data;
-    },
-    onSuccess: (saved: CollectorConfig | undefined) => {
-      message.success('采集配置已保存');
-      // 契约 8.4：PUT 成功 → 失效 collector 与 monitorOverview。
-      void queryClient.invalidateQueries({ queryKey: qk.collector });
-      void queryClient.invalidateQueries({ queryKey: qk.monitorOverview });
-      if (saved) {
-        form.setFieldsValue({ enabled: saved.enabled, interval_seconds: saved.interval_seconds });
-      }
-    },
-    onError: (error) => {
-      message.error(describeFailure(failureFromError(error)));
     },
   });
 
@@ -115,49 +78,13 @@ export default function CollectorCard() {
         <Alert
           type="warning"
           showIcon
-          message="采集已暂停"
+          title="采集已暂停"
           description="历史指标仍可查看，折线不再自动刷新。"
           style={{ marginBottom: 12 }}
         />
       ) : null}
       {canConfigure ? (
-        <Form
-          form={form}
-          layout="vertical"
-          initialValues={{ enabled, interval_seconds: intervalSeconds }}
-          onFinish={(values) => {
-            saveMutation.mutate(values);
-          }}
-        >
-          <Flex gap={16} align="flex-end" wrap="wrap">
-            <Form.Item
-              name="enabled"
-              label="启用采集"
-              valuePropName="checked"
-              style={{ marginBottom: 0 }}
-            >
-              <Switch checkedChildren="开" unCheckedChildren="关" />
-            </Form.Item>
-            <Form.Item
-              name="interval_seconds"
-              label="采集间隔（秒）"
-              rules={[{ required: true, message: '请输入采集间隔' }]}
-              style={{ marginBottom: 0 }}
-            >
-              <InputNumber min={30} max={3600} step={30} style={{ width: 140 }} />
-            </Form.Item>
-            <Form.Item style={{ marginBottom: 0 }}>
-              <Button
-                type="primary"
-                htmlType="submit"
-                loading={saveMutation.isPending}
-                aria-label="保存采集配置"
-              >
-                保存
-              </Button>
-            </Form.Item>
-          </Flex>
-        </Form>
+        <CollectorConfigForm enabled={enabled} intervalSeconds={intervalSeconds} />
       ) : (
         // 只读回显：无 monitor:manage 的角色能看到当前配置，但不给可提交的
         // 控件（服务端 PUT 仍是 403，这里只是不制造必然失败的入口）。
@@ -176,5 +103,95 @@ export default function CollectorCard() {
         不采集）。
       </Typography.Text>
     </Card>
+  );
+}
+
+interface CollectorConfigFormProps {
+  enabled: boolean;
+  intervalSeconds: number;
+}
+
+/**
+ * 可写采集表单（走查第 5 轮 low）。
+ *
+ * `Form.useForm()` 必须在**只在 canConfigure 时挂载**的子组件里调用：
+ * 此前 CollectorCard 顶层无条件创建 form 实例，只读角色的 `<Form>` 分支
+ * 不渲染，antd 每次都会在 console 警告「Instance created by `useForm` is
+ * not connected to any Form element」。
+ */
+function CollectorConfigForm({ enabled, intervalSeconds }: CollectorConfigFormProps) {
+  const queryClient = useQueryClient();
+  const [form] = Form.useForm<{ enabled: boolean; interval_seconds: number }>();
+
+  // 配置回读只填一次（避免轮询期间覆盖用户正在编辑的表单值）。
+  useEffect(() => {
+    form.setFieldsValue({ enabled, interval_seconds: intervalSeconds });
+  }, [enabled, intervalSeconds, form]);
+
+  const saveMutation = useMutation({
+    mutationFn: async (values: { enabled: boolean; interval_seconds: number }) => {
+      const { data, error, response } = await api.PUT('/api/monitor/collector', {
+        params: { header: writeHeaders() },
+        body: values,
+      });
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data;
+    },
+    onSuccess: (saved: CollectorConfig | undefined) => {
+      // 固定 key：连续两次保存（暂停 → 恢复）时复用同一条 toast，避免
+      // 两条「采集配置已保存」同时可见导致 e2e 定位器 strict mode 冲突。
+      message.success({ content: '采集配置已保存', key: 'collector-saved' });
+      // 契约 8.4：PUT 成功 → 失效 collector 与 monitorOverview。
+      void queryClient.invalidateQueries({ queryKey: qk.collector });
+      void queryClient.invalidateQueries({ queryKey: qk.monitorOverview });
+      if (saved) {
+        form.setFieldsValue({ enabled: saved.enabled, interval_seconds: saved.interval_seconds });
+      }
+    },
+    onError: (error) => {
+      message.error(describeFailure(failureFromError(error)));
+    },
+  });
+
+  return (
+    <Form
+      form={form}
+      layout="vertical"
+      initialValues={{ enabled, interval_seconds: intervalSeconds }}
+      onFinish={(values) => {
+        saveMutation.mutate(values);
+      }}
+    >
+      <Flex gap={16} align="flex-end" wrap="wrap">
+        <Form.Item
+          name="enabled"
+          label="启用采集"
+          valuePropName="checked"
+          style={{ marginBottom: 0 }}
+        >
+          <Switch checkedChildren="开" unCheckedChildren="关" />
+        </Form.Item>
+        <Form.Item
+          name="interval_seconds"
+          label="采集间隔（秒）"
+          rules={[{ required: true, message: '请输入采集间隔' }]}
+          style={{ marginBottom: 0 }}
+        >
+          <InputNumber min={30} max={3600} step={30} style={{ width: 140 }} />
+        </Form.Item>
+        <Form.Item style={{ marginBottom: 0 }}>
+          <Button
+            type="primary"
+            htmlType="submit"
+            loading={saveMutation.isPending}
+            aria-label="保存采集配置"
+          >
+            保存
+          </Button>
+        </Form.Item>
+      </Flex>
+    </Form>
   );
 }

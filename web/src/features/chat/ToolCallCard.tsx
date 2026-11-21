@@ -74,7 +74,7 @@ function phaseFiveResult(view: ToolCallView): ReactNode {
       }
     }
     return (
-      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={6} style={{ width: '100%' }}>
         <Space wrap size={12}>
           <Tag>{BATCH_STATUS_LABELS[status] ?? status}</Tag>
           {total !== null ? (
@@ -96,7 +96,7 @@ function phaseFiveResult(view: ToolCallView): ReactNode {
     const summary = typeof record['summary'] === 'string' ? record['summary'] : null;
     const severity = typeof record['severity'] === 'string' ? record['severity'] : null;
     return (
-      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={6} style={{ width: '100%' }}>
         {severity ? (
           <Tag color={severity === 'critical' ? 'red' : severity === 'warning' ? 'gold' : 'green'}>
             {severity}
@@ -203,7 +203,7 @@ export default function ToolCallCard({
               </Typography.Text>
             ),
             children: (
-              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Space orientation="vertical" size={6} style={{ width: '100%' }}>
                 <CodeBlock code={command.text} language={command.language} closed />
                 {command.executed !== null ? (
                   <div>
@@ -233,9 +233,9 @@ export default function ToolCallCard({
         toolCall.result === null && !toolCall.errorCode ? (
           <Typography.Text type="secondary">暂无结果</Typography.Text>
         ) : (
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space orientation="vertical" size={8} style={{ width: '100%' }}>
             {toolCall.errorCode ? (
-              <Space direction="vertical" size={2} style={{ width: '100%' }}>
+              <Space orientation="vertical" size={2} style={{ width: '100%' }}>
                 <Typography.Text type="danger">{describeError(toolCall.errorCode)}</Typography.Text>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   {errorDetail(toolCall)}
@@ -279,7 +279,7 @@ export default function ToolCallCard({
           </Space>
         }
       >
-        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Space orientation="vertical" size={10} style={{ width: '100%' }}>
           {toolCall.status === 'awaiting_approval' && approvals.length === 0 ? (
             <Typography.Text type="warning">等待人工审批…</Typography.Text>
           ) : null}
@@ -300,7 +300,7 @@ export default function ToolCallCard({
           />
 
           {failed && toolCall.errorCode ? (
-            <Space direction="vertical" size={2} style={{ width: '100%' }}>
+            <Space orientation="vertical" size={2} style={{ width: '100%' }}>
               <Typography.Text type="danger">
                 执行失败：{describeError(toolCall.errorCode)}
               </Typography.Text>

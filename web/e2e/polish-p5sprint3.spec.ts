@@ -70,7 +70,10 @@ test('__scenario_diagnosis__：首点批准链路——fix 直返审批、decide
   await expect(drawer.getByText('等待修复处理')).toBeVisible({ timeout: 30_000 });
 
   // 首点「执行（需审批）」创建 console 审批。
-  await drawer.getByRole('button', { name: /执行（需审批）/ }).first().click();
+  await drawer
+    .getByRole('button', { name: /执行（需审批）/ })
+    .first()
+    .click();
 
   // 断言 A（走查 #1 后半）：待审批 Alert 内命令文本非空白——wrapper 直存
   // 时 .command 为 undefined，Alert 渲染空白（报告区的 CodeBlock 也含同一
@@ -83,9 +86,7 @@ test('__scenario_diagnosis__：首点批准链路——fix 直返审批、decide
   // wrapper——{approval, execution} 按统一门限分流。standard 档 + 种子
   // 服务器 auto_exec_enabled=false → safe 命令也走审批：approval 非 null、
   // execution 为 null（五期「fix 直返 Approval」已被六期 wrapper 取代）。
-  await expect
-    .poll(() => fixBodies.length, { timeout: 10_000 })
-    .toBeGreaterThanOrEqual(1);
+  await expect.poll(() => fixBodies.length, { timeout: 10_000 }).toBeGreaterThanOrEqual(1);
   const fixBody = fixBodies[0] as {
     approval?: { id?: string; command?: string } | null;
     execution?: unknown;
@@ -99,9 +100,7 @@ test('__scenario_diagnosis__：首点批准链路——fix 直返审批、decide
   // 断言 C（走查 #1 核心）：首点批准——decide 必须打到真实审批 UUID 且
   // 200（回归时 .id 为 undefined，URL 字面 %7Bid%7D → 500）。
   await drawer.getByRole('button', { name: /批准执行/ }).click();
-  await expect
-    .poll(() => decideCalls.length, { timeout: 20_000 })
-    .toBeGreaterThanOrEqual(1);
+  await expect.poll(() => decideCalls.length, { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
   expect(decideCalls[0].url).toMatch(/\/api\/approvals\/[0-9a-f-]{36}\/decide$/);
   expect(decideCalls[0].status).toBe(200);
 
@@ -111,9 +110,7 @@ test('__scenario_diagnosis__：首点批准链路——fix 直返审批、decide
   await expect(
     popup.locator('.ant-message-warning', { hasText: /修复命令执行失败：退出码 -1/ }),
   ).toBeVisible({ timeout: 15_000 });
-  await expect(
-    popup.locator('.ant-message-success', { hasText: /修复命令已执行/ }),
-  ).toHaveCount(0);
+  await expect(popup.locator('.ant-message-success', { hasText: /修复命令已执行/ })).toHaveCount(0);
 
   // 断言 E（走查 #4）：decide 全链路无 unhandledrejection（回归时 void
   // decideMutation.mutateAsync 未 catch，500 reject 抛出 pageerror

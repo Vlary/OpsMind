@@ -73,8 +73,9 @@ export default function ChannelsTab({ onCreate, onEdit }: ChannelsTabProps) {
     {
       title: '名称',
       dataIndex: 'name',
+      width: 260,
       render: (name: string, channel) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span className="opsmind-admin-cell-title">{name}</span>
           <span className="opsmind-admin-cell-sub">
             更新于 {formatDateTime(channel.updated_at)}
@@ -93,6 +94,7 @@ export default function ChannelsTab({ onCreate, onEdit }: ChannelsTabProps) {
     {
       title: '配置',
       dataIndex: 'config_hint',
+      width: 430,
       ellipsis: true,
       render: (hint: string, channel) => (
         <Space size={8}>
@@ -170,6 +172,9 @@ export default function ChannelsTab({ onCreate, onEdit }: ChannelsTabProps) {
         loading={channelsQuery.isLoading}
         columns={columns}
         dataSource={channelsQuery.data ?? []}
+        // 与规则/事件表同口径：窄屏固定 900px 表宽横向滚动，避免列被压扁。
+        scroll={{ x: 900 }}
+        tableLayout="fixed"
         locale={{ emptyText: <EmptyState description="暂无通知渠道" /> }}
         pagination={false}
       />

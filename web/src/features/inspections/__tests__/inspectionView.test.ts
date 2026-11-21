@@ -54,8 +54,7 @@ describe('looksLikeCron', () => {
 describe('describeInspectionError（巡检错误列中文分类，五期打磨 sprint 2）', () => {
   it('连接被拒绝的错误链归类为巡检目标不可达', () => {
     // 走查实测形态（inspections-runnow-report.png）：runner 落库的错误链原文。
-    const chain =
-      'sshx: dial 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused';
+    const chain = 'sshx: dial 127.0.0.1:1: dial tcp 127.0.0.1:1: connect: connection refused';
     expect(describeInspectionError(chain)).toContain('巡检目标不可达');
     expect(describeInspectionError(chain)).not.toContain('connection refused');
   });
@@ -184,6 +183,8 @@ describe('describeInspectionError：凭据解密失败中文兜底（六期打�
   });
 
   it('凭据解密失败优先于连接类特征（不误判成不可达）', () => {
-    expect(describeInspectionError('inspection: decrypt passphrase failed')).not.toContain('不可达');
+    expect(describeInspectionError('inspection: decrypt passphrase failed')).not.toContain(
+      '不可达',
+    );
   });
 });

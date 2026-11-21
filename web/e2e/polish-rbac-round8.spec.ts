@@ -90,7 +90,11 @@ test.describe('RBAC 第 8 轮：审批决定的执行时机与结果', () => {
     const approvalID = await insertPendingConsoleApproval('rev8 console exec ui');
     try {
       await page.goto('/approvals');
-      const card = page.locator('.chat-approval', { hasText: 'uptime' }).first();
+      // 待处理队列按时间倒序且与并行用例共享：批量用例也会新增 uptime
+      // 审批，按「命令 uptime」取 first 可能点到别人的审批（decide 的 URL
+      // 对不上本用例的 approvalID，waitForResponse 必然超时）。用本用例
+      // 独享的风险原因精确定位。
+      const card = page.locator('.chat-approval', { hasText: 'rev8 console exec ui' }).first();
       await expect(card).toBeVisible({ timeout: 30_000 });
 
       // 页头：console/batch/诊断修复在批准时由服务端立即执行；策略批准即

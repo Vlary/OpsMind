@@ -727,7 +727,7 @@ export default function ReplayPlayer({ conversationId }: ReplayPlayerProps) {
   return (
     <div className="opsmind-replay-player">
       {banner !== null ? (
-        <Alert className="replay-banner" type="warning" showIcon message={banner} />
+        <Alert className="replay-banner" type="warning" showIcon title={banner} />
       ) : null}
 
       <div className="replay-toolbar">

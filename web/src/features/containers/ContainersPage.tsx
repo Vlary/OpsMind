@@ -440,8 +440,8 @@ export default function ContainersPage() {
 
   const renderUnsupported = (text: string) => (
     <EmptyState description={text}>
-      <Space direction="vertical" size={12}>
-        {reprobeNote ? <Alert type="info" showIcon message={reprobeNote} /> : null}
+      <Space orientation="vertical" size={12}>
+        {reprobeNote ? <Alert type="info" showIcon title={reprobeNote} /> : null}
         {reprobeFailure ? (
           <ErrorBanner
             code={reprobeFailure.code}
@@ -572,14 +572,14 @@ export default function ContainersPage() {
             <Alert
               type="info"
               showIcon
-              message="尚未探测容器运行时：正在自动探测一次（探测失败按无容器处理）"
+              title="尚未探测容器运行时：正在自动探测一次（探测失败按无容器处理）"
             />
           ) : null}
           {serversQuery.data && serverOptions.length === 0 ? (
             <Alert
               type="info"
               showIcon
-              message="还没有可管理容器的服务器资产；容器是服务器能力，请先在「服务器」页添加 server 类资产"
+              title="还没有可管理容器的服务器资产；容器是服务器能力，请先在「服务器」页添加 server 类资产"
             />
           ) : null}
         </Flex>

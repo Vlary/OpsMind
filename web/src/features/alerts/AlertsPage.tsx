@@ -13,7 +13,8 @@ import ChannelFormDrawer from './ChannelFormDrawer';
 import ChannelsTab from './ChannelsTab';
 import DiagnosisDrawer from './DiagnosisDrawer';
 import DiagnosisTab from './DiagnosisTab';
-import EventsTable from './EventsTable';
+import { formDrawerKey } from './drawerKeys';
+import EventsTab from './EventsTab';
 import RuleFormDrawer from './RuleFormDrawer';
 import RulesTab from './RulesTab';
 import { useNotificationChannels } from './useNotificationChannels';
@@ -67,7 +68,7 @@ export default function AlertsPage() {
             key: 'events',
             label: '事件',
             children: (
-              <EventsTable
+              <EventsTab
                 onDiagnose={() => {
                   // 事件行「AI 诊断」入口：跳到诊断 Tab 由用户选择目标服务器
                   // 发起（事件维度自动诊断由后端 monitor 评估器触发，页面
@@ -100,7 +101,7 @@ export default function AlertsPage() {
       />
 
       <RuleFormDrawer
-        key={ruleDrawer.rule?.id ?? 'new'}
+        key={formDrawerKey('rule', ruleDrawer.rule?.id)}
         open={ruleDrawer.open}
         rule={ruleDrawer.rule}
         channels={channels}
@@ -109,7 +110,7 @@ export default function AlertsPage() {
         }}
       />
       <ChannelFormDrawer
-        key={channelDrawer.channel?.id ?? 'new'}
+        key={formDrawerKey('channel', channelDrawer.channel?.id)}
         open={channelDrawer.open}
         channel={channelDrawer.channel}
         onClose={() => {

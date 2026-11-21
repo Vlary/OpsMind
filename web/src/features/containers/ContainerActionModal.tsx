@@ -220,7 +220,7 @@ export default function ContainerActionModal({
       // 默认 ok/cancel 按钮，Modal 不自动聚焦任何操作按钮。
       footer={null}
     >
-      <Space direction="vertical" size={12} style={{ width: '100%', marginTop: 8 }}>
+      <Space orientation="vertical" size={12} style={{ width: '100%', marginTop: 8 }}>
         {phase.stage === 'confirm' ? (
           <Typography.Text>
             {/* p4 sprint 4：正文与标题（上方 containerLabel）同口径——无名称
@@ -281,7 +281,7 @@ export default function ContainerActionModal({
               outcome.kind === 'success' ? 'success' : outcome.kind === 'failed' ? 'error' : 'info'
             }
             showIcon
-            message={outcome.message}
+            title={outcome.message}
             description="最终状态以服务端为准。"
           />
         ) : null}
@@ -290,7 +290,7 @@ export default function ContainerActionModal({
           <Alert
             type="error"
             showIcon
-            message={describeContainerFailure(actionError, target.runtime)}
+            title={describeContainerFailure(actionError, target.runtime)}
             description={actionError.requestId ? `request_id: ${actionError.requestId}` : null}
           />
         ) : null}

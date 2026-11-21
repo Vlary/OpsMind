@@ -21,7 +21,7 @@ export default function ErrorBanner({ code, message, requestId, onRetry }: Error
     <Alert
       type="error"
       showIcon
-      message={headline}
+      title={headline}
       {...(meta
         ? {
             description: (

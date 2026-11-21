@@ -250,7 +250,7 @@ test('alerts：诊断全链路——发起→awaiting_fix→执行（需审批�
   expectCleanConsole(watched, 'alerts diagnosis');
 });
 
-test('monitor：双机切换 + firing 概要分色 + 巡检均分联动 + 1440 点截断提示', async ({ page }) => {
+test('monitor：双机切换 + firing 概要分色 + 巡检均分联动 + 2880 点截断提示', async ({ page }) => {
   const watched = watchConsole(page);
 
   // 第二台服务器（监控选择器要两台 latest 才可切换）。
@@ -277,13 +277,13 @@ test('monitor：双机切换 + firing 概要分色 + 巡检均分联动 + 1440 �
   psql(`
     INSERT INTO server_metrics (server_id, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps)
     SELECT '${host1!.id}', now() - (n * interval '5 minutes'), 12.5 + n * 0.5, 30, 40, 0.4, 1024, 2048
-    FROM generate_series(1, 6) AS n;
+    FROM generate_series(0, 5) AS n;
     INSERT INTO server_metrics (server_id, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps)
     SELECT '${host2!.id}', now() - (n * interval '5 minutes'), 77.7 - n * 0.5, 50, 60, 0.9, 4096, 8192
-    FROM generate_series(1, 6) AS n;
+    FROM generate_series(0, 5) AS n;
     INSERT INTO server_metrics_latest (server_id, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps, updated_at)
-    VALUES ('${host1!.id}', now() - interval '5 minutes', 12.5, 30, 40, 0.4, 1024, 2048, now()),
-           ('${host2!.id}', now() - interval '5 minutes', 77.7, 50, 60, 0.9, 4096, 8192, now())
+    VALUES ('${host1!.id}', now(), 12.5, 30, 40, 0.4, 1024, 2048, now()),
+           ('${host2!.id}', now(), 77.7, 50, 60, 0.9, 4096, 8192, now())
     ON CONFLICT (server_id) DO UPDATE SET
       created_at = EXCLUDED.created_at, cpu_pct = EXCLUDED.cpu_pct,
       mem_pct = EXCLUDED.mem_pct, disk_pct = EXCLUDED.disk_pct,
@@ -340,21 +340,22 @@ test('monitor：双机切换 + firing 概要分色 + 巡检均分联动 + 1440 �
       minutesSeen.push(Number(m[1]));
     }
   });
-  await page.locator('.ant-segmented-item', { hasText: '24 小时' }).click();
+  await page.locator('.ant-segmented-item', { hasText: /^24 小时$/ }).click();
   await expect
     .poll(() => minutesSeen.filter((m) => m === 1440).length, { timeout: 20_000 })
     .toBeGreaterThan(0);
 
-  // 截断提示：host1 插 1500 点（57s 间隔 ≈ 23.75h 全在 24h 窗内）→
-  // Window LIMIT 1440 → truncated=true → 前端「返回点集已截断（1440 点）」。
+  // 截断提示：host1 插 3000 点（28s 间隔 ≈ 23.3h 全在 24h 窗内）→
+  // 窗口 LIMIT = 2880（30s 最小间隔 × 24h）→ truncated=true →
+  // 前端「返回点集已截断（仅最近 22 小时，2880 点）」。
   psql(`
     INSERT INTO server_metrics (server_id, created_at, cpu_pct, mem_pct, disk_pct, load_1, net_in_bps, net_out_bps)
-    SELECT '${host1!.id}', now() - (n * interval '57 seconds'), 20 + (n % 30), 40, 50, 0.5, 2048, 4096
-    FROM generate_series(1, 1500) AS n;
+    SELECT '${host1!.id}', now() - (n * interval '28 seconds'), 20 + (n % 30), 40, 50, 0.5, 2048, 4096
+    FROM generate_series(1, 3000) AS n;
   `);
   await page.reload();
   await expect(page.getByRole('heading', { name: '监控' })).toBeVisible();
-  // reload 后 react state 重置回落第一台：显式切回 host1（1500 点所在）
+  // reload 后 react state 重置回落第一台：显式切回 host1（3000 点所在）
   // 再看 24h 窗口的截断提示。
   await page.getByRole('combobox', { name: '选择服务器' }).click();
   await page
@@ -362,7 +363,7 @@ test('monitor：双机切换 + firing 概要分色 + 巡检均分联动 + 1440 �
       '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option[title="e2e-fake-host"]',
     )
     .click();
-  await page.locator('.ant-segmented-item', { hasText: '24 小时' }).click();
+  await page.locator('.ant-segmented-item', { hasText: /^24 小时$/ }).click();
   await expect(page.getByText(/返回点集已截断/).first()).toBeVisible({ timeout: 20_000 });
 
   // 巡检均分联动：立即巡检 host2（同步返回）→ 概要「最近巡检均分」非 —。

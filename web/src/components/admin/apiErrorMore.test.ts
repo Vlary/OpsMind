@@ -142,14 +142,45 @@ describe('toApiFailure 响应归一化', () => {
   });
 
   it('非契约形态（如 502 纯文本经中间件转换前）回退 INTERNAL + Error.message', () => {
-    const failure = toApiFailure(new TypeError('fetch failed'), fakeResponse(502));
+    const failure = toApiFailure(new Error('plain body'), fakeResponse(502));
     expect(failure).toEqual({
       code: 'INTERNAL',
-      message: 'fetch failed',
+      message: 'plain body',
       requestId: '',
       details: null,
       status: 502,
     });
+  });
+
+  it('网络层 TypeError（Failed to fetch）映射 NETWORK_ERROR，不再冒充服务端 5xx', () => {
+    // 走查第 11 轮 low：断网/代理断开时 fetch 抛 TypeError，旧版本显示
+    // 「服务器内部错误（Failed to fetch）」。
+    const failure = toApiFailure(new TypeError('Failed to fetch'), null);
+    expect(failure).toEqual({
+      code: 'NETWORK_ERROR',
+      message: '网络异常，请检查连接后重试',
+      requestId: '',
+      details: null,
+      status: null,
+    });
+  });
+
+  it('fetch failed / NetworkError / Load failed 各内核文案都识别', () => {
+    for (const message of [
+      'fetch failed',
+      'NetworkError when attempting to fetch resource.',
+      'Load failed',
+      'Network request failed',
+      'terminated',
+    ]) {
+      expect(toApiFailure(new TypeError(message), null).code).toBe('NETWORK_ERROR');
+    }
+  });
+
+  it('非网络 TypeError（前端编程错误）仍回退 INTERNAL，不掩盖 bug', () => {
+    const failure = toApiFailure(new TypeError('x is not a function'), null);
+    expect(failure.code).toBe('INTERNAL');
+    expect(failure.message).toBe('x is not a function');
   });
 
   it('无 response 时 status 为 null', () => {
@@ -180,6 +211,17 @@ describe('failureFromError 异常归一', () => {
       code: 'INTERNAL',
       message: '请求失败',
     });
+  });
+
+  it('网络层 TypeError 转为 NETWORK_ERROR（QueryErrorState 直接消费）', () => {
+    expect(failureFromError(new TypeError('Failed to fetch'))).toEqual({
+      code: 'NETWORK_ERROR',
+      message: '网络异常，请检查连接后重试',
+      requestId: '',
+      details: null,
+      status: null,
+    });
+    expect(failureFromError(new TypeError('Load failed')).code).toBe('NETWORK_ERROR');
   });
 });
 

@@ -61,7 +61,7 @@ function dbQueryTool(toolCallId: string): LiveTurn['tools'][number] {
     riskLevel: 'low',
     durationMs: 3,
     approvalId: '',
-      approvalMode: '',
+    approvalMode: '',
     startedAt: Date.now(),
   };
 }

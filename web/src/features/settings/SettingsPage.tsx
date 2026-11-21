@@ -58,7 +58,7 @@ export default function SettingsPage() {
             )
           }
         >
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space orientation="vertical" size={10} style={{ width: '100%' }}>
             <Typography.Text type="secondary">
               决定模型与控制台命令「是否需要人工批准」的全局档位；各会话可在对话页头部
               单独覆盖，但只能与全局同档或更严格（更宽需走双人策略审批）。收紧立即生效； 放宽会创建
@@ -93,7 +93,7 @@ export default function SettingsPage() {
               <Alert
                 type="warning"
                 showIcon
-                message="所有命令将自动执行（含高危），仅剩审计留痕；关闭了「自动执行」开关的服务器仍会拦截非只读命令"
+                title="所有命令将自动执行（含高危），仅剩审计留痕；关闭了「自动执行」开关的服务器仍会拦截非只读命令"
               />
             ) : null}
 
@@ -101,7 +101,7 @@ export default function SettingsPage() {
               <Alert
                 type="error"
                 showIcon
-                message={describeFailure(failureFromError(updateMutation.error))}
+                title={describeFailure(failureFromError(updateMutation.error))}
               />
             ) : null}
           </Space>

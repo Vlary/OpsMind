@@ -137,7 +137,7 @@ export default function RecordingsPage() {
       title: '服务器',
       dataIndex: 'server_name',
       render: (name: string, recording) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span className="opsmind-admin-cell-title">{name || '（已删除）'}</span>
           <span className="opsmind-admin-meta">
             {recording.os === 'windows' ? 'Windows OpenSSH' : 'Linux SSH'} · 由 {recording.username}{' '}
@@ -335,7 +335,7 @@ export default function RecordingsPage() {
                     type="info"
                     showIcon
                     style={{ marginBottom: 12 }}
-                    message="RDP 录像为 guacd 原生 .guac 格式，浏览器内播放 v1 不支持；请下载后离线转码/处理。"
+                    title="RDP 录像为 guacd 原生 .guac 格式，浏览器内播放 v1 不支持；请下载后离线转码/处理。"
                   />
                   {rdpQuery.isLoading ? (
                     <AdminLoading />

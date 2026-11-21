@@ -27,6 +27,31 @@ export function makeFailure(code: string, message: string): ApiFailure {
   return { code, message, requestId: '', details: null, status: null };
 }
 
+/** 客户端网络故障的统一中文文案（与 CODE_MESSAGES.NETWORK_ERROR 同源）。 */
+const NETWORK_FAILURE_MESSAGE = '网络异常，请检查连接后重试';
+
+// 浏览器 fetch 在断网/连接被重置/代理断开时抛 TypeError，各内核文案：
+// Chromium "Failed to fetch"、Firefox "NetworkError when attempting to
+// fetch resource."、Safari "Load failed"、undici "fetch failed"。
+// 只认这些已知文案，避免把 `x is not a function` 这类前端编程错误也
+// 伪装成网络故障（那会掩盖真实 bug）。
+const NETWORK_FAILURE_PATTERN =
+  /^(?:typeerror:\s*)?(?:failed to fetch|fetch failed|network\s*error.*|network\s*(?:down|request failed)|load failed|the network connection was lost|terminated)$/i;
+
+/**
+ * 是否为客户端网络层失败（走查第 11 轮 low）。
+ *
+ * 旧实现把这类 TypeError 兜底成 INTERNAL + 原文，错误块显示
+ * 「服务器内部错误（Failed to fetch）」——把客户端断网误报成服务端 5xx。
+ */
+export function isNetworkFailure(error: unknown): boolean {
+  if (!(error instanceof TypeError)) {
+    return false;
+  }
+  const message = error.message.trim();
+  return message === '' || NETWORK_FAILURE_PATTERN.test(message);
+}
+
 // 把 openapi-fetch 的 error 与 HTTP 响应归一化为 ApiFailure。
 export function toApiFailure(error: unknown, response: Response | null): ApiFailure {
   const headerRequestId = response?.headers.get('X-Request-ID') ?? '';
@@ -45,6 +70,16 @@ export function toApiFailure(error: unknown, response: Response | null): ApiFail
     return { code, message, requestId, details, status };
   }
 
+  if (isNetworkFailure(error)) {
+    return {
+      code: 'NETWORK_ERROR',
+      message: NETWORK_FAILURE_MESSAGE,
+      requestId: headerRequestId,
+      details: null,
+      status,
+    };
+  }
+
   return {
     code: 'INTERNAL',
     message: error instanceof Error && error.message !== '' ? error.message : 'request failed',
@@ -55,11 +90,12 @@ export function toApiFailure(error: unknown, response: Response | null): ApiFail
 }
 
 // 冲刺 7 打磨：识别「前端兜底合成的 INTERNAL」——empty response 兜底
-// （makeFailure）与 failureFromError 对非契约错误值（请求中止、网络层
-// 异常等）的兜底都不带 requestId；后端真实 INTERNAL 经 toApiFailure 必带
+// （makeFailure）与 failureFromError 对非契约错误值（请求中止、未知
+// Error 等）的兜底都不带 requestId；后端真实 INTERNAL 经 toApiFailure 必带
 // request_id 或 X-Request-ID 头（api/openapi.yaml ErrorResponse）。调用方
 // （如登录页的 me 探测）据此把这类「无法归因于服务端」的失败视为预期态
-// 而非服务器故障，不再渲染成 INTERNAL 错误横幅。
+// 而非服务器故障，不再渲染成 INTERNAL 错误横幅。网络层 TypeError 自
+// 第 11 轮起单独映射 NETWORK_ERROR，不再落进本判定。
 export function isSyntheticInternalFailure(failure: ApiFailure): boolean {
   return failure.code === 'INTERNAL' && failure.requestId === '';
 }
@@ -67,6 +103,9 @@ export function isSyntheticInternalFailure(failure: ApiFailure): boolean {
 export function failureFromError(error: unknown): ApiFailure {
   if (error instanceof ApiRequestError) {
     return error.failure;
+  }
+  if (isNetworkFailure(error)) {
+    return makeFailure('NETWORK_ERROR', NETWORK_FAILURE_MESSAGE);
   }
   if (isRecord(error) && typeof error.code === 'string' && typeof error.message === 'string') {
     return {
@@ -207,6 +246,10 @@ const GENERIC_STORE_MESSAGES = new Set([
   // 中文裸短语同理（databases 查询超时固定 message）：
   // 中文映射 CODE_MESSAGES.SQL_TIMEOUT 已完整表达，拼进括号只会重复。
   '查询超时',
+  // 第 11 轮 low：客户端网络故障的 message 就是中文映射本身（供直接读
+  // failure.message 的调用方使用），describeFailure 不再拼成
+  // 「网络异常…（网络异常…）」。
+  '网络异常，请检查连接后重试',
 ]);
 
 export function describeFailure(failure: ApiFailure): string {

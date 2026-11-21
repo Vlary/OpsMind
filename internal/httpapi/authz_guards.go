@@ -154,6 +154,7 @@ var routeRules = []routeRule{
 	// （PermAlertConfig），而运维工程师只有 asset:read/monitor:read。
 	{http.MethodGet, "/api/monitor/overview", guardPermission, authz.PermMetricsRead, nil, ""},
 	{http.MethodGet, "/api/monitor/collector", guardPermission, authz.PermMetricsRead, nil, ""},
+	{http.MethodGet, "/api/monitor/trend", guardPermission, authz.PermMetricsRead, nil, ""},
 	{http.MethodPut, "/api/monitor/collector", guardPermission, authz.PermAlertConfig, nil, ""},
 	{http.MethodGet, "/api/servers/:id/metrics", guardPermission, authz.PermMetricsRead, nil, ""},
 	{http.MethodGet, "/api/alert-rules", guardPermission, authz.PermMetricsRead, nil, ""},
@@ -162,6 +163,7 @@ var routeRules = []routeRule{
 	{http.MethodPatch, "/api/alert-rules/:id", guardPermission, authz.PermAlertConfig, nil, ""},
 	{http.MethodDelete, "/api/alert-rules/:id", guardPermission, authz.PermAlertConfig, nil, ""},
 	{http.MethodGet, "/api/alert-events", guardPermission, authz.PermMetricsRead, nil, ""},
+	{http.MethodGet, "/api/alert-events/stats", guardPermission, authz.PermMetricsRead, nil, ""},
 	{http.MethodGet, "/api/notification-channels", guardPermission, authz.PermMetricsRead, nil, ""},
 	{http.MethodPost, "/api/notification-channels", guardPermission, authz.PermAlertConfig, nil, ""},
 	{http.MethodPatch, "/api/notification-channels/:id", guardPermission, authz.PermAlertConfig, nil, ""},
@@ -191,6 +193,7 @@ var routeRules = []routeRule{
 	{http.MethodPost, "/api/inspection/jobs/:id/run", guardPermission, authz.PermInspection, nil, ""},
 	{http.MethodGet, "/api/inspection/reports", guardPermission, authz.PermInspection, nil, ""},
 	{http.MethodGet, "/api/inspection/reports/:id", guardPermission, authz.PermInspection, nil, ""},
+	{http.MethodGet, "/api/inspection/trend", guardPermission, authz.PermInspection, nil, ""},
 	{http.MethodPost, "/api/inspection/run", guardPermission, authz.PermInspection, nil, ""},
 
 	// ---- batch ----

@@ -505,14 +505,14 @@ export default function RdpPage() {
             <Alert
               type="info"
               showIcon
-              message={`当前会话分辨率 ${active.width}×${active.height}（dpi ${active.dpi}）。RDP 不支持运行中调整分辨率；浏览器窗口变化由画面自动缩放适配。`}
+              title={`当前会话分辨率 ${active.width}×${active.height}（dpi ${active.dpi}）。RDP 不支持运行中调整分辨率；浏览器窗口变化由画面自动缩放适配。`}
             />
           ) : null}
           {createError ? (
             <Alert
               type="error"
               showIcon
-              message={describeRdpCreateFailure(createError)}
+              title={describeRdpCreateFailure(createError)}
               action={
                 createError.code === 'TERMINAL_APPROVAL_REQUIRED' ? (
                   <Button
@@ -528,10 +528,10 @@ export default function RdpPage() {
             />
           ) : null}
           {grantApprovalId && !grantApproved && !grantRejected ? (
-            <Alert type="info" showIcon message="RDP 授权审批中，批准后请点击「打开桌面」。" />
+            <Alert type="info" showIcon title="RDP 授权审批中，批准后请点击「打开桌面」。" />
           ) : null}
           {grantRejected ? (
-            <Alert type="warning" showIcon message="RDP 授权未获批准，请重新申请。" />
+            <Alert type="warning" showIcon title="RDP 授权未获批准，请重新申请。" />
           ) : null}
           {/* 第 2 轮走查（low）：已批准、待消费的 RDP 授权在审批队列里不再
               可见，发起人侧需要明确入口。 */}
@@ -540,7 +540,7 @@ export default function RdpPage() {
               type="success"
               showIcon
               data-testid="rdp-available-grants"
-              message={`你有 ${availableGrants.length} 条已批准、尚未使用的 RDP 授权`}
+              title={`你有 ${availableGrants.length} 条已批准、尚未使用的 RDP 授权`}
               description={`最早一条 ${formatDateTime(availableGrants[0]?.grant_expires_at ?? '')} 到期；点「使用该授权」即单次消费该服务器上的授权，用后失效。`}
               action={
                 <Button
@@ -549,7 +549,8 @@ export default function RdpPage() {
                   icon={<DesktopOutlined />}
                   disabled={!effectiveServerId || Boolean(active)}
                   onClick={() =>
-                    effectiveServerId && handleConnectWithGrant(earliestGrantIdFor(effectiveServerId))
+                    effectiveServerId &&
+                    handleConnectWithGrant(earliestGrantIdFor(effectiveServerId))
                   }
                 >
                   使用该授权
@@ -636,7 +637,7 @@ export default function RdpPage() {
               <Alert
                 type={state?.phase === 'failed' ? 'error' : 'warning'}
                 showIcon
-                message={
+                title={
                   state?.phase === 'failed'
                     ? `连接失败：${state.error ?? '未知错误'}。请确认 guacd 已配置、服务器凭据可用后新建会话。`
                     : '连接已断开。录制将出现在「回放」页（仅下载）；如需继续操作请新建会话。'

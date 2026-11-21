@@ -257,7 +257,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
         </Space>
       }
     >
-      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={10} style={{ width: '100%' }}>
         <Space wrap size={16}>
           {/* 第 8 轮走查 low：policy 审批（全局门限变更）没有目标服务器，
               server_name 按设计恒空；此前无条件渲染「目标服务器：未知」，
@@ -335,7 +335,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
         {bodyKind === 'policy' ? (
           // policy 审批没有命令：只呈现策略目标与「本审批不含命令」，
           // 不再渲染空的「待执行命令」代码块（第 2 轮走查 medium）。
-          <Space direction="vertical" size={4}>
+          <Space orientation="vertical" size={4}>
             <Typography.Text>
               策略：
               <ApprovalModeTag mode={normalizeApprovalMode(approval.policy_from)} /> →{' '}
@@ -348,7 +348,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
         ) : null}
         {bodyKind === 'terminal' ? (
           // terminal 审批同样没有命令：只呈现目标服务器与单次授权时长。
-          <Space direction="vertical" size={4}>
+          <Space orientation="vertical" size={4}>
             <Typography.Text>
               目标：{approval.server_name || '未知服务器'}（单次授权，30 分钟内有效）
             </Typography.Text>
@@ -390,7 +390,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
           <Alert
             type="error"
             showIcon
-            message={describeError(errorInfo.code, errorInfo.message)}
+            title={describeError(errorInfo.code, errorInfo.message)}
             description={errorInfo.requestId ? `request_id: ${errorInfo.requestId}` : null}
           />
         ) : null}
@@ -399,7 +399,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
           <Alert
             type={effectiveStatus === 'approved' ? 'success' : 'warning'}
             showIcon
-            message={
+            title={
               cancelled
                 ? '本轮已取消（回答流已中断，审批未生效）'
                 : `审批${APPROVAL_STATUS_LABELS[effectiveStatus]}`
@@ -421,7 +421,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
                   : 'success'
             }
             showIcon
-            message={`即时执行结果：${executionOutcome.message}`}
+            title={`即时执行结果：${executionOutcome.message}`}
             description={executionOutcome.detail ? `执行明细：${executionOutcome.detail}` : null}
           />
         ) : null}
@@ -443,7 +443,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
           <Alert
             type="warning"
             showIcon
-            message="当前无法批准：系统缺少第二个可审批的启用账号"
+            title="当前无法批准：系统缺少第二个可审批的启用账号"
             description="审批需由另一位启用账号批准，但当前只有 1 个可承担审批职责的启用账号（管理员 + 审批者合计）。请管理员在「用户」页创建一个启用审批者；紧急情况下可由主机侧执行 aiops break-glass 单次批准。降级期间仍可拒绝该请求。"
           />
         ) : null}
@@ -477,7 +477,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
           <Alert
             type="info"
             showIcon
-            message="等待审批者处理"
+            title="等待审批者处理"
             description="当前账号没有审批权限；审批将由具备审批权限的账号处理。"
           />
         ) : null}
@@ -486,7 +486,7 @@ export default function ApprovalCard({ approval, conversationId, onUpdated }: Ap
           <Alert
             type="info"
             showIcon
-            message="不能审批自己发起的请求"
+            title="不能审批自己发起的请求"
             description="审批需由另一位具备审批权限的账号处理（服务端会拒绝自审）。"
           />
         ) : null}

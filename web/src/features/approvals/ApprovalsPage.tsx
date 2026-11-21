@@ -198,7 +198,7 @@ export default function ApprovalsPage() {
           closable
           onClose={() => setLastDecision(null)}
           style={{ marginBottom: 12 }}
-          message={`刚刚处理「${lastDecision.title}」：${lastDecision.outcome.message}`}
+          title={`刚刚处理「${lastDecision.title}」：${lastDecision.outcome.message}`}
           description={
             lastDecision.outcome.detail
               ? `执行明细：${lastDecision.outcome.detail}（最终状态以服务端为准）`
@@ -217,7 +217,7 @@ export default function ApprovalsPage() {
           showIcon
           data-testid="degraded-mode-banner"
           style={{ marginBottom: 12 }}
-          message="可审批账号不足降级模式：审批不可批准"
+          title="可审批账号不足降级模式：审批不可批准"
           description={`系统中可承担审批职责的启用账号只有 ${
             settingsQuery.data.enabled_approvers ?? 1
           } 个（管理员 + 审批者合计）。请管理员在「用户」页创建至少一个启用的审批者（approver）；紧急情况下可由主机侧执行 aiops break-glass 单次批准。降级期间仍可拒绝待处理审批。`}
@@ -235,7 +235,7 @@ export default function ApprovalsPage() {
       ) : null}
 
       {items.length > 0 ? (
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Space orientation="vertical" size={12} style={{ width: '100%' }}>
           {items.map((approval) => (
             <div key={approval.id}>
               <Typography.Text type="secondary">
@@ -281,7 +281,7 @@ export default function ApprovalsPage() {
             <Alert
               type="warning"
               showIcon
-              message="已决策列表加载失败"
+              title="已决策列表加载失败"
               description={failureFromError(decidedQuery.error).message}
             />
           ) : (

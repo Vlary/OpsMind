@@ -84,15 +84,15 @@ export default function ApprovalContextDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      width={640}
+      size={640}
       title="审批上下文"
       styles={{ body: { paddingTop: 16 } }}
     >
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={12} style={{ width: '100%' }}>
         <Alert
           type="info"
           showIcon
-          message="审批创建前的上下文"
+          title="审批创建前的上下文"
           description="最多展示审批前 20 条消息，不含审批后的新消息。查看他人发起的审批会写入审计。"
         />
 
@@ -131,7 +131,7 @@ export default function ApprovalContextDrawer({
             <div>
               <Typography.Text strong>工具参数</Typography.Text>
               {context.tool_call ? (
-                <Space direction="vertical" size={6} style={{ width: '100%', marginTop: 6 }}>
+                <Space orientation="vertical" size={6} style={{ width: '100%', marginTop: 6 }}>
                   <Space size={8} wrap>
                     <Tag color="blue">{context.tool_call.name}</Tag>
                     <Typography.Text type="secondary">{context.tool_call.status}</Typography.Text>
@@ -158,7 +158,7 @@ export default function ApprovalContextDrawer({
                   <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有可展示的历史消息" />
                 </div>
               ) : (
-                <Space direction="vertical" size={10} style={{ width: '100%', marginTop: 8 }}>
+                <Space orientation="vertical" size={10} style={{ width: '100%', marginTop: 8 }}>
                   {context.messages.map((message) => (
                     <div key={message.id} className="opsmind-approval-context-message">
                       <Space size={8} wrap>

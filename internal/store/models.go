@@ -513,16 +513,42 @@ type ServerMetric struct {
 // ServerMetricLatest 是每台最新值（server_metrics_latest 行）。overview 与
 // 告警评估用；ServerName 由 JOIN servers.name 填充（删除后空串）。
 type ServerMetricLatest struct {
-	ServerID   string    `json:"server_id"`
-	ServerName string    `json:"server_name"`
-	CreatedAt  time.Time `json:"created_at"`
-	CPU        float64   `json:"cpu_pct"`
-	Mem        float64   `json:"mem_pct"`
-	Disk       float64   `json:"disk_pct"`
-	Load1      float64   `json:"load_1"`
-	NetIn      int64     `json:"net_in_bps"`
-	NetOut     int64     `json:"net_out_bps"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ServerID   string `json:"server_id"`
+	ServerName string `json:"server_name"`
+	// OS 由 JOIN servers.os 填充（走查第 15 轮 medium）：前端据此给
+	// 「CPU 副文案 / 内存副文案 / 负载口径」选平台；Linux 是 /proc 与
+	// loadavg，Windows 是 Win32_Processor LoadPercentage /
+	// Win32_OperatingSystem / ProcessorQueueLength。空串表示资产已删除或
+	// 旧数据，前端按平台中性文案处理。
+	OS        ServerOS  `json:"os"`
+	CreatedAt time.Time `json:"created_at"`
+	CPU       float64   `json:"cpu_pct"`
+	Mem       float64   `json:"mem_pct"`
+	Disk      float64   `json:"disk_pct"`
+	Load1     float64   `json:"load_1"`
+	NetIn     int64     `json:"net_in_bps"`
+	NetOut    int64     `json:"net_out_bps"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// MetricTrendPoint 是 /api/monitor/trend 的一个时间桶（图表聚合）。
+// 只表示**有样本**的桶：SQL 按 date_bin 分组返回；无样本桶由 handler
+// 补为 null（前端折线断线不连点）。CPU/Mem 均为百分比。
+type MetricTrendPoint struct {
+	BucketStart time.Time
+	CPUP95      float64
+	CPUAvg      float64
+	CPUMax      float64
+	MemP95      float64
+	MemAvg      float64
+	MemMax      float64
+	Servers     int   // count(DISTINCT server_id)
+	Samples     int64 // count(*)
+	// FirstSample / LastSample 是桶内实际最早/最晚采样时刻（min/max
+	// created_at）。前端用全局首末样本算真实数据跨度：首末桶都未采满时
+	// 桶跨度（如 7d 的 1.8 天）会高估实际采集时长（走查第 17 轮 low）。
+	FirstSample time.Time
+	LastSample  time.Time
 }
 
 // AlertRule 是告警规则。
@@ -574,6 +600,44 @@ type AlertEvent struct {
 	NotifyStatus   NotifyStatus     `json:"notify_status"`
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
+}
+
+// FiringSeverityCounts 是 firing 事件按等级的分组计数（overview 一次索引
+// 聚合，替代旧的 3×最多 5 页 Go 分页——单等级 >1000 时旧实现会少计）。
+type FiringSeverityCounts struct {
+	Info     int64
+	Warning  int64
+	Critical int64
+}
+
+// AlertEventSeverityBucket 是告警事件统计的一个时间桶（按 severity 分级；
+// 无事件桶在 handler 侧补零，时间轴连续）。
+type AlertEventSeverityBucket struct {
+	BucketStart time.Time
+	Info        int64
+	Warning     int64
+	Critical    int64
+}
+
+// AlertRuleStat 是 /api/alert-events/stats 的 top_rules 元素。Severity 取
+// 规则当前等级（JOIN alert_rules）；Count/ServerCount/LastFiredAt 由窗口
+// 内事件聚合。
+type AlertRuleStat struct {
+	RuleID      string
+	RuleName    string
+	Severity    AlertSeverity
+	Count       int64
+	ServerCount int64
+	LastFiredAt time.Time
+}
+
+// AlertEventStats 是 /api/alert-events/stats 的存储层聚合结果。Total 与
+// DistinctRules 来自 timeline 查询的 ROLLUP 汇总行（distinct 不能对桶求和）。
+type AlertEventStats struct {
+	Total         int64
+	DistinctRules int64
+	Timeline      []AlertEventSeverityBucket
+	TopRules      []AlertRuleStat
 }
 
 // ---------- 五期 M2（AI 自诊断 / 定时巡检）----------
@@ -671,6 +735,17 @@ type InspectionReport struct {
 	StartedAt    time.Time         `json:"started_at"`
 	FinishedAt   *time.Time        `json:"finished_at"`
 	CreatedAt    time.Time         `json:"created_at"`
+}
+
+// InspectionTrendPoint 是 /api/inspection/trend 的一个报告点（handler 反转
+// 后按 created_at 升序透出）。
+type InspectionTrendPoint struct {
+	ReportID     string
+	CreatedAt    time.Time
+	AvgScore     int
+	ServerCount  int
+	AnomalyCount int
+	Trigger      InspectionTrigger
 }
 
 // InspectionReportItem 是单台巡检明细。Anomalies 为 [{item,detail,severity}]

@@ -45,6 +45,19 @@ export const qk = {
   collector: ['monitor-collector'] as const,
   serverMetrics: (serverId: string, minutes: number) =>
     ['server-metrics', serverId, minutes] as const,
+  // 监控图表化（本轮）：集群压力分桶趋势。window 变化切子 key，
+  // 前缀 ['monitor-trend'] 供采集配置变更时整组失效。
+  monitorTrendPrefix: ['monitor-trend'] as const,
+  monitorTrend: (window: '24h' | '7d') => ['monitor-trend', window] as const,
+  // 告警分布（时间线 + Top 规则共用一个聚合响应）。时间窗与 top_rules
+  // 都进 key：切换 24h/7d 不覆盖另一档缓存，top 规则数变化才重取。
+  alertEventStats: (window: '24h' | '7d', topRules: number) =>
+    ['alert-event-stats', window, topRules] as const,
+  // 巡检均分走势：job_id 为 null 是「全部报告（含即时巡检）」key；选定
+  // 任务后按任务隔离，避免不同目标的均分混比。
+  inspectionTrendPrefix: ['inspection-trend'] as const,
+  inspectionTrend: (jobId: string | null, limit: number) =>
+    ['inspection-trend', jobId ?? 'all', limit] as const,
   alertRules: ['alert-rules'] as const,
   alertRule: (id: string) => ['alert-rule', id] as const,
   alertEvents: (filters: Record<string, string | number | undefined>) =>

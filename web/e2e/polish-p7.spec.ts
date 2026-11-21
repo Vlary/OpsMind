@@ -184,6 +184,7 @@ test.describe('七期：监控图表 hover tooltip 两主题都有可见边界',
               {
                 server_id: serverId,
                 server_name: 'p7-chart-host',
+                os: 'linux',
                 created_at: points[points.length - 1]?.created_at,
                 cpu_pct: 40,
                 mem_pct: 40,
@@ -204,7 +205,11 @@ test.describe('七期：监控图表 hover tooltip 两主题都有可见边界',
       );
 
       await page.goto('/monitor');
-      const cpuCard = page.locator('.ant-card', { hasText: 'CPU 使用率' }).first();
+      // 用副标题精确定位单机 CPU 卡：监控看板新增的「集群压力趋势」卡
+      // 副标题也含「CPU 使用率分桶」，按标题 hasText 会把该卡排到前面，
+      // 而它此时只有一个样本桶、渲染的是圆点而非 polyline。
+      // 走查第 2 轮口径修正后，副标题为 /proc/stat 使用率（两次采样差分计算）。
+      const cpuCard = page.locator('.ant-card', { hasText: '/proc/stat 使用率' }).first();
       await expect(cpuCard).toBeVisible({ timeout: 20_000 });
       // 折线图是卡内的 <svg> 之一（另有一个「复制当前值」的图标 svg，14×14），
       // 按 polyline 精确定位绘图区。
@@ -220,7 +225,10 @@ test.describe('七期：监控图表 hover tooltip 两主题都有可见边界',
       if (!box) {
         return;
       }
-      await page.mouse.move(box.x + box.width * 0.6, box.y + box.height / 2);
+      // 监控看板新增「集群态势」两卡后，单机指标卡位于首屏之下：
+      // locator.hover 会先滚动到可见区域；直接 page.mouse.move 落在视口
+      // 外时不会产生 mousemove，tooltip 永远不出现。
+      await svg.hover({ position: { x: box.width * 0.6, y: box.height / 2 } });
       const tooltip = cpuCard.getByTestId('metric-chart-tooltip');
       await expect(tooltip).toBeVisible();
 

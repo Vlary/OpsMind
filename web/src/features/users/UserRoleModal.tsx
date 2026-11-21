@@ -113,7 +113,7 @@ export default function UserRoleModal({
         type="warning"
         showIcon
         style={{ marginBottom: 16 }}
-        message="修改角色会立即生效"
+        title="修改角色会立即生效"
         description="目标账号的全部登录会话会被吊销，进行中的终端/RDP 会断开，待处理审批会被取消。"
       />
       {guard.reason && guard.reason !== '角色未变化' ? (
@@ -121,7 +121,7 @@ export default function UserRoleModal({
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message={guard.reason}
+          title={guard.reason}
           description="服务端会以 409 拒绝该操作；请先确认还有其他启用中的管理员，或改由他人操作。"
         />
       ) : null}

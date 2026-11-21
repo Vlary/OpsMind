@@ -78,12 +78,12 @@ export default function RunNowModal({ open, onClose, onReport }: RunNowModalProp
 
   return (
     <Modal title="立即巡检" open={open} onCancel={onClose} footer={null} destroyOnHidden>
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={12} style={{ width: '100%' }}>
         {errorText ? (
           <Alert
             type="error"
             showIcon
-            message={errorText}
+            title={errorText}
             closable
             onClose={() => {
               setErrorText(null);
@@ -125,7 +125,7 @@ export default function RunNowModal({ open, onClose, onReport }: RunNowModalProp
           {runMutation.isPending ? '巡检执行中……' : '开始巡检'}
         </Button>
         {overLimit ? (
-          <Alert type="error" showIcon message={`目标超过 ${RUN_NOW_MAX_SERVERS} 台上限`} />
+          <Alert type="error" showIcon title={`目标超过 ${RUN_NOW_MAX_SERVERS} 台上限`} />
         ) : null}
       </Space>
     </Modal>

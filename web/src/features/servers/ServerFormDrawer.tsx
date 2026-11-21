@@ -473,7 +473,7 @@ export default function ServerFormModal({ open, server, onClose, onSaved }: Serv
         <Alert
           type="info"
           showIcon
-          message="修改地址或端口会清除已信任的主机密钥，下次连接需重新确认指纹。"
+          title="修改地址或端口会清除已信任的主机密钥，下次连接需重新确认指纹。"
           style={{ marginBottom: 16 }}
         />
       ) : null}
@@ -717,7 +717,7 @@ export default function ServerFormModal({ open, server, onClose, onSaved }: Serv
           <Alert
             type="warning"
             showIcon
-            message="Telnet 为明文传输，登录与特权密码可被截获"
+            title="Telnet 为明文传输，登录与特权密码可被截获"
             description="保存时需确认明文风险（confirm_telnet_cleartext）；建议改用 SSH。"
             style={{ marginBottom: 16 }}
           />
@@ -727,7 +727,7 @@ export default function ServerFormModal({ open, server, onClose, onSaved }: Serv
           <Alert
             type="info"
             showIcon
-            message="密码/私钥认证走 Windows 内置 OpenSSH Server（Server 2019 / Win10 1809+ 起内置），需要在目标机启用。"
+            title="密码/私钥认证走 Windows 内置 OpenSSH Server（Server 2019 / Win10 1809+ 起内置），需要在目标机启用。"
             style={{ marginBottom: 16 }}
           />
         ) : null}
@@ -735,7 +735,7 @@ export default function ServerFormModal({ open, server, onClose, onSaved }: Serv
           <Alert
             type="warning"
             showIcon
-            message="Basic 为明文认证，建议仅在内网或 HTTPS(5986) 使用。"
+            title="Basic 为明文认证，建议仅在内网或 HTTPS(5986) 使用。"
             style={{ marginBottom: 16 }}
           />
         ) : null}

@@ -152,7 +152,7 @@ export default function JobFormDrawer({ open, job, channels, onClose }: JobFormD
       title={job ? '编辑巡检任务' : '新建巡检任务'}
       open={open}
       onClose={onClose}
-      width={480}
+      size={480}
       destroyOnHidden
     >
       {failure ? (

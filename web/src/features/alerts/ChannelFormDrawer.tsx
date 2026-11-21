@@ -224,7 +224,7 @@ export default function ChannelFormDrawer({ open, channel, onClose }: ChannelFor
       title={channel ? '编辑通知渠道' : '新建通知渠道'}
       open={open}
       onClose={onClose}
-      width={480}
+      size={480}
       destroyOnHidden
     >
       {failure ? (
@@ -241,7 +241,7 @@ export default function ChannelFormDrawer({ open, channel, onClose }: ChannelFor
         <Alert
           type="info"
           showIcon
-          message={`已保存配置：${channel.config_hint || '（无配置）'}`}
+          title={`已保存配置：${channel.config_hint || '（无配置）'}`}
           description="凭据不会回填；留空表示不修改。"
           style={{ marginBottom: 16 }}
         />
@@ -250,7 +250,7 @@ export default function ChannelFormDrawer({ open, channel, onClose }: ChannelFor
         <Alert
           type={testResult.includes('成功') ? 'success' : 'error'}
           showIcon
-          message={testResult}
+          title={testResult}
           closable
           onClose={() => {
             setTestResult(null);

@@ -299,7 +299,7 @@ export default function TermPage() {
       title: '服务器',
       dataIndex: 'server_name',
       render: (name: string, session) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span className="opsmind-admin-cell-title">{name || '（已删除）'}</span>
           <span className="opsmind-admin-meta">
             {session.os === 'network'
@@ -433,33 +433,33 @@ export default function TermPage() {
               打开终端
             </Button>
           </Space>
-          {telnetNotice ? <Alert type="info" showIcon message={telnetNotice} /> : null}
+          {telnetNotice ? <Alert type="info" showIcon title={telnetNotice} /> : null}
           {selectedChannel?.ssh && selectedChannel.windows ? (
             <Alert
               type="info"
               showIcon
-              message="Windows 服务器经 OpenSSH 通道提供交互终端，需服务器已安装内置 OpenSSH Server（Server 2019/Win10 1809+ 自带）。"
+              title="Windows 服务器经 OpenSSH 通道提供交互终端，需服务器已安装内置 OpenSSH Server（Server 2019/Win10 1809+ 自带）。"
             />
           ) : null}
           {selectedChannel?.ssh && selectedChannel.netdev ? (
             <Alert
               type="info"
               showIcon
-              message="网络设备经 SSH 通道提供交互式 CLI 终端（提示符驱动的行协议），全程录制；Telnet 接入的设备不支持终端。"
+              title="网络设备经 SSH 通道提供交互式 CLI 终端（提示符驱动的行协议），全程录制；Telnet 接入的设备不支持终端。"
             />
           ) : null}
           {selectedServer && !selectedChannel?.ssh ? (
             <Alert
               type="warning"
               showIcon
-              message="交互终端仅支持 SSH 通道：该服务器使用 WinRM 认证（NTLM/Basic），无 PTY 语义。"
+              title="交互终端仅支持 SSH 通道：该服务器使用 WinRM 认证（NTLM/Basic），无 PTY 语义。"
             />
           ) : null}
           {createError ? (
             <Alert
               type="error"
               showIcon
-              message={describeTermCreateFailure(createError)}
+              title={describeTermCreateFailure(createError)}
               action={
                 createError.code === 'TERMINAL_APPROVAL_REQUIRED' ? (
                   <Button
@@ -475,10 +475,10 @@ export default function TermPage() {
             />
           ) : null}
           {grantApprovalId && !grantApproved && !grantRejected ? (
-            <Alert type="info" showIcon message="终端授权审批中，批准后请点击「打开终端」。" />
+            <Alert type="info" showIcon title="终端授权审批中，批准后请点击「打开终端」。" />
           ) : null}
           {grantRejected ? (
-            <Alert type="warning" showIcon message="终端授权未获批准，请重新申请。" />
+            <Alert type="warning" showIcon title="终端授权未获批准，请重新申请。" />
           ) : null}
           {/* 第 2 轮走查（low）：已批准、待消费的授权在审批队列里不再可见，
               发起人侧需要明确入口，而不是自己去试「打开终端」。 */}
@@ -487,7 +487,7 @@ export default function TermPage() {
               type="success"
               showIcon
               data-testid="term-available-grants"
-              message={`你有 ${availableGrants.length} 条已批准、尚未使用的终端授权`}
+              title={`你有 ${availableGrants.length} 条已批准、尚未使用的终端授权`}
               description={`最早一条 ${formatDateTime(availableGrants[0]?.grant_expires_at ?? '')} 到期；点「使用该授权」即单次消费该服务器上的授权，用后失效。`}
               action={
                 <Button

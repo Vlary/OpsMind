@@ -513,6 +513,29 @@ func (fx *fixture) waitResultStatus(t *testing.T, jobID, serverID string, want s
 	return store.BatchResult{}
 }
 
+// waitJobStatus 轮询等待 job 归并到期望状态。直执行台的 FinishResult 与
+// 随后的 RecalcJobStatus 不在同一事务：最后一台的 result 已 executed 时，
+// job 状态可能仍是 running（第 17 轮全量门禁偶发）。这里给异步收敛一个
+// 有界等待，终态断言本身不变。
+func (fx *fixture) waitJobStatus(t *testing.T, jobID string, want store.BatchStatus) store.BatchJob {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last store.BatchJob
+	for time.Now().Before(deadline) {
+		job, _, err := fx.st.BatchJobs().Get(context.Background(), jobID)
+		if err != nil {
+			t.Fatalf("Get job %s: %v", jobID, err)
+		}
+		if job.Status == want {
+			return job
+		}
+		last = job
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("job %s status = %q, want %q", jobID, last.Status, want)
+	return store.BatchJob{}
+}
+
 func resultByServer(results []store.BatchResult, serverID string) *store.BatchResult {
 	for i := range results {
 		if results[i].ServerID == serverID {
@@ -867,17 +890,13 @@ func TestWorkerPoolLimit(t *testing.T) {
 	if elapsed > 700*time.Millisecond {
 		t.Fatalf("Dispatch elapsed = %v, must return before direct executions finish", elapsed)
 	}
-	// 等待全部直执行台收敛后断言终态与并发上限。
+	// 等待全部直执行台收敛后断言终态与并发上限。job 归并由各台
+	// RecalcJobStatus 异步完成，必须等到 done 而不是在最后一条 result
+	// 落库后的同一时刻直接读（第 17 轮全量门禁偶发）。
 	for _, id := range ids {
 		fx.waitResultStatus(t, job.ID, id, store.BatchResultExecuted)
 	}
-	finJob, _, gerr := fx.st.BatchJobs().Get(context.Background(), job.ID)
-	if gerr != nil {
-		t.Fatal(gerr)
-	}
-	if finJob.Status != store.BatchDone {
-		t.Fatalf("status = %q, want done", finJob.Status)
-	}
+	fx.waitJobStatus(t, job.ID, store.BatchDone)
 	if peak := fx.ssh.peak.Load(); peak > 8 {
 		t.Fatalf("peak concurrency = %d, want ≤ 8（池上限）", peak)
 	}

@@ -12,7 +12,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, Card, Flex, Popconfirm, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { api } from '../../api/client';
 import { qk } from '../../api/queryKeys';
@@ -31,6 +31,9 @@ import { message } from '../../components/antdMessage';
 import { useNotificationChannels } from '../alerts/useNotificationChannels';
 import { describePhase5Failure } from '../alerts/phase5Codes';
 import '../../styles/admin.css';
+
+import InspectionScoreTrendChart from '../monitor/charts/InspectionScoreTrendChart';
+import { pickDefaultJobId } from '../monitor/charts/chartModel';
 
 import JobFormDrawer from './JobFormDrawer';
 import ReportDrawer from './ReportDrawer';
@@ -235,7 +238,7 @@ function JobsTab({
       title: '名称',
       dataIndex: 'name',
       render: (name: string, job) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span className="opsmind-admin-cell-title">{name}</span>
           <span className="opsmind-admin-cell-sub">
             上次 {job.last_run_at ? formatDateTime(job.last_run_at) : '未运行'}
@@ -387,6 +390,60 @@ function ReportsTab({ onOpen }: { onOpen: (reportId: string) => void }) {
     },
   });
 
+  // 任务下拉与 JobsTab 共用 qk.inspectionJobs 缓存（图表化本轮）。
+  const jobsQuery = useQuery({
+    queryKey: qk.inspectionJobs,
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/api/inspection/jobs');
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data?.items ?? [];
+    },
+  });
+  const jobs = useMemo(
+    () => (jobsQuery.data ?? []).map((job) => ({ id: job.id, name: job.name })),
+    [jobsQuery.data],
+  );
+  // 默认「最近一份报告所属任务」：报告按 created_at DESC，取首条即可。
+  // 走查第 6 轮 high：最近一份是即时巡检（job_id=null）时默认「全部任务」，
+  // 否则只会按某个定时任务的 job_id 查询，图空而下方表格有报告。
+  const latestReport = reportsQuery.data?.[0];
+  const defaultJobId =
+    latestReport !== undefined && latestReport.job_id === null
+      ? null
+      : pickDefaultJobId(jobs, latestReport?.job_id ?? null);
+  // undefined = 未手动选择；null = 用户明确选择「全部任务」。
+  const [jobChoice, setJobChoice] = useState<string | null | undefined>(undefined);
+  // 任务被删除后选择可能失效：回落到默认任务，避免带着不存在的 job_id 发请求。
+  const validChoice =
+    jobChoice !== undefined && (jobChoice === null || jobs.some((job) => job.id === jobChoice))
+      ? jobChoice
+      : undefined;
+  const trendJobId = validChoice === undefined ? defaultJobId : validChoice;
+
+  const trendQuery = useQuery({
+    queryKey: qk.inspectionTrend(trendJobId, 30),
+    queryFn: async () => {
+      const { data, error, response } = await api.GET('/api/inspection/trend', {
+        params: {
+          query: trendJobId === null ? { limit: 30 } : { job_id: trendJobId, limit: 30 },
+        },
+      });
+      if (error) {
+        throw new ApiRequestError(toApiFailure(error, response));
+      }
+      return data;
+    },
+    // job_id 缺省 = 全部报告（含即时巡检）；等任务/报告列表就绪再发，
+    // 避免先用 null 查一次「全部」再按默认任务重查。走查第 6 轮 high：
+    // 此前 trendJobId 为 null 时直接不发请求，只有即时报告时图恒空。
+    enabled: jobsQuery.isFetched && reportsQuery.isFetched,
+    refetchInterval: reportsQuery.data?.some((report) => report.finished_at === null)
+      ? 10_000
+      : false,
+  });
+
   const columns: TableColumnsType<InspectionReport> = [
     {
       title: '任务',
@@ -410,7 +467,7 @@ function ReportsTab({ onOpen }: { onOpen: (reportId: string) => void }) {
       dataIndex: 'created_at',
       width: 170,
       render: (value: string, row) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span>{formatDateTime(value)}</span>
           <span className="opsmind-admin-cell-sub">
             {row.finished_at === null ? '进行中' : '已完成'}
@@ -447,16 +504,49 @@ function ReportsTab({ onOpen }: { onOpen: (reportId: string) => void }) {
   }
 
   return (
-    <Card size="small">
-      <Table<InspectionReport>
-        rowKey="id"
-        size="small"
-        loading={reportsQuery.isLoading}
-        columns={columns}
-        dataSource={reportsQuery.data ?? []}
-        locale={{ emptyText: <EmptyState description="暂无巡检报告" /> }}
-        pagination={false}
-      />
-    </Card>
+    <Flex vertical gap={12}>
+      <Card size="small" title="均分走势">
+        {/* key：数据就绪后重挂载一次（图表在 skeleton 阶段挂载会错过
+            ResizeObserver，宽度停在 fallback）。loading 只反映图表自身
+            请求，任务/报告列表的加载不阻塞既有图表。 */}
+        <InspectionScoreTrendChart
+          key={trendQuery.data?.points.length ? 'trend-ready' : 'trend-pending'}
+          points={trendQuery.data?.points ?? []}
+          jobs={jobs}
+          jobId={trendJobId}
+          defaultJobId={defaultJobId}
+          onJobChange={(nextJobId) => {
+            setJobChoice(nextJobId);
+          }}
+          truncated={trendQuery.data?.truncated ?? false}
+          loading={trendQuery.isLoading || !trendQuery.isFetched}
+          error={
+            trendQuery.isError ? (
+              <QueryErrorState
+                error={trendQuery.error}
+                onRetry={() => {
+                  void trendQuery.refetch();
+                }}
+              />
+            ) : undefined
+          }
+        />
+      </Card>
+      <Card size="small">
+        <Table<InspectionReport>
+          rowKey="id"
+          size="small"
+          loading={reportsQuery.isLoading}
+          columns={columns}
+          dataSource={reportsQuery.data ?? []}
+          // 走查第 3 轮 medium：390 宽下「每日基线巡检」被压成逐字竖排。
+          // 固定 900px 表宽后横向滚动，任务列至少 ~430px。
+          scroll={{ x: 900 }}
+          tableLayout="fixed"
+          locale={{ emptyText: <EmptyState description="暂无巡检报告" /> }}
+          pagination={false}
+        />
+      </Card>
+    </Flex>
   );
 }

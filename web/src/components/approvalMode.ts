@@ -68,7 +68,9 @@ export function normalizeApprovalMode(value: unknown): ApprovalMode {
  * 会话覆盖下拉的选中值映射：null/undefined（跟随全局）→ 'follow' 哨兵；
  * 否则原样返回四档值。全局侧不使用（四档值直传）。
  */
-export function toSelectValue(override: ApprovalMode | null | undefined): ApprovalMode | typeof APPROVAL_MODE_FOLLOW {
+export function toSelectValue(
+  override: ApprovalMode | null | undefined,
+): ApprovalMode | typeof APPROVAL_MODE_FOLLOW {
   return override ?? APPROVAL_MODE_FOLLOW;
 }
 
@@ -78,10 +80,7 @@ export function followGlobalLabel(globalMode: ApprovalMode): string {
 }
 
 /** 生效门限与来源（任务：对话页头部显示生效门限与来源）。 */
-export function effectiveModeText(
-  override: ApprovalMode | null,
-  effective: ApprovalMode,
-): string {
+export function effectiveModeText(override: ApprovalMode | null, effective: ApprovalMode): string {
   return override
     ? `${approvalModeLabel(override)}（本会话）`
     : `${approvalModeLabel(effective)}（跟随全局）`;

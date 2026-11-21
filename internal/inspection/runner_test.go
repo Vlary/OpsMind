@@ -123,6 +123,12 @@ func (f *fakeInspEvents) CountFiring(context.Context) (int64, error) { return 0,
 func (f *fakeInspEvents) CountFiringByServer(context.Context, string) (int64, error) {
 	return 0, nil
 }
+func (f *fakeInspEvents) CountFiringBySeverity(context.Context) (store.FiringSeverityCounts, error) {
+	return store.FiringSeverityCounts{}, nil
+}
+func (f *fakeInspEvents) Stats(context.Context, store.AlertEventStatsQuery) (store.AlertEventStats, error) {
+	return store.AlertEventStats{}, store.ErrInvalid
+}
 
 func (f *fakeInspStore) InspectionJobs() store.InspectionJobStore { return (*fakeInspJobs)(f) }
 
@@ -196,6 +202,10 @@ func (f *fakeInspReports) CreateItem(_ context.Context, p store.CreateInspection
 
 func (f *fakeInspReports) PreviousScores(context.Context, string, time.Time) (map[string]int, error) {
 	return map[string]int{}, nil
+}
+
+func (f *fakeInspReports) Trend(context.Context, string, int) ([]store.InspectionTrendPoint, bool, error) {
+	return nil, false, store.ErrInvalid
 }
 
 // fakeInspSSH 记录命令并按脚本回放。

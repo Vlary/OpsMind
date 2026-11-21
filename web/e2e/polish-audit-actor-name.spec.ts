@@ -90,9 +90,7 @@ test.describe('审计页操作者显示用户名', () => {
     // div.opsmind-admin-cell-sub(UUID 副行)，主行精确展示用户名。
     const actorCell = row.locator('td', { hasText: /用户/ }).first();
     await expect(actorCell).toBeVisible();
-    await expect(actorCell.locator('div > div').first()).toHaveText(
-      `用户 ${me.user.username}`,
-    );
+    await expect(actorCell.locator('div > div').first()).toHaveText(`用户 ${me.user.username}`);
 
     // 完整 actor UUID 移入 Tooltip：悬停副行短 ID 后提示完整 UUID。
     await actorCell.locator('.opsmind-admin-cell-sub').hover();

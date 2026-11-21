@@ -43,7 +43,10 @@ type MetricStore interface {
 	Latest(ctx context.Context) ([]ServerMetricLatest, error)
 	LatestByServer(ctx context.Context, serverID string) (ServerMetricLatest, error)
 	Window(ctx context.Context, f MetricWindow) ([]ServerMetric, error) // created_at ASC
-	DeleteBefore(ctx context.Context, cutoff time.Time) (int64, error)  // 保留策略
+	// Trend 按 date_bin 时间桶聚合 CPU/Mem 的 p95/avg/max（单条 SQL，
+	// 走 server_metrics_created_server_idx 的范围扫描；只返回有样本桶）。
+	Trend(ctx context.Context, q MetricTrendQuery) ([]MetricTrendPoint, error)
+	DeleteBefore(ctx context.Context, cutoff time.Time) (int64, error) // 保留策略
 }
 
 // AlertRuleStore 是告警规则仓储（五期 M1）。
@@ -66,6 +69,11 @@ type AlertEventStore interface {
 	SetNotifyStatus(ctx context.Context, id int64, status NotifyStatus, at time.Time) error // 只更新 last_notified_at/notify_status
 	CountFiring(ctx context.Context) (int64, error)
 	CountFiringByServer(ctx context.Context, serverID string) (int64, error)
+	// CountFiringBySeverity 是 overview 的一次索引聚合（GROUP BY severity）；
+	// 修复旧实现「3 等级 × 最多 5 页 × 200」在单等级 >1000 时的少计。
+	CountFiringBySeverity(ctx context.Context) (FiringSeverityCounts, error)
+	// Stats 是 /api/alert-events/stats 的两条独立聚合（时间桶分级 + top rules）。
+	Stats(ctx context.Context, q AlertEventStatsQuery) (AlertEventStats, error)
 }
 
 // NotificationChannelStore 是通知渠道仓储（五期 M1）。加解密不在 store
@@ -112,6 +120,9 @@ type InspectionReportStore interface {
 	List(ctx context.Context, f InspectionReportFilter) ([]InspectionReport, error)
 	CreateItem(ctx context.Context, p CreateInspectionItemParams) (InspectionReportItem, error)
 	PreviousScores(ctx context.Context, jobID string, before time.Time) (map[string]int, error) // 同 job 上一份报告 per-server 评分（趋势对比）
+	// Trend 取最近 limit+1 份报告（created_at DESC），Go 层反转为升序；
+	// hasMore 表示还有更早报告（不翻页、不逐份查询）。
+	Trend(ctx context.Context, jobID string, limit int) (points []InspectionTrendPoint, hasMore bool, err error)
 }
 
 // BatchJobStore 是批量任务仓储（五期 M3）。job 状态归并（pending→running→

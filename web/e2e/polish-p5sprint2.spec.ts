@@ -117,7 +117,10 @@ test('告警评估引擎已装配：越限数据落库后 firing 事件自动出
     }
     await page.waitForTimeout(3_000);
   }
-  expect(fired, '评估循环应在 75s 内对越限点产出 firing 事件（monitor.Manager 必须在服务入口装配）').toBeTruthy();
+  expect(
+    fired,
+    '评估循环应在 75s 内对越限点产出 firing 事件（monitor.Manager 必须在服务入口装配）',
+  ).toBeTruthy();
 });
 
 test('__scenario_diagnosis__：诊断会话到达 awaiting_fix，深链抽屉出现报告与修复审批', async ({
@@ -156,6 +159,9 @@ test('__scenario_diagnosis__：诊断会话到达 awaiting_fix，深链抽屉出
 
   // 发起修复审批：「执行（需审批）」创建 console 审批后出现批准/拒绝
   // 按钮（报告 → 修复命令审批的完整入口，此前成功路径零覆盖）。
-  await drawer.getByRole('button', { name: /执行（需审批）/ }).first().click();
+  await drawer
+    .getByRole('button', { name: /执行（需审批）/ })
+    .first()
+    .click();
   await expect(drawer.getByRole('button', { name: /批准执行/ })).toBeVisible({ timeout: 15_000 });
 });

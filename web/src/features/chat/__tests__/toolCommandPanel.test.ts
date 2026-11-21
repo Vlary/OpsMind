@@ -82,7 +82,12 @@ describe('工具卡命令面板（p6 sprint 5）', () => {
   it('SQL 面板：改写后标题为「模型原 SQL」', () => {
     const panel = commandPanelOf(
       { arguments: { sql: 'select * from t limit 5000' }, result: null },
-      [approval({ command: 'select * from t limit 5000', edited_command: 'select * from t limit 10' })],
+      [
+        approval({
+          command: 'select * from t limit 5000',
+          edited_command: 'select * from t limit 10',
+        }),
+      ],
     );
     expect(panel?.label).toBe('模型原 SQL');
     expect(panel?.language).toBe('sql');

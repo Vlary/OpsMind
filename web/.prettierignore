@@ -3,3 +3,5 @@ node_modules
 src/api/schema.d.ts
 pnpm-lock.yaml
 e2e/.auth
+e2e/.test-results
+.zcode

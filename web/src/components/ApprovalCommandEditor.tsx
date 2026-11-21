@@ -33,7 +33,7 @@ export interface ApprovalCommandEditorProps {
  */
 export default function ApprovalCommandEditor(props: ApprovalCommandEditorProps) {
   return (
-    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+    <Space orientation="vertical" size={8} style={{ width: '100%' }}>
       <Typography.Text type="secondary">
         本版本不支持审批时改写命令。如需修改，请拒绝后由发起人重新发起（重新走审批与门限）。
       </Typography.Text>

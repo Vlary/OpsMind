@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -237,6 +238,45 @@ func (f *inspectionReportsFake) PreviousScores(_ context.Context, jobID string, 
 		out[it.ServerID] = it.Score
 	}
 	return out, nil
+}
+
+// Trend 是生产查询的内存等价：按 created_at DESC 取 limit+1 份后反转升序；
+// truncated=还有更早报告。
+func (f *inspectionReportsFake) Trend(_ context.Context, jobID string, limit int) ([]store.InspectionTrendPoint, bool, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 60 {
+		return nil, false, store.ErrInvalid
+	}
+	f.st.mu.Lock()
+	defer f.st.mu.Unlock()
+	ordered := make([]store.InspectionReport, 0, len(f.st.reports))
+	for _, r := range f.st.reports {
+		if jobID != "" && (r.JobID == nil || *r.JobID != jobID) {
+			continue
+		}
+		ordered = append(ordered, r)
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if !ordered[i].CreatedAt.Equal(ordered[j].CreatedAt) {
+			return ordered[i].CreatedAt.After(ordered[j].CreatedAt)
+		}
+		return ordered[i].ID > ordered[j].ID
+	})
+	truncated := len(ordered) > limit
+	if truncated {
+		ordered = ordered[:limit]
+	}
+	out := make([]store.InspectionTrendPoint, 0, len(ordered))
+	for i := len(ordered) - 1; i >= 0; i-- {
+		r := ordered[i]
+		out = append(out, store.InspectionTrendPoint{
+			ReportID: r.ID, CreatedAt: r.CreatedAt, AvgScore: r.AvgScore,
+			ServerCount: r.ServerCount, AnomalyCount: r.AnomalyCount, Trigger: r.Trigger,
+		})
+	}
+	return out, truncated, nil
 }
 
 // memStore 的巡检装配（替换 fakes_test.go 的 M2 占位 stub）。
@@ -490,6 +530,96 @@ func TestGetInspectionReportNotFound(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &body)
 	if body.Error.Code == "" {
 		t.Fatalf("error.code missing: %s", w.Body.String())
+	}
+}
+
+// TestInspectionTrend：points 按 created_at 升序、limit 1..60（按报告份数）、
+// truncated 表示还有更早报告；job_id 可选且响应回显（缺省 null）。
+func TestInspectionTrend(t *testing.T) {
+	r, d := newInspectionTestEnv(t)
+	ctx := context.Background()
+	jobID := uuid.NewString()
+	otherJob := uuid.NewString()
+	now := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		if _, err := d.Store.InspectionReports().Create(ctx, store.CreateInspectionReportParams{
+			JobID: &jobID, Trigger: store.InspectionTriggerCron, ServerCount: 2,
+			AvgScore: 70 + i, AnomalyCount: i, StartedAt: now, FinishedAt: &now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.Store.InspectionReports().Create(ctx, store.CreateInspectionReportParams{
+		JobID: &otherJob, Trigger: store.InspectionTriggerManual, ServerCount: 1,
+		AvgScore: 55, StartedAt: now, FinishedAt: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type trendResp struct {
+		JobID  *string `json:"job_id"`
+		Points []struct {
+			ReportID     string    `json:"report_id"`
+			CreatedAt    time.Time `json:"created_at"`
+			AvgScore     int       `json:"avg_score"`
+			ServerCount  int       `json:"server_count"`
+			AnomalyCount int       `json:"anomaly_count"`
+			Trigger      string    `json:"trigger"`
+		} `json:"points"`
+		Truncated bool `json:"truncated"`
+	}
+	get := func(path string) trendResp {
+		t.Helper()
+		w := doJSON(t, r, http.MethodGet, path, nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s code = %d body=%s", path, w.Code, w.Body.String())
+		}
+		var res trendResp
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	res := get("/api/inspection/trend?job_id=" + jobID + "&limit=2")
+	if res.JobID == nil || *res.JobID != jobID {
+		t.Fatalf("job_id echo = %v", res.JobID)
+	}
+	if len(res.Points) != 2 || !res.Truncated {
+		t.Fatalf("points=%d truncated=%v, want 2/true", len(res.Points), res.Truncated)
+	}
+	if !res.Points[0].CreatedAt.Before(res.Points[1].CreatedAt) &&
+		!res.Points[0].CreatedAt.Equal(res.Points[1].CreatedAt) {
+		t.Fatalf("points not ascending: %s then %s", res.Points[0].CreatedAt, res.Points[1].CreatedAt)
+	}
+	if res.Points[0].Trigger != "cron" || res.Points[0].ServerCount != 2 {
+		t.Fatalf("point = %+v", res.Points[0])
+	}
+
+	// 不传 job_id：全部报告（4 份），limit=60 → 不截断；job_id 为 null。
+	res = get("/api/inspection/trend?limit=60")
+	if res.JobID != nil {
+		t.Fatalf("job_id = %v, want null", res.JobID)
+	}
+	if len(res.Points) != 4 || res.Truncated {
+		t.Fatalf("all points=%d truncated=%v", len(res.Points), res.Truncated)
+	}
+
+	// 无报告的合法 job：points=[]，不是错误。
+	res = get("/api/inspection/trend?job_id=" + uuid.NewString())
+	if len(res.Points) != 0 || res.Truncated {
+		t.Fatalf("empty points=%d truncated=%v", len(res.Points), res.Truncated)
+	}
+	if res.Points == nil {
+		t.Fatal("points must be [] not null")
+	}
+
+	// 参数校验：limit 1..60、job_id 必须是 uuid。
+	for _, q := range []string{"?limit=0", "?limit=61", "?job_id=not-a-uuid"} {
+		w := doJSON(t, r, http.MethodGet, "/api/inspection/trend"+q, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s code = %d, want 400", q, w.Code)
+		}
 	}
 }
 

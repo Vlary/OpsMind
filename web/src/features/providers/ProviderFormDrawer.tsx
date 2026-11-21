@@ -248,7 +248,7 @@ export default function ProviderFormModal({
           <Alert
             type="warning"
             showIcon
-            message="供应商预设未加载"
+            title="供应商预设未加载"
             description="可以手动填写类型与 Base URL；预设仅用于自动填充。"
             style={{ marginBottom: 16 }}
           />

@@ -180,7 +180,7 @@ export default function BatchPage() {
       title: '命令 / 描述',
       key: 'command',
       render: (_, job) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span className="opsmind-admin-mono opsmind-admin-cell-title">{job.command}</span>
           {job.description ? (
             <span className="opsmind-admin-cell-sub">{job.description}</span>
@@ -397,7 +397,7 @@ function RiskPreview({
       <Alert
         type="error"
         showIcon
-        message="风险预览失败"
+        title="风险预览失败"
         description={describeFailure(failureFromError(error))}
         style={{ marginBottom: 16 }}
       />
@@ -422,7 +422,7 @@ function RiskPreview({
             : 'error'
       }
       showIcon
-      message={
+      title={
         <Space size={8}>
           <RiskBadge level={preview.risk_level} />
           <span>{hint}</span>

@@ -212,8 +212,8 @@ describe('stop() 后 live.approvals 的完整回路（类型与数据流契约�
       userContent: '问',
       text: '',
       reasoning: '',
-    reasoningStartedAt: null,
-    reasoningEndedAt: null,
+      reasoningStartedAt: null,
+      reasoningEndedAt: null,
       tools: [],
       approvals: cancelPendingApprovals(
         [approvalOf({ status: 'pending' }), approvalOf({ id: 'a2', status: 'approved' })],

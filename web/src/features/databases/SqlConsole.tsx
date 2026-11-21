@@ -276,7 +276,7 @@ export default function SqlConsole({ database, open, onClose }: SqlConsoleProps)
     <Drawer
       open={open}
       onClose={onClose}
-      width={920}
+      size={920}
       title={`${spec.title} · ${database.name}`}
       extra={<Tag color="blue">只读</Tag>}
     >
@@ -284,7 +284,7 @@ export default function SqlConsole({ database, open, onClose }: SqlConsoleProps)
         <Alert
           type="info"
           showIcon
-          message={
+          title={
             database.engine === 'redis'
               ? '只读命令控制台（Redis）'
               : isMongo
@@ -365,7 +365,7 @@ export default function SqlConsole({ database, open, onClose }: SqlConsoleProps)
         </Flex>
 
         {syntaxError ? (
-          <Alert type="error" showIcon message="命令文档校验未通过" description={syntaxError} />
+          <Alert type="error" showIcon title="命令文档校验未通过" description={syntaxError} />
         ) : null}
 
         {failure ? (
@@ -387,7 +387,7 @@ export default function SqlConsole({ database, open, onClose }: SqlConsoleProps)
           <Alert
             type="warning"
             showIcon
-            message={READONLY_REJECTION_GUIDE.message}
+            title={READONLY_REJECTION_GUIDE.message}
             description={READONLY_REJECTION_GUIDE.description}
           />
         ) : null}

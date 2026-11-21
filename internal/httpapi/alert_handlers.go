@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ func (d *Deps) RegisterAlertRoutes(api *gin.RouterGroup) {
 	d.guard(api, http.MethodDelete, "/alert-rules/:id", authz.PermAlertConfig, d.handleDeleteAlertRule)
 
 	d.guard(api, http.MethodGet, "/alert-events", authz.PermMetricsRead, d.handleListAlertEvents)
+	d.guard(api, http.MethodGet, "/alert-events/stats", authz.PermMetricsRead, d.handleAlertEventStats)
 
 	d.guard(api, http.MethodGet, "/notification-channels", authz.PermMetricsRead, d.handleListChannels)
 	d.guard(api, http.MethodPost, "/notification-channels", authz.PermAlertConfig, d.handleCreateChannel)
@@ -321,6 +323,9 @@ type alertEventsResponse struct {
 	NextBeforeID *int64             `json:"next_before_id"`
 }
 
+// alertEventRangeMax 是 fired_after..fired_before 的最大跨度（下钻窗口）。
+const alertEventRangeMax = 7 * 24 * time.Hour
+
 func (d *Deps) handleListAlertEvents(c *gin.Context) {
 	if !d.requireStore(c) {
 		return
@@ -358,6 +363,40 @@ func (d *Deps) handleListAlertEvents(c *gin.Context) {
 		}
 		filter.ServerID = raw
 	}
+	// 图表下钻过滤：rule_id + fired_after/fired_before（RFC3339，成对、
+	// after<before、跨度 ≤7d）；与 before_id/limit 可叠加，游标语义不变。
+	// 区间为半开 [after, before)，与 /api/alert-events/stats 的桶同口径；
+	// RFC3339 解析保留小数秒（…59.9995Z 不会被截到毫秒）。
+	if raw := c.Query("rule_id"); raw != "" {
+		if _, err := uuid.Parse(raw); err != nil {
+			writeError(c, apierr.ValidationFailed, "rule_id must be a valid uuid")
+			return
+		}
+		filter.RuleID = raw
+	}
+	rawAfter, rawBefore := strings.TrimSpace(c.Query("fired_after")), strings.TrimSpace(c.Query("fired_before"))
+	if (rawAfter == "") != (rawBefore == "") {
+		writeError(c, apierr.ValidationFailed, "fired_after and fired_before must be provided together")
+		return
+	}
+	if rawAfter != "" {
+		after, errA := time.Parse(time.RFC3339, rawAfter)
+		before, errB := time.Parse(time.RFC3339, rawBefore)
+		if errA != nil || errB != nil {
+			writeError(c, apierr.ValidationFailed, "fired_after and fired_before must be RFC3339 timestamps")
+			return
+		}
+		after, before = after.UTC(), before.UTC()
+		if !after.Before(before) {
+			writeError(c, apierr.ValidationFailed, "fired_after must be before fired_before")
+			return
+		}
+		if before.Sub(after) > alertEventRangeMax {
+			writeError(c, apierr.ValidationFailed, "fired_after..fired_before must not exceed 7 days")
+			return
+		}
+		filter.FiredAfter, filter.FiredBefore = &after, &before
+	}
 	items, hasMore, err := d.Store.AlertEvents().List(c.Request.Context(), filter)
 	if err != nil {
 		d.handleStoreError(c, err, apierr.AlertEventNotFound)
@@ -372,6 +411,104 @@ func (d *Deps) handleListAlertEvents(c *gin.Context) {
 		resp.NextBeforeID = &id
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// ---------------------------------------------------------------------------
+// 告警事件统计（GET /api/alert-events/stats）
+// ---------------------------------------------------------------------------
+
+// alertSeverityTimelinePoint 是一个时间桶的分级计数；无事件桶补零。
+type alertSeverityTimelinePoint struct {
+	BucketStart time.Time `json:"bucket_start"`
+	Info        int64     `json:"info"`
+	Warning     int64     `json:"warning"`
+	Critical    int64     `json:"critical"`
+}
+
+// alertRuleStatResponse 是 top_rules 元素。
+type alertRuleStatResponse struct {
+	RuleID      string              `json:"rule_id"`
+	RuleName    string              `json:"rule_name"`
+	Severity    store.AlertSeverity `json:"severity"`
+	Count       int64               `json:"count"`
+	ServerCount int64               `json:"server_count"`
+	LastFiredAt time.Time           `json:"last_fired_at"`
+}
+
+// alertEventStatsResponse 是 GET /api/alert-events/stats 响应。
+type alertEventStatsResponse struct {
+	Window        string    `json:"window"`
+	BucketSeconds int       `json:"bucket_seconds"`
+	From          time.Time `json:"from"`
+	To            time.Time `json:"to"`
+	// ServerTime 是本响应生成时的服务端时间。to 对齐到当前桶结束，
+	// 前端据 to > server_time 判断最后一桶未走完（走查第 14 轮 low）。
+	ServerTime       time.Time                    `json:"server_time"`
+	Total            int64                        `json:"total"`
+	DistinctRules    int64                        `json:"distinct_rules"`
+	SeverityTimeline []alertSeverityTimelinePoint `json:"severity_timeline"`
+	TopRules         []alertRuleStatResponse      `json:"top_rules"`
+}
+
+// handleAlertEventStats 是图表页的告警统计：两条独立 SQL（时间桶分级 +
+// top rules），不翻页、不逐等级循环；空窗口返回 total=0、全零时间轴与
+// 空 top_rules（不是错误）。
+func (d *Deps) handleAlertEventStats(c *gin.Context) {
+	if !d.requireStore(c) {
+		return
+	}
+	now := d.now()
+	win, ok := parseTrendWindow(c, now)
+	if !ok {
+		return
+	}
+	topRules := 8
+	if raw := strings.TrimSpace(c.Query("top_rules")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 20 {
+			writeError(c, apierr.ValidationFailed, "top_rules must be between 1 and 20")
+			return
+		}
+		topRules = n
+	}
+	stats, err := d.Store.AlertEvents().Stats(c.Request.Context(), store.AlertEventStatsQuery{
+		From: win.from, To: win.to, BucketSeconds: win.bucketSeconds, TopRules: topRules,
+	})
+	if err != nil {
+		d.handleStoreError(c, err, apierr.Internal)
+		return
+	}
+	// 时间轴补零到窗口的完整桶数（≤28），保证前端 X 轴连续。
+	byBucket := make(map[int64]store.AlertEventSeverityBucket, len(stats.Timeline))
+	for _, b := range stats.Timeline {
+		byBucket[b.BucketStart.Unix()] = b
+	}
+	span := time.Duration(win.bucketSeconds) * time.Second
+	timeline := make([]alertSeverityTimelinePoint, 0, win.buckets)
+	for i := 0; i < win.buckets; i++ {
+		start := win.from.Add(time.Duration(i) * span)
+		b, ok := byBucket[start.Unix()]
+		if !ok {
+			timeline = append(timeline, alertSeverityTimelinePoint{BucketStart: start})
+			continue
+		}
+		timeline = append(timeline, alertSeverityTimelinePoint{
+			BucketStart: start, Info: b.Info, Warning: b.Warning, Critical: b.Critical,
+		})
+	}
+	rules := make([]alertRuleStatResponse, 0, topRules)
+	for _, r := range stats.TopRules {
+		rules = append(rules, alertRuleStatResponse{
+			RuleID: r.RuleID, RuleName: r.RuleName, Severity: r.Severity,
+			Count: r.Count, ServerCount: r.ServerCount, LastFiredAt: r.LastFiredAt,
+		})
+	}
+	c.JSON(http.StatusOK, alertEventStatsResponse{
+		Window: win.name, BucketSeconds: win.bucketSeconds, From: win.from, To: win.to,
+		ServerTime: now,
+		Total:      stats.Total, DistinctRules: stats.DistinctRules,
+		SeverityTimeline: timeline, TopRules: rules,
+	})
 }
 
 // ---------------------------------------------------------------------------

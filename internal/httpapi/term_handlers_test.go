@@ -623,22 +623,34 @@ func TestTermWSDialFailureReleasesConsumedGrant(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := env.auditW.Flush(ctx); err != nil {
-		t.Fatalf("flush audit: %v", err)
-	}
-	env.st.mu.Lock()
+	// 授权回滚与审计都由 WS 收尾 goroutine 异步完成：ReleaseGrant 先把
+	// consumed_at 清空，审计随后才 Enqueue。冷缓存/并发包负载下，上一轮
+	// 轮询可能在两者之间返回，单次 Flush 会赶在入队前执行（实测偶发
+	// 「grant_released audit missing」）。按截止时间反复 Flush + 扫描。
+	auditDeadline := time.Now().Add(5 * time.Second)
 	found := false
-	for _, auditRow := range env.st.auditLogs {
-		if auditRow.Action == "terminal.grant_released" && auditRow.ResourceID == grantID {
-			found = true
+	for !found {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := env.auditW.Flush(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("flush audit: %v", err)
+		}
+		env.st.mu.Lock()
+		for _, auditRow := range env.st.auditLogs {
+			if auditRow.Action == "terminal.grant_released" && auditRow.ResourceID == grantID {
+				found = true
+				break
+			}
+		}
+		env.st.mu.Unlock()
+		if found {
 			break
 		}
-	}
-	env.st.mu.Unlock()
-	if !found {
-		t.Fatal("terminal.grant_released audit missing after dial failure")
+		if time.Now().After(auditDeadline) {
+			t.Fatal("terminal.grant_released audit missing after dial failure")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	// 同一 grant 可重试（授权已保留）；新会话创建成功即证明未被烧掉。

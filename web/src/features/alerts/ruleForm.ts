@@ -34,7 +34,11 @@ export const METRIC_LABELS: Record<AlertMetricName, string> = {
   cpu_pct: 'CPU 使用率',
   mem_pct: '内存使用率',
   disk_pct: '磁盘使用率',
-  load_1: '负载（1m）',
+  // 同一规则会评估 Linux 与 Windows 资产：Linux 的 load_1 是 loadavg
+  // 1 分钟，Windows 是 ProcessorQueueLength（排队线程数）。标签不再只写
+  // 「负载（1m）」，避免 Windows 值班员按 1 分钟负载理解阈值（走查第
+  // 15 轮 medium）。
+  load_1: '负载 / 处理器队列',
   net_in_bps: '网络入速率',
   net_out_bps: '网络出速率',
 };

@@ -29,7 +29,7 @@ export default function ForbiddenPage() {
         status="403"
         title="无权访问"
         subTitle={
-          <Space direction="vertical" size={4}>
+          <Space orientation="vertical" size={4}>
             <Typography.Text>
               当前账号的角色是「{role}」，没有访问「{pageLabel}」的权限。
             </Typography.Text>

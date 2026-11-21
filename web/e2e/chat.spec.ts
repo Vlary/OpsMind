@@ -12,6 +12,7 @@ import {
   installProgressSampler,
   readProgressSamples,
   sendMessage,
+  waitForStreamSettled,
 } from './helpers';
 
 // 聊天主链路：空会话引导、SSE 流式渲染、工具调用、审批、持久化与会话管理。
@@ -181,6 +182,9 @@ test.describe('聊天与 SSE', () => {
     await expect(page).toHaveURL(/\/c\/[0-9a-f-]+/, { timeout: 20_000 });
     const cidA = conversationIdOf(page);
     await expect(page.getByText(DEFAULT_FINAL)).toBeVisible({ timeout: 30_000 });
+    // 最终正文可见 != done 帧已处理：等流真正结束再点「新建会话」，否则
+    // 离开守卫会按 CONTRACT 8.6.8 正确拦截（第 17 轮全量偶发）。
+    await waitForStreamSettled(page);
 
     // 侧栏出现该会话（标题取自首条消息前 30 字符）。
     const itemA = page.locator('.chat-conv-item', { hasText: titleA }).first();

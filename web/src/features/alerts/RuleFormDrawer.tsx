@@ -131,7 +131,7 @@ export default function RuleFormDrawer({ open, rule, channels, onClose }: RuleFo
       title={rule ? '编辑告警规则' : '新建告警规则'}
       open={open}
       onClose={onClose}
-      width={480}
+      size={480}
       destroyOnHidden
     >
       {failure ? (

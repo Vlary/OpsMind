@@ -349,12 +349,45 @@ type InsertMetricParams struct {
 	NetOut    int64
 }
 
+// MetricWindowLimitMax 是单次窗口查询点数硬上限（契约 11 节 #14）：
+// 采集间隔最小 30s、窗口最长 1440 分钟，即每分钟最多 2 点 → 2880 点。
+// 旧值 1440 只在 60s 间隔下成立；30s 间隔的 24h 窗口会被截成最近 12h，
+// 页面误把其余时段标成「无采样」（第 10 轮 high）。
+const MetricWindowLimitMax = 2880
+
+// MetricWindowPointLimit 返回 minutes 分钟窗口在最短采集间隔（30s）下的
+// 点数上限（每分钟 2 点）。单机时间序列 API 与 get_metrics 工具用它申请
+// 足够大的 LIMIT；实际结果不会超过 MetricWindowLimitMax。
+func MetricWindowPointLimit(minutes int) int {
+	if minutes <= 0 {
+		return 0
+	}
+	limit := minutes * 2
+	if limit > MetricWindowLimitMax {
+		return MetricWindowLimitMax
+	}
+	return limit
+}
+
 // MetricWindow 是窗口查询条件。
 type MetricWindow struct {
 	ServerID string // ""=全部（overview 聚合不使用，仅单机）
 	From     time.Time
 	To       time.Time
-	Limit    int // 硬上限 1440（契约 11 节）；窗口查询按 created_at ASC 返回
+	Limit    int // 硬上限 MetricWindowLimitMax（契约 11 节）；窗口查询按 created_at ASC 返回
+}
+
+// MetricTrendQuery 是 /api/monitor/trend 的聚合条件。BucketSeconds 由
+// 服务端写死（24h→3600、7d→21600），origin=2000-01-01T00:00:00Z 固定在
+// SQL 内；FROM 含、TO 不含。Now 非零时只聚合 created_at <= Now 的样本：
+// To 是当前桶的结束时刻（晚于 now），不钳制会把时钟超前机器写入的未来
+// 样本算进最后一个桶，制造不存在的集群压力（走查第 16 轮 medium）。
+// 零值表示不钳制（存储层单测/离线聚合）。
+type MetricTrendQuery struct {
+	From          time.Time
+	To            time.Time
+	BucketSeconds int
+	Now           time.Time
 }
 
 // CreateAlertRuleParams 是创建告警规则参数。
@@ -389,11 +422,23 @@ type UpdateAlertRuleParams struct {
 
 // AlertEventFilter 是事件列表过滤条件。
 type AlertEventFilter struct {
-	Status   AlertEventStatus // ""=不过滤
-	Severity AlertSeverity    // ""=不过滤
-	ServerID string           // ""=不过滤
-	BeforeID int64            // 0=最新一页
-	Limit    int              // 1..200
+	Status      AlertEventStatus // ""=不过滤
+	Severity    AlertSeverity    // ""=不过滤
+	ServerID    string           // ""=不过滤
+	RuleID      string           // ""=不过滤
+	FiredAfter  *time.Time       // nil=不过滤（含边界，>=）
+	FiredBefore *time.Time       // nil=不过滤（不含边界，<；与 stats 的 [from,to) 同口径）
+	BeforeID    int64            // 0=最新一页
+	Limit       int              // 1..200
+}
+
+// AlertEventStatsQuery 是 /api/alert-events/stats 的聚合条件。窗口与
+// bucket 语义同 MetricTrendQuery；TopRules 1..20。
+type AlertEventStatsQuery struct {
+	From          time.Time
+	To            time.Time
+	BucketSeconds int
+	TopRules      int
 }
 
 // CreateNotificationChannelParams 是创建通知渠道参数；ConfigJSON 为明文配置

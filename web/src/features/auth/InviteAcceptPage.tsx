@@ -72,7 +72,7 @@ export default function InviteAcceptPage() {
             <Alert
               type="error"
               showIcon
-              message="链接无效或已过期"
+              title="链接无效或已过期"
               description="邀请/重置链接缺少 token，请让管理员重新发送。"
             />
             <div style={{ marginTop: 16 }}>
@@ -111,7 +111,7 @@ export default function InviteAcceptPage() {
               type="error"
               showIcon
               style={{ marginBottom: 16 }}
-              message={describeInviteFailure(failure)}
+              title={describeInviteFailure(failure)}
               description={failure.requestId ? `request_id: ${failure.requestId}` : null}
             />
           ) : null}
@@ -120,7 +120,7 @@ export default function InviteAcceptPage() {
               type="info"
               showIcon
               style={{ marginBottom: 16 }}
-              message="下一步"
+              title="下一步"
               description="请把链接转发给受邀者，由其在自己的设备/网络打开并设置密码；管理员本人无法在同一出口 IP 兑换。若你正在本机验证流程，可换用其他出口网络后重试。"
             />
           ) : null}

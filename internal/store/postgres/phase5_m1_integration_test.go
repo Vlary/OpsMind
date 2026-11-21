@@ -75,6 +75,11 @@ func TestMetricsBatchInsertLatestWindow(t *testing.T) {
 	if latest.CPU != 9 {
 		t.Fatalf("latest cpu = %v, want 9", latest.CPU)
 	}
+	// 走查第 15 轮 medium：latest 行必须带资产平台，前端据此选 Linux
+	// （/proc、loadavg）或 Windows（Win32_*）副文案。
+	if latest.OS != store.ServerOSLinux {
+		t.Fatalf("latest os = %q, want %q", latest.OS, store.ServerOSLinux)
+	}
 	// 窗口查询：ASC + Limit 截断取最新 N 个。
 	points, err := testDB.Metrics().Window(ctx, store.MetricWindow{
 		ServerID: srv.ID, From: base.Add(-time.Minute), To: base.Add(20 * time.Minute), Limit: 3,
@@ -88,11 +93,17 @@ func TestMetricsBatchInsertLatestWindow(t *testing.T) {
 	if !points[0].CreatedAt.Before(points[2].CreatedAt) || points[2].CPU != 9 {
 		t.Fatalf("window order/limit wrong: %+v", points)
 	}
-	// Limit > 1440 拒绝。
+	// Limit > 2880 拒绝（30s 最小间隔 × 24h；旧上限 1440 会让 30s 采集的
+	// 24h 窗口只剩最近 12h）。
 	if _, err := testDB.Metrics().Window(ctx, store.MetricWindow{
-		ServerID: srv.ID, Limit: 1441, From: base, To: base,
+		ServerID: srv.ID, Limit: store.MetricWindowLimitMax + 1, From: base, To: base,
 	}); !errors.Is(err, store.ErrInvalid) {
-		t.Fatalf("window limit 1441 err = %v, want ErrInvalid", err)
+		t.Fatalf("window limit %d err = %v, want ErrInvalid", store.MetricWindowLimitMax+1, err)
+	}
+	if _, err := testDB.Metrics().Window(ctx, store.MetricWindow{
+		ServerID: srv.ID, Limit: store.MetricWindowLimitMax, From: base, To: base,
+	}); err != nil {
+		t.Fatalf("window limit %d err = %v, want nil", store.MetricWindowLimitMax, err)
 	}
 	// CHECK 约束：cpu>100 拒绝（ErrInvalid）。
 	if err := testDB.Metrics().BatchInsert(ctx, []store.InsertMetricParams{{
@@ -104,6 +115,121 @@ func TestMetricsBatchInsertLatestWindow(t *testing.T) {
 	n, err := testDB.Metrics().DeleteBefore(ctx, base.Add(5*time.Minute))
 	if err != nil || n != 5 {
 		t.Fatalf("DeleteBefore n=%d err=%v, want 5", n, err)
+	}
+}
+
+// TestMetricsLatestCarriesPlatform 锁定走查第 15 轮 medium：overview 的
+// latest 行必须带 servers.os。Windows 资产的 load_1 是 ProcessorQueueLength、
+// CPU 是 Win32_Processor LoadPercentage，前端不能继续按 /proc/stat 与
+// loadavg 1 分钟标注。
+func TestMetricsLatestCarriesPlatform(t *testing.T) {
+	cleanPhase5Tables(t)
+	ctx := context.Background()
+	create := func(name string, os store.ServerOS) store.Server {
+		t.Helper()
+		srv, err := testDB.Servers().Create(ctx, store.CreateServerParams{
+			Name: name, OS: os, Host: "127.0.0.1", Port: 22, Username: "root",
+			Credentials: store.ServerCredentials{
+				AuthMethod:        store.AuthMethodPassword,
+				PasswordEncrypted: "v1:test:dummy",
+			},
+		})
+		if err != nil {
+			t.Fatalf("create %s server: %v", name, err)
+		}
+		return srv
+	}
+	linux := create("m1-platform-linux", store.ServerOSLinux)
+	windows := create("m1-platform-windows", store.ServerOSWindows)
+	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	for _, srv := range []store.Server{linux, windows} {
+		if err := testDB.Metrics().BatchInsert(ctx, []store.InsertMetricParams{{
+			ServerID: srv.ID, CreatedAt: now,
+			CPU: 30, Mem: 45, Disk: 50, Load1: 1, NetIn: 1024, NetOut: 2048,
+		}}); err != nil {
+			t.Fatalf("batch insert %s: %v", srv.Name, err)
+		}
+	}
+
+	rows, err := testDB.Metrics().Latest(ctx)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	got := make(map[string]store.ServerOS, len(rows))
+	for _, row := range rows {
+		got[row.ServerID] = row.OS
+	}
+	if got[linux.ID] != store.ServerOSLinux {
+		t.Fatalf("linux latest os = %q, want linux", got[linux.ID])
+	}
+	if got[windows.ID] != store.ServerOSWindows {
+		t.Fatalf("windows latest os = %q, want windows", got[windows.ID])
+	}
+}
+
+// TestMetricsLatestIgnoresOlderSample 锁定第 10 轮 medium：latest UPSERT 必须
+// 比较样本时刻。时钟回拨/补采/双实例写入旧时刻点时，不能让「当前值」倒退，
+// 否则 overview 的 created_at/指标、Top12 排名与折线最后一点互相矛盾。
+func TestMetricsLatestIgnoresOlderSample(t *testing.T) {
+	cleanPhase5Tables(t)
+	ctx := context.Background()
+	srv := mustServerRow(t)
+
+	newer := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	older := newer.Add(-17 * time.Minute)
+	write := func(at time.Time, cpu float64) {
+		t.Helper()
+		if err := testDB.Metrics().BatchInsert(ctx, []store.InsertMetricParams{{
+			ServerID: srv.ID, CreatedAt: at,
+			CPU: cpu, Mem: 40, Disk: 50, Load1: 0.5, NetIn: 1024, NetOut: 2048,
+		}}); err != nil {
+			t.Fatalf("batch insert at %s: %v", at, err)
+		}
+	}
+
+	// 先写新样本，再写旧样本（两次独立批量，模拟补采/双实例乱序）。
+	write(newer, 23)
+	write(older, 97)
+
+	latest, err := testDB.Metrics().LatestByServer(ctx, srv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.CPU != 23 || !latest.CreatedAt.Equal(newer) {
+		t.Fatalf("latest = cpu %v at %s, want cpu 23 at %s (old sample must not overwrite)",
+			latest.CPU, latest.CreatedAt, newer)
+	}
+	// 折线仍按时间升序包含两个点，最后一点与 latest 一致。
+	points, err := testDB.Metrics().Window(ctx, store.MetricWindow{
+		ServerID: srv.ID, From: older.Add(-time.Minute), To: newer.Add(time.Minute),
+		Limit: store.MetricWindowLimitMax,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 2 || !points[1].CreatedAt.Equal(newer) || points[1].CPU != 23 {
+		t.Fatalf("window points = %+v, want older then newer(cpu=23)", points)
+	}
+
+	// 等时刻样本允许覆盖（同一采集时刻重试时以最后一次为准）。
+	write(newer, 55)
+	latest, err = testDB.Metrics().LatestByServer(ctx, srv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.CPU != 55 {
+		t.Fatalf("latest cpu after equal-time overwrite = %v, want 55", latest.CPU)
+	}
+
+	// 旧样本再次到达仍不得回退。
+	write(older, 88)
+	latest, err = testDB.Metrics().LatestByServer(ctx, srv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.CPU != 55 || !latest.CreatedAt.Equal(newer) {
+		t.Fatalf("latest after late old write = cpu %v at %s, want cpu 55 at %s",
+			latest.CPU, latest.CreatedAt, newer)
 	}
 }
 

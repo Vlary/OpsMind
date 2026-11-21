@@ -70,11 +70,11 @@ export default function ContainerLogsDrawer({
   return (
     <Drawer
       open={open}
-      width={720}
+      size={720}
       title={`容器日志 · ${container.name !== '' ? container.name : container.id.slice(0, 12)}`}
       onClose={onClose}
     >
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={12} style={{ width: '100%' }}>
         <Space wrap>
           <Typography.Text type="secondary">最近行数</Typography.Text>
           <Select
@@ -104,7 +104,7 @@ export default function ContainerLogsDrawer({
           <Alert
             type="warning"
             showIcon
-            message="日志过长已截断（单次输出上限 256KB），仅显示末尾部分"
+            title="日志过长已截断（单次输出上限 256KB），仅显示末尾部分"
           />
         ) : null}
 

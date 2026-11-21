@@ -340,9 +340,9 @@ test.describe('六期：全局门限放宽护栏（真实链路 /settings）', (
       await page.getByRole('option', { name: label, exact: true }).click();
       // 放宽需要第二人批准：页面 toast 说明已提交给第二位审批者，门限保持
       // 当前值（"当前 · 危险命令审批" 徽标不变）。
-      await expect(
-        page.getByText('放宽审批门限已提交给第二位审批者，批准后生效。'),
-      ).toBeVisible({ timeout: 10_000 });
+      await expect(page.getByText('放宽审批门限已提交给第二位审批者，批准后生效。')).toBeVisible({
+        timeout: 10_000,
+      });
       await expect(card.getByText('当前 · 危险命令审批')).toBeVisible();
     };
 

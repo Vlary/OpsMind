@@ -81,7 +81,7 @@ export default function ChangePasswordModal({
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="修改成功后当前所有登录会话都会失效，需要用新密码重新登录。"
+        title="修改成功后当前所有登录会话都会失效，需要用新密码重新登录。"
       />
       {/* AUTH_INVALID 在改密场景必然是旧密码校验失败（表单无用户名字段），
           describeChangePasswordFailure 把文案改写为「旧密码不正确」；错误码与

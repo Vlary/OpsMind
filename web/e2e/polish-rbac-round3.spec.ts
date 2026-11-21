@@ -1,4 +1,4 @@
-import { AUTH_STATE_FILE, sendMessage } from './helpers';
+import { AUTH_STATE_FILE, sendMessage, waitForStreamSettled } from './helpers';
 import { expect, test } from './fixtures';
 
 // RBAC 第 3 轮走查的两项前端回归：
@@ -48,6 +48,15 @@ test('正文完整上屏后立即点「新建会话」不被离开守卫拦截�
       }, 3000);
     });
   });
+
+  // 正文停止增长（上面 80ms 静默）不等于 done 帧已处理：SSE 最后一个
+  // token 与 done 之间还有网络/调度延迟，负载下可达数秒。此时点「新建
+  // 会话」被拦截是 CONTRACT 8.6.8 的正确行为，不是本用例要抓的回归。
+  // 「正在生成…」由 live.done/error/stopped 驱动，done 帧处理时先于
+  // finally 的 phase 回落消失——等它消失后再点，既避免测试自身竞态，
+  // 也仍覆盖「done 已处理但 phase 可能尚未 idle」的原始窗口（该窗口的
+  // 判定逻辑由 streamActiveRace.test.ts 直接锁定）。
+  await waitForStreamSettled(page);
 
   // 同一帧内点击「新建会话」：不得出现「当前回答仍在进行」确认弹窗。
   await page.getByTitle('新建会话').click();

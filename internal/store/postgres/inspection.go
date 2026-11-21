@@ -268,6 +268,61 @@ func (s inspectionReportStore) List(ctx context.Context, f store.InspectionRepor
 	return items, nil
 }
 
+// Trend 返回最近 limit+1 份报告的轻量点（不含 items/raw_output），SQL 按
+// created_at DESC LIMIT 后由 Go 反转为升序；hasMore=还有更早报告。
+// 单条有界查询（limit ≤60），不翻页、不逐份查询。job_id 空串=全部报告
+// （即时巡检 job_id=NULL 的行同样包含）。
+func (s inspectionReportStore) Trend(ctx context.Context, jobID string, limit int) ([]store.InspectionTrendPoint, bool, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 60 {
+		return nil, false, store.ErrInvalid
+	}
+	where := "TRUE"
+	args := make([]any, 0, 2)
+	if jobID != "" {
+		args = append(args, jobID)
+		where = "job_id = $1::uuid"
+	}
+	args = append(args, limit+1)
+	rows, err := s.q.Query(ctx, `
+		SELECT id, created_at, avg_score, server_count, anomaly_count, trigger
+		FROM inspection_reports
+		WHERE `+where+`
+		ORDER BY created_at DESC, id DESC
+		LIMIT $`+strconv.Itoa(len(args)), args...)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	defer rows.Close()
+	// 容量上限写死 61，读循环另有 rows 终止条件，不会随表增长。
+	desc := make([]store.InspectionTrendPoint, 0, limit+1)
+	for rows.Next() {
+		var p store.InspectionTrendPoint
+		var trigger string
+		if err := rows.Scan(&p.ReportID, &p.CreatedAt, &p.AvgScore,
+			&p.ServerCount, &p.AnomalyCount, &trigger); err != nil {
+			return nil, false, mapError(err)
+		}
+		p.CreatedAt = utc(p.CreatedAt)
+		p.Trigger = store.InspectionTrigger(trigger)
+		desc = append(desc, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, mapError(err)
+	}
+	hasMore := len(desc) > limit
+	if hasMore {
+		desc = desc[:limit]
+	}
+	// 反转为 created_at ASC（同时间戳按 id 升序，与查询的 DESC 对称）。
+	for i, j := 0, len(desc)-1; i < j; i, j = i+1, j-1 {
+		desc[i], desc[j] = desc[j], desc[i]
+	}
+	return desc, hasMore, nil
+}
+
 func (s inspectionReportStore) CreateItem(ctx context.Context, p store.CreateInspectionItemParams) (store.InspectionReportItem, error) {
 	var it store.InspectionReportItem
 	err := s.q.QueryRow(ctx, `

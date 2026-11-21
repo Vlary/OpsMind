@@ -62,6 +62,18 @@ describe('describeFailure', () => {
   it('空 message 回退中文文案', () => {
     expect(describeFailure(makeFailure('INTERNAL', ''))).toBe('服务器内部错误');
   });
+
+  it('NETWORK_ERROR 的中文 message 不重复拼接（第 11 轮 low）', () => {
+    // 网络层 TypeError 归一后 message 就是中文映射本身；若再拼 detail
+    // 会显示「网络异常…（网络异常…）」。
+    const message = '网络异常，请检查连接后重试';
+    expect(describeFailure(makeFailure('NETWORK_ERROR', message))).toBe(message);
+    expect(describeFailure(makeFailure('NETWORK_ERROR', ''))).toBe(message);
+    // 代理层 502 仍保留 HTTP 细节。
+    expect(describeFailure(makeFailure('NETWORK_ERROR', 'HTTP 502 Bad Gateway'))).toBe(
+      '网络异常，请检查连接后重试（HTTP 502 Bad Gateway）',
+    );
+  });
 });
 
 // 第 6 轮打磨：后端连接测试失败已透出底层原因（dial 拒绝、无法打开

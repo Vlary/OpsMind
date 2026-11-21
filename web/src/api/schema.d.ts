@@ -977,6 +977,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/monitor/trend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 监控图表时间桶聚合
+         * @description 服务端写死桶宽：window=24h → bucket_seconds=3600（24 桶）；window=7d →
+         *     bucket_seconds=21600（28 桶）。按 UTC 整点对齐（origin 2000-01-01T00:00:00Z），
+         *     to 为当前桶结束时刻、from=to-桶数×桶宽。无样本桶的六个指标字段为 null
+         *     （前端折线断线，不连点）；servers/samples 为 0。聚合在 SQL 单次 date_bin 完成。
+         *     to 是当前桶的结束（未来）时刻，聚合上界单独钳到服务端当前时刻：只计入
+         *     created_at <= now 的样本，时钟超前机器写入的未来样本不得进入当前桶的
+         *     P95/峰值/台数/样本数；桶数与 from/to 不变，无样本桶仍补 null。
+         */
+        get: operations["getMonitorTrend"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/monitor/collector": {
         parameters: {
             query?: never;
@@ -1005,7 +1031,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** 服务器指标时间序列 */
+        /**
+         * 服务器指标时间序列
+         * @description 返回窗口内按 created_at 升序的采样点，不做降采样；最多 minutes×2 点（采集间隔最小 30s，24h 窗口 2880 点）。
+         */
         get: operations["getServerMetrics"];
         put?: never;
         post?: never;
@@ -1058,6 +1087,28 @@ export interface paths {
         };
         /** 告警事件列表 */
         get: operations["listAlertEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/alert-events/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 告警事件图表统计
+         * @description 两条独立 SQL：① 按 fired_at 的 date_bin 时间桶 + count(*) FILTER 分级
+         *     （空桶在服务端补零，时间轴连续）；② 按 rule 聚合 ORDER BY count DESC
+         *     LIMIT top_rules。窗口与桶宽同 GET /api/monitor/trend。
+         */
+        get: operations["getAlertEventStats"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1293,6 +1344,29 @@ export interface paths {
         };
         /** @description 含 items 与 previous_scores（同 job 上一份 per-server 评分，趋势对比）。 */
         get: operations["getInspectionReport"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/inspection/trend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 巡检评分趋势
+         * @description 按报告份数（不是天数）取最近 limit 份：SELECT … ORDER BY created_at DESC
+         *     LIMIT limit+1，Go 反转为 created_at 升序。truncated=true 表示还有更早报告。
+         *     路径刻意不用 /inspection/reports/trend，避免与 /inspection/reports/{id} 的
+         *     静态段/参数段路由冲突。
+         */
+        get: operations["getInspectionTrend"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2975,6 +3049,7 @@ export interface components {
             server_id: string;
             minutes: number;
             points: components["schemas"]["MetricPoint"][];
+            /** @description true 表示窗口内还有更早的点因 2880 点上限（30s 最小采集间隔 × 24h）未返回；仅表示返回集合被截断，不代表更早时段无采样。 */
             truncated: boolean;
         };
         CollectorConfig: {
@@ -2982,6 +3057,11 @@ export interface components {
             interval_seconds: number;
         };
         MonitorOverview: {
+            /**
+             * Format: date-time
+             * @description 本响应生成时的服务端时间；前端用它校正浏览器时钟偏差，所有 「N 前/过期」与未来样本判定均按此时间计算。
+             */
+            server_time: string;
             servers: components["schemas"]["MetricLatestRow"][];
             firing: {
                 info: number;
@@ -2998,10 +3078,51 @@ export interface components {
             } | null;
             collector: components["schemas"]["CollectorConfig"];
         };
+        MonitorTrend: {
+            /** @enum {string} */
+            window: "24h" | "7d";
+            /** @enum {integer} */
+            bucket_seconds: 3600 | 21600;
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /**
+             * Format: date-time
+             * @description 窗口内实际参与聚合的最早采样时刻（已按服务端 now 钳制）；无样本时为 null。
+             */
+            first_sample: string | null;
+            /**
+             * Format: date-time
+             * @description 窗口内实际参与聚合的最晚采样时刻（已按服务端 now 钳制）；无样本时为 null。前端用 last_sample - first_sample 展示真实数据跨度，避免把未满桶的桶跨度说成数据跨度。
+             */
+            last_sample: string | null;
+            points: components["schemas"]["MetricTrendPoint"][];
+        };
+        /** @description 一个时间桶；无样本桶的六个指标字段为 null（前端断线不连点）。 */
+        MetricTrendPoint: {
+            /** Format: date-time */
+            bucket_start: string;
+            cpu_p95: number | null;
+            cpu_avg: number | null;
+            cpu_max: number | null;
+            mem_p95: number | null;
+            mem_avg: number | null;
+            mem_max: number | null;
+            /** @description 桶内覆盖的不同服务器数（count(DISTINCT server_id)）。 */
+            servers: number;
+            /**
+             * Format: int64
+             * @description 桶内样本数（count(*)）。
+             */
+            samples: number;
+        };
         MetricLatestRow: {
             /** Format: uuid */
             server_id: string;
             server_name: string;
+            /** @description 资产平台（JOIN servers.os）。前端按它切换指标副文案：Linux 为 /proc 与 loadavg 口径；Windows 为 Win32_Processor LoadPercentage / Win32_OperatingSystem / ProcessorQueueLength 口径。缺失时前端使用平台中性文案。 */
+            os: components["schemas"]["TargetOS"];
             /** Format: date-time */
             created_at: string;
             cpu_pct: number;
@@ -3110,6 +3231,49 @@ export interface components {
             has_more: boolean;
             /** Format: int64 */
             next_before_id: number | null;
+        };
+        AlertEventStats: {
+            /** @enum {string} */
+            window: "24h" | "7d";
+            /** @enum {integer} */
+            bucket_seconds: 3600 | 21600;
+            /** Format: date-time */
+            from: string;
+            /** Format: date-time */
+            to: string;
+            /**
+             * Format: date-time
+             * @description 本响应生成时的服务端时间；to 对齐到当前桶结束，to > server_time 表示最后一个桶尚未走完（前端标「进行中」）。
+             */
+            server_time: string;
+            /** Format: int64 */
+            total: number;
+            /** Format: int64 */
+            distinct_rules: number;
+            severity_timeline: components["schemas"]["AlertSeverityBucket"][];
+            top_rules: components["schemas"]["AlertRuleStat"][];
+        };
+        AlertSeverityBucket: {
+            /** Format: date-time */
+            bucket_start: string;
+            /** Format: int64 */
+            info: number;
+            /** Format: int64 */
+            warning: number;
+            /** Format: int64 */
+            critical: number;
+        };
+        AlertRuleStat: {
+            /** Format: uuid */
+            rule_id: string;
+            rule_name: string;
+            severity: components["schemas"]["AlertSeverity"];
+            /** Format: int64 */
+            count: number;
+            /** Format: int64 */
+            server_count: number;
+            /** Format: date-time */
+            last_fired_at: string;
         };
         NotificationChannel: {
             /** Format: uuid */
@@ -3280,6 +3444,27 @@ export interface components {
         };
         InspectionReportList: {
             items: components["schemas"]["InspectionReport"][];
+        };
+        InspectionTrend: {
+            /**
+             * Format: uuid
+             * @description 回显请求的 job_id；缺省为 null（全部报告，含即时巡检）。
+             */
+            job_id: string | null;
+            points: components["schemas"]["InspectionTrendPoint"][];
+            /** @description true=还有更早的报告（按报告份数截断，不是时间窗截断）。 */
+            truncated: boolean;
+        };
+        InspectionTrendPoint: {
+            /** Format: uuid */
+            report_id: string;
+            /** Format: date-time */
+            created_at: string;
+            avg_score: number;
+            server_count: number;
+            anomaly_count: number;
+            /** @enum {string} */
+            trigger: "cron" | "manual" | "chat";
         };
         InspectionAnomaly: {
             /** @enum {string} */
@@ -5250,6 +5435,31 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    getMonitorTrend: {
+        parameters: {
+            query?: {
+                window?: "24h" | "7d";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 时间桶序列（≤28 点） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorTrend"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     getCollector: {
         parameters: {
             query?: never;
@@ -5479,6 +5689,12 @@ export interface operations {
                 status?: "firing" | "resolved";
                 severity?: "info" | "warning" | "critical";
                 server_id?: string;
+                /** @description 仅下钻某一规则（与 fired_after/fired_before 可叠加）。 */
+                rule_id?: string;
+                /** @description 触发时间下界（含边界，RFC3339，半开区间 [after, before)）。必须与 fired_before 成对；after<before 且跨度 ≤7d。 */
+                fired_after?: string;
+                /** @description 触发时间上界（不含边界，RFC3339；`fired_at < before`）。与图表桶同为半开区间，必须与 fired_after 成对。 */
+                fired_before?: string;
                 before_id?: number;
                 limit?: number;
             };
@@ -5497,6 +5713,32 @@ export interface operations {
                     "application/json": components["schemas"]["AlertEventList"];
                 };
             };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getAlertEventStats: {
+        parameters: {
+            query?: {
+                window?: "24h" | "7d";
+                top_rules?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 统计 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertEventStats"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             500: components["responses"]["InternalError"];
         };
@@ -6066,6 +6308,32 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getInspectionTrend: {
+        parameters: {
+            query?: {
+                job_id?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 报告趋势（created_at 升序，≤60 点） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InspectionTrend"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             500: components["responses"]["InternalError"];
         };
     };

@@ -1,6 +1,6 @@
 // runner_monitor.go 实现五期 M1 的三个只读 AI 工具（契约 7.1/7.2）：
-//   - get_metrics  指标时间序列（minutes 15..1440，缺省 60；点数上限 1440
-//     ——契约五期行为约定：不做降采样）
+//   - get_metrics  指标时间序列（minutes 15..1440，缺省 60；点数上限随
+//     窗口放大——30s 最小采集间隔 × 24h = 2880，不做降采样）
 //   - list_alerts  告警事件列表（status/severity 过滤，limit ≤200）
 //   - audit_search 审计检索（server/action/resource_type/from/to 时间过滤，
 //     limit ≤200；不返回 hash/prev_hash 内部字段）
@@ -17,11 +17,11 @@ import (
 	"aiops/internal/store"
 )
 
-// getMetricsMinutesLimits 是 minutes 参数边界（契约 7.1）。
+// getMetricsMinutesLimits 是 minutes 参数边界（契约 7.1）。点数上限由
+// store.MetricWindowPointLimit 按窗口推导（30s 最小间隔 → 每分钟 2 点）。
 const (
 	getMetricsMinutesMin = 15
 	getMetricsMinutesMax = 1440
-	getMetricsPointLimit = 1440
 )
 
 // runGetMetrics 实现 get_metrics 工具。
@@ -57,13 +57,31 @@ func (r *Runner) runGetMetrics(ctx context.Context, raw json.RawMessage) toolOut
 		return toolOutcome{Fatal: err}
 	}
 	now := r.now()
+	from := now.Add(-time.Duration(minutes) * time.Minute)
+	limit := store.MetricWindowPointLimit(minutes)
 	points, err := r.st.Metrics().Window(ctx, store.MetricWindow{
 		ServerID: args.ServerID,
-		From:     now.Add(-time.Duration(minutes) * time.Minute),
-		To:       now.Add(time.Minute), Limit: getMetricsPointLimit,
+		From:     from,
+		To:       now.Add(time.Minute), Limit: limit,
 	})
 	if err != nil {
 		return toolOutcome{Fatal: err}
+	}
+	// 与 HTTP 单机时间序列同口径：正好取满 limit 时再探一个更早的点，
+	// 只有确实被上限丢弃才报 truncated（不能按 len==limit 推断，30s 采集
+	// 的 24h 窗口正好 2880 点一个没丢）。
+	truncated := false
+	if limit > 0 && len(points) == limit {
+		older, err := r.st.Metrics().Window(ctx, store.MetricWindow{
+			ServerID: args.ServerID,
+			From:     from,
+			To:       points[0].CreatedAt.Add(-time.Microsecond),
+			Limit:    1,
+		})
+		if err != nil {
+			return toolOutcome{Fatal: err}
+		}
+		truncated = len(older) > 0
 	}
 	out := make([]map[string]any, 0, len(points))
 	for _, m := range points {
@@ -80,7 +98,7 @@ func (r *Runner) runGetMetrics(ctx context.Context, raw json.RawMessage) toolOut
 	}
 	res, _ := json.Marshal(map[string]any{
 		"server_id": args.ServerID, "minutes": minutes,
-		"points": out, "truncated": len(points) >= getMetricsPointLimit,
+		"points": out, "truncated": truncated,
 	})
 	return toolOutcome{Result: res}
 }

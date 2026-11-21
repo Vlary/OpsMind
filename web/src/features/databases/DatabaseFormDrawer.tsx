@@ -578,7 +578,7 @@ export default function DatabaseFormModal({
               <Alert
                 type="info"
                 showIcon
-                message="MongoDB：查询走 JSON 命令文档白名单，只读"
+                title="MongoDB：查询走 JSON 命令文档白名单，只读"
                 description="控制台仅执行 find / aggregate / count / distinct / estimatedDocumentCount；连接参数走结构化字段（不提供 URI 直连形态）。"
                 style={{ marginBottom: 16 }}
               />
@@ -849,7 +849,7 @@ export default function DatabaseFormModal({
           <Alert
             type="info"
             showIcon
-            message="数据库凭据仅用于建立只读连接；SQL 控制台不会执行写操作。"
+            title="数据库凭据仅用于建立只读连接；SQL 控制台不会执行写操作。"
             style={{ marginTop: 4 }}
           />
           <Typography.Text

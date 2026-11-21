@@ -95,6 +95,23 @@ export async function sendMessage(page: Page, text: string) {
   await page.getByRole('button', { name: '发送' }).click();
 }
 
+/**
+ * 等待本轮回答真正结束（done/error/stopped 帧已被前端处理）。
+ *
+ * 「最终正文已上屏」不等于「done 帧已到达」：SSE 在最后一个 token 之后
+ * 还要经过网络与 React 调度，负载下可差数秒。此时点「新建会话」会被
+ * 离开守卫正确拦截，测试若拿正文可见当结束就会偶发失败（第 17 轮全量
+ * 实测 chat.spec / polish-rbac-round3 各命中一次）。
+ *
+ * 「正在生成…」由 MessageList 按 `liveStreaming` 渲染（要求 live 存在且
+ * 尚无 done/error/stopped）——done 帧处理时它先于 `finally` 的 phase 回落
+ * 消失，因此这里等到它消失，正好落在「done 已处理」之后，不会等到
+ * 流关闭的额外窗口。
+ */
+export async function waitForStreamSettled(page: Page) {
+  await expect(page.getByText('正在生成…')).toHaveCount(0, { timeout: 30_000 });
+}
+
 /** 从当前 /c/:id URL 提取会话 ID。 */
 export function conversationIdOf(page: Page): string {
   const match = /\/c\/([0-9a-f-]+)/.exec(page.url());

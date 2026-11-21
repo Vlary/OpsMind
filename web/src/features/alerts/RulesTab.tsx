@@ -122,8 +122,9 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '名称',
       dataIndex: 'name',
+      width: 180,
       render: (name: string, rule) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           {/* 六期打磨 sprint 4（走查 low）：系统哨兵规则的英文原名按名映射
               中文展示（原始名在 Tooltip 与副行保留，供排查/对日志）。 */}
           <Tooltip title={name === ruleDisplayName(name) ? null : name}>
@@ -143,6 +144,7 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '条件',
       key: 'condition',
+      width: 130,
       render: (_, rule) => (
         <span className="opsmind-admin-mono">
           {METRIC_LABELS[rule.metric] ?? rule.metric} {rule.comparator === 'gt' ? '>' : '<'}{' '}
@@ -153,8 +155,9 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '窗口 / 冷却',
       key: 'window',
+      width: 110,
       render: (_, rule) => (
-        <Space direction="vertical" size={0}>
+        <Space orientation="vertical" size={0}>
           <span>持续 {rule.duration_windows} 点</span>
           <span className="opsmind-admin-cell-sub">冷却 {rule.cooldown_seconds}s</span>
         </Space>
@@ -163,7 +166,7 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '等级',
       dataIndex: 'severity',
-      width: 80,
+      width: 70,
       render: (severity: string) => (
         <Tag color={severityColor[severity] ?? 'default'}>
           {SEVERITY_LABELS[severity as keyof typeof SEVERITY_LABELS] ?? severity}
@@ -173,7 +176,7 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '渠道',
       key: 'channel',
-      width: 140,
+      width: 130,
       render: (_, rule) =>
         rule.notify_channel_id ? (
           <Tooltip title={rule.notify_channel_id}>
@@ -186,13 +189,13 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '静默至',
       dataIndex: 'silent_until',
-      width: 150,
+      width: 140,
       render: (value: string | null) => (value ? formatDateTime(value) : '—'),
     },
     {
       title: '启用',
       dataIndex: 'enabled',
-      width: 72,
+      width: 60,
       render: (enabled: boolean, rule) =>
         canConfigure ? (
           <Switch
@@ -211,7 +214,7 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
     {
       title: '操作',
       key: 'actions',
-      width: 96,
+      width: 80,
       render: (_, rule) =>
         canConfigure ? (
           <Space size={0}>
@@ -277,6 +280,10 @@ export default function RulesTab({ onCreate, onEdit }: RulesTabProps) {
         loading={rulesQuery.isLoading}
         columns={columns}
         dataSource={rules}
+        // 走查第 6 轮 medium：390 宽下 8 列表头/内容被压成逐字竖排。
+        // 与事件表同口径固定 900px 表宽横向滚动，列宽合计 900 不再挤压。
+        scroll={{ x: 900 }}
+        tableLayout="fixed"
         locale={{ emptyText: <EmptyState description="暂无告警规则" /> }}
         pagination={false}
       />

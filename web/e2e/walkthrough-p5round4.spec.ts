@@ -117,8 +117,12 @@ test('monitor：插库后有数据态——时间窗切换请求 minutes 且折�
   await page.goto('/monitor');
   await expect(page.getByRole('heading', { name: '监控' })).toBeVisible();
   // 有数据态：服务器选择器 + 概要卡计数 1 台 + 最新值。
-  await expect(page.getByText('当前 12.5%').first()).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByText('CPU 使用率')).toBeVisible();
+  // 第 15 轮起 5 分钟前的样本已越过过期阈值（60s 间隔 → 5min），卡头
+  // 不再称「当前」，改为「最新（N 分钟前）」——值本身仍须跟随 latest。
+  await expect(page.getByText(/最新（\d+ 分钟前） 12\.5%/).first()).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByText('CPU 使用率', { exact: true })).toBeVisible();
 
   // 1h 默认：折线 SVG 存在（单点也应有点标记）。
   await expect(page.locator('.opsmind-admin-page svg').first()).toBeVisible();
@@ -128,8 +132,9 @@ test('monitor：插库后有数据态——时间窗切换请求 minutes 且折�
   await expect
     .poll(() => metricsCalls.filter((m) => m === 360).length, { timeout: 15_000 })
     .toBeGreaterThan(0);
-  // 切 24h → minutes=1440。
-  await page.locator('.ant-segmented-item', { hasText: '24 小时' }).click();
+  // 切 24h → minutes=1440。锚定完整文案：监控看板新增的集群趋势卡也有
+  // 「近 24 小时」选项，子串匹配会命中两个 Segmented item。
+  await page.locator('.ant-segmented-item', { hasText: /^24 小时$/ }).click();
   await expect
     .poll(() => metricsCalls.filter((m) => m === 1440).length, { timeout: 15_000 })
     .toBeGreaterThan(0);
