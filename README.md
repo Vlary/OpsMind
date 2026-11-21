@@ -17,13 +17,29 @@
 
 ![对话主界面](docs/screenshots/chat.png)
 
+**监控** — 集群压力趋势（24 小时 / 7 天分桶）+ 最紧张服务器 Top 12，下方是单机六指标历史曲线：
+
+![监控](docs/screenshots/monitor.png)
+
+**告警** — 按小时 × 严重度的告警分布、最吵规则 Top 8，点击图元下钻到事件表：
+
+![告警](docs/screenshots/alerts.png)
+
+**巡检** — 巡检均分走势与逐份报告（评分分档着色，异常项可下钻）：
+
+![巡检](docs/screenshots/inspections.png)
+
+**审批** — 待处理队列：发起人、目标服务器、待执行命令、风险原因与倒计时：
+
+![审批](docs/screenshots/approvals.png)
+
+**用户与角色** — 四角色 RBAC，权限由服务端按角色计算，界面只按权限展示可用操作：
+
+![用户与角色](docs/screenshots/users.png)
+
 **服务器资产** — Linux / Windows / 网络设备统一纳管，含自动执行策略与连接测试：
 
 ![服务器资产](docs/screenshots/servers.png)
-
-**监控** — 集群态势看板、六指标趋势、告警状态与采集配置：
-
-![监控](docs/screenshots/monitor.png)
 
 **审计** — 只追加日志，可按动作/目标类型/目标 ID 筛选：
 
